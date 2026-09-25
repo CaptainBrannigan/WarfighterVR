@@ -1,0 +1,340 @@
+// ---- Created with 3Dmigoto v1.4.9 on Wed Jul 29 12:52:00 2026
+
+cbuffer _Globals : register(b0)
+{
+  float4x3 boneVectors[60] : packoffset(c0);
+}
+
+cbuffer viewConstants : register(b2)
+{
+  float time : packoffset(c0);
+  float4 screenSize : packoffset(c1);
+  float3 debugNonFiniteColor : packoffset(c2);
+  float4x4 viewMatrix : packoffset(c3);
+  float4x4 projMatrix : packoffset(c7);
+  float4x4 viewProjMatrix : packoffset(c11);
+  float4x4 crViewProjMatrix : packoffset(c15);
+  float4 viewportZMinMaxKzKw : packoffset(c19);
+  float3 cameraPos : packoffset(c20);
+  float3 transparentStartAndEndAndClamp : packoffset(c21);
+}
+
+
+
+// 3Dmigoto declarations
+#define cmp -
+Texture1D<float4> IniParams : register(t120);
+Texture2D<float4> StereoParams : register(t125);
+
+
+void main(
+  float4 v0 : TEXCOORD0,
+  uint4 v1 : TEXCOORD1,
+  float4 v2 : TEXCOORD2,
+  float4 v3 : TEXCOORD3,
+  float4 v4 : TEXCOORD4,
+  float4 v5 : TEXCOORD5,
+  float2 v6 : TEXCOORD6,
+  out float4 o0 : SV_Position0,
+  out float4 o1 : TEXCOORD0,
+  out float4 o2 : TEXCOORD1,
+  out float4 o3 : TEXCOORD2,
+  out float4 o4 : TEXCOORD3,
+  out float4 o5 : TEXCOORD4)
+{
+  float4 r0,r1,r2,r3,r4;
+  uint4 bitmask, uiDest;
+  float4 fDest;
+
+  r0.xyz = v0.xyz;
+  r0.w = 1;
+  r1.xyzw = (int4)v1.wzyx * int4(3,3,3,3);
+  r2.x = dot(r0.xyzw, boneVectors[v1.z]._m00_m10_m20_m30);
+  r2.y = dot(r0.xyzw, boneVectors[v1.z]._m01_m11_m21_m31);
+  r2.z = dot(r0.xyzw, boneVectors[v1.z]._m02_m12_m22_m32);
+  r2.xyz = v2.zzz * r2.xyz;
+  r3.x = dot(r0.xyzw, boneVectors[v1.w]._m00_m10_m20_m30);
+  r3.y = dot(r0.xyzw, boneVectors[v1.w]._m01_m11_m21_m31);
+  r3.z = dot(r0.xyzw, boneVectors[v1.w]._m02_m12_m22_m32);
+  r2.xyz = r3.xyz * v2.www + r2.xyz;
+  r3.x = dot(r0.xyzw, boneVectors[v1.y]._m00_m10_m20_m30);
+  r3.y = dot(r0.xyzw, boneVectors[v1.y]._m01_m11_m21_m31);
+  r3.z = dot(r0.xyzw, boneVectors[v1.y]._m02_m12_m22_m32);
+  r2.xyz = r3.xyz * v2.yyy + r2.xyz;
+  r3.x = dot(r0.xyzw, boneVectors[v1.x]._m00_m10_m20_m30);
+  r3.y = dot(r0.xyzw, boneVectors[v1.x]._m01_m11_m21_m31);
+  r3.z = dot(r0.xyzw, boneVectors[v1.x]._m02_m12_m22_m32);
+  r0.xyz = r3.xyz * v2.xxx + r2.xyz;
+  r2.xyz = -cameraPos.xyz + r0.xyz;
+  o1.xyz = r0.xyz;
+  r2.w = 1;
+  o0.x = dot(r2.xyzw, crViewProjMatrix._m00_m10_m20_m30);
+  o0.y = dot(r2.xyzw, crViewProjMatrix._m01_m11_m21_m31);
+  o0.z = dot(r2.xyzw, crViewProjMatrix._m02_m12_m22_m32);
+  o0.w = dot(r2.xyzw, crViewProjMatrix._m03_m13_m23_m33);
+  o1.w = 0;
+  o2.w = 0;
+  r0.xyz = -v4.yzx * v3.zxy;
+  r0.xyz = v3.yzx * -v4.zxy + -r0.xyz;
+  r0.xyz = v0.www * r0.xyz;
+  r2.x = dot(r0.xyz, boneVectors[v1.z]._m00_m10_m20);
+  r2.y = dot(r0.xyz, boneVectors[v1.z]._m01_m11_m21);
+  r2.z = dot(r0.xyz, boneVectors[v1.z]._m02_m12_m22);
+  r2.xyz = v2.zzz * r2.xyz;
+  r3.x = dot(r0.xyz, boneVectors[v1.w]._m00_m10_m20);
+  r3.y = dot(r0.xyz, boneVectors[v1.w]._m01_m11_m21);
+  r3.z = dot(r0.xyz, boneVectors[v1.w]._m02_m12_m22);
+  r2.xyz = r3.xyz * v2.www + r2.xyz;
+  r3.x = dot(r0.xyz, boneVectors[v1.y]._m00_m10_m20);
+  r3.y = dot(r0.xyz, boneVectors[v1.y]._m01_m11_m21);
+  r3.z = dot(r0.xyz, boneVectors[v1.y]._m02_m12_m22);
+  r2.xyz = r3.xyz * v2.yyy + r2.xyz;
+  r3.x = dot(r0.xyz, boneVectors[v1.x]._m00_m10_m20);
+  r3.y = dot(r0.xyz, boneVectors[v1.x]._m01_m11_m21);
+  r3.z = dot(r0.xyz, boneVectors[v1.x]._m02_m12_m22);
+  r0.xyz = r3.xyz * v2.xxx + r2.xyz;
+  r0.w = dot(r0.xyz, r0.xyz);
+  r0.w = rsqrt(r0.w);
+  r0.xyz = r0.xyz * r0.www;
+  o2.y = r0.x;
+  r2.x = dot(-v4.xyz, boneVectors[v1.z]._m00_m10_m20);
+  r2.y = dot(-v4.xyz, boneVectors[v1.z]._m01_m11_m21);
+  r2.z = dot(-v4.xyz, boneVectors[v1.z]._m02_m12_m22);
+  r2.xyz = v2.zzz * r2.xyz;
+  r3.x = dot(-v4.xyz, boneVectors[v1.w]._m00_m10_m20);
+  r3.y = dot(-v4.xyz, boneVectors[v1.w]._m01_m11_m21);
+  r3.z = dot(-v4.xyz, boneVectors[v1.w]._m02_m12_m22);
+  r2.xyz = r3.xyz * v2.www + r2.xyz;
+  r3.x = dot(-v4.xyz, boneVectors[v1.y]._m00_m10_m20);
+  r3.y = dot(-v4.xyz, boneVectors[v1.y]._m01_m11_m21);
+  r3.z = dot(-v4.xyz, boneVectors[v1.y]._m02_m12_m22);
+  r2.xyz = r3.xyz * v2.yyy + r2.xyz;
+  r3.x = dot(-v4.xyz, boneVectors[v1.x]._m00_m10_m20);
+  r3.y = dot(-v4.xyz, boneVectors[v1.x]._m01_m11_m21);
+  r3.z = dot(-v4.xyz, boneVectors[v1.x]._m02_m12_m22);
+  r2.xyz = r3.xyz * v2.xxx + r2.xyz;
+  r0.x = dot(r2.xyz, r2.xyz);
+  r0.x = rsqrt(r0.x);
+  r2.xyz = r2.xyz * r0.xxx;
+  o2.x = r2.x;
+  r3.x = dot(v3.xyz, boneVectors[v1.z]._m00_m10_m20);
+  r3.y = dot(v3.xyz, boneVectors[v1.z]._m01_m11_m21);
+  r3.z = dot(v3.xyz, boneVectors[v1.z]._m02_m12_m22);
+  r3.xyz = v2.zzz * r3.xyz;
+  r4.x = dot(v3.xyz, boneVectors[v1.w]._m00_m10_m20);
+  r4.y = dot(v3.xyz, boneVectors[v1.w]._m01_m11_m21);
+  r4.z = dot(v3.xyz, boneVectors[v1.w]._m02_m12_m22);
+  r3.xyz = r4.xyz * v2.www + r3.xyz;
+  r4.x = dot(v3.xyz, boneVectors[v1.y]._m00_m10_m20);
+  r4.y = dot(v3.xyz, boneVectors[v1.y]._m01_m11_m21);
+  r4.z = dot(v3.xyz, boneVectors[v1.y]._m02_m12_m22);
+  r1.xyz = r4.xyz * v2.yyy + r3.xyz;
+  r3.x = dot(v3.xyz, boneVectors[v1.x]._m00_m10_m20);
+  r3.y = dot(v3.xyz, boneVectors[v1.x]._m01_m11_m21);
+  r3.z = dot(v3.xyz, boneVectors[v1.x]._m02_m12_m22);
+  r1.xyz = r3.xyz * v2.xxx + r1.xyz;
+  r0.x = dot(r1.xyz, r1.xyz);
+  r0.x = rsqrt(r0.x);
+  r1.xyz = r1.xyz * r0.xxx;
+  o2.z = r1.x;
+  o3.y = r0.y;
+  o4.y = r0.z;
+  o3.x = r2.y;
+  o4.x = r2.z;
+  o3.z = r1.y;
+  o4.z = r1.z;
+  o3.w = 0;
+  o4.w = 0;
+  o5.xy = v5.xy;
+  o5.zw = float2(0,0);
+  return;
+}
+
+/*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+//
+// Generated by Microsoft (R) HLSL Shader Compiler 9.29.952.3111
+//
+//   using 3Dmigoto v1.4.9 on Wed Jul 29 12:52:00 2026
+//
+//
+// Buffer Definitions:
+//
+// cbuffer $Globals
+// {
+//
+//   float4x3 boneVectors[60];          // Offset:    0 Size:  2880
+//
+// }
+//
+// cbuffer viewConstants
+// {
+//
+//   float time;                        // Offset:    0 Size:     4 [unused]
+//   float4 screenSize;                 // Offset:   16 Size:    16 [unused]
+//   float3 debugNonFiniteColor;        // Offset:   32 Size:    12 [unused]
+//   float4x4 viewMatrix;               // Offset:   48 Size:    64 [unused]
+//   float4x4 projMatrix;               // Offset:  112 Size:    64 [unused]
+//   float4x4 viewProjMatrix;           // Offset:  176 Size:    64 [unused]
+//   float4x4 crViewProjMatrix;         // Offset:  240 Size:    64
+//   float4 viewportZMinMaxKzKw;        // Offset:  304 Size:    16 [unused]
+//   float3 cameraPos;                  // Offset:  320 Size:    12
+//   float3 transparentStartAndEndAndClamp;// Offset:  336 Size:    12 [unused]
+//
+// }
+//
+//
+// Resource Bindings:
+//
+// Name                                 Type  Format         Dim Slot Elements
+// ------------------------------ ---------- ------- ----------- ---- --------
+// $Globals                          cbuffer      NA          NA    0        1
+// viewConstants                     cbuffer      NA          NA    2        1
+//
+//
+//
+// Input signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// TEXCOORD                 0   xyzw        0     NONE   float   xyzw
+// TEXCOORD                 1   xyzw        1     NONE    uint   xyzw
+// TEXCOORD                 2   xyzw        2     NONE   float   xyzw
+// TEXCOORD                 3   xyzw        3     NONE   float   xyz
+// TEXCOORD                 4   xyzw        4     NONE   float   xyz
+// TEXCOORD                 5   xyzw        5     NONE   float   xy
+// TEXCOORD                 6   xy          6     NONE   float
+//
+//
+// Output signature:
+//
+// Name                 Index   Mask Register SysValue  Format   Used
+// -------------------- ----- ------ -------- -------- ------- ------
+// SV_Position              0   xyzw        0      POS   float   xyzw
+// TEXCOORD                 0   xyzw        1     NONE   float   xyzw
+// TEXCOORD                 1   xyzw        2     NONE   float   xyzw
+// TEXCOORD                 2   xyzw        3     NONE   float   xyzw
+// TEXCOORD                 3   xyzw        4     NONE   float   xyzw
+// TEXCOORD                 4   xyzw        5     NONE   float   xyzw
+//
+vs_5_0
+dcl_globalFlags refactoringAllowed
+dcl_constantbuffer CB0[180], dynamicIndexed
+dcl_constantbuffer CB2[21], immediateIndexed
+dcl_input v0.xyzw
+dcl_input v1.xyzw
+dcl_input v2.xyzw
+dcl_input v3.xyz
+dcl_input v4.xyz
+dcl_input v5.xy
+dcl_output_siv o0.xyzw, position
+dcl_output o1.xyzw
+dcl_output o2.xyzw
+dcl_output o3.xyzw
+dcl_output o4.xyzw
+dcl_output o5.xyzw
+dcl_temps 5
+mov r0.xyz, v0.xyzx
+mov r0.w, l(1.000000)
+imul null, r1.xyzw, v1.wzyx, l(3, 3, 3, 3)
+dp4 r2.x, r0.xyzw, cb0[r1.y + 0].xyzw
+dp4 r2.y, r0.xyzw, cb0[r1.y + 1].xyzw
+dp4 r2.z, r0.xyzw, cb0[r1.y + 2].xyzw
+mul r2.xyz, r2.xyzx, v2.zzzz
+dp4 r3.x, r0.xyzw, cb0[r1.x + 0].xyzw
+dp4 r3.y, r0.xyzw, cb0[r1.x + 1].xyzw
+dp4 r3.z, r0.xyzw, cb0[r1.x + 2].xyzw
+mad r2.xyz, r3.xyzx, v2.wwww, r2.xyzx
+dp4 r3.x, r0.xyzw, cb0[r1.z + 0].xyzw
+dp4 r3.y, r0.xyzw, cb0[r1.z + 1].xyzw
+dp4 r3.z, r0.xyzw, cb0[r1.z + 2].xyzw
+mad r2.xyz, r3.xyzx, v2.yyyy, r2.xyzx
+dp4 r3.x, r0.xyzw, cb0[r1.w + 0].xyzw
+dp4 r3.y, r0.xyzw, cb0[r1.w + 1].xyzw
+dp4 r3.z, r0.xyzw, cb0[r1.w + 2].xyzw
+mad r0.xyz, r3.xyzx, v2.xxxx, r2.xyzx
+add r2.xyz, r0.xyzx, -cb2[20].xyzx
+mov o1.xyz, r0.xyzx
+mov r2.w, l(1.000000)
+dp4 o0.x, r2.xyzw, cb2[15].xyzw
+dp4 o0.y, r2.xyzw, cb2[16].xyzw
+dp4 o0.z, r2.xyzw, cb2[17].xyzw
+dp4 o0.w, r2.xyzw, cb2[18].xyzw
+mov o1.w, l(0)
+mov o2.w, l(0)
+mul r0.xyz, v3.zxyz, -v4.yzxy
+mad r0.xyz, v3.yzxy, -v4.zxyz, -r0.xyzx
+mul r0.xyz, r0.xyzx, v0.wwww
+dp3 r2.x, r0.xyzx, cb0[r1.y + 0].xyzx
+dp3 r2.y, r0.xyzx, cb0[r1.y + 1].xyzx
+dp3 r2.z, r0.xyzx, cb0[r1.y + 2].xyzx
+mul r2.xyz, r2.xyzx, v2.zzzz
+dp3 r3.x, r0.xyzx, cb0[r1.x + 0].xyzx
+dp3 r3.y, r0.xyzx, cb0[r1.x + 1].xyzx
+dp3 r3.z, r0.xyzx, cb0[r1.x + 2].xyzx
+mad r2.xyz, r3.xyzx, v2.wwww, r2.xyzx
+dp3 r3.x, r0.xyzx, cb0[r1.z + 0].xyzx
+dp3 r3.y, r0.xyzx, cb0[r1.z + 1].xyzx
+dp3 r3.z, r0.xyzx, cb0[r1.z + 2].xyzx
+mad r2.xyz, r3.xyzx, v2.yyyy, r2.xyzx
+dp3 r3.x, r0.xyzx, cb0[r1.w + 0].xyzx
+dp3 r3.y, r0.xyzx, cb0[r1.w + 1].xyzx
+dp3 r3.z, r0.xyzx, cb0[r1.w + 2].xyzx
+mad r0.xyz, r3.xyzx, v2.xxxx, r2.xyzx
+dp3 r0.w, r0.xyzx, r0.xyzx
+rsq r0.w, r0.w
+mul r0.xyz, r0.wwww, r0.xyzx
+mov o2.y, r0.x
+dp3 r2.x, -v4.xyzx, cb0[r1.y + 0].xyzx
+dp3 r2.y, -v4.xyzx, cb0[r1.y + 1].xyzx
+dp3 r2.z, -v4.xyzx, cb0[r1.y + 2].xyzx
+mul r2.xyz, r2.xyzx, v2.zzzz
+dp3 r3.x, -v4.xyzx, cb0[r1.x + 0].xyzx
+dp3 r3.y, -v4.xyzx, cb0[r1.x + 1].xyzx
+dp3 r3.z, -v4.xyzx, cb0[r1.x + 2].xyzx
+mad r2.xyz, r3.xyzx, v2.wwww, r2.xyzx
+dp3 r3.x, -v4.xyzx, cb0[r1.z + 0].xyzx
+dp3 r3.y, -v4.xyzx, cb0[r1.z + 1].xyzx
+dp3 r3.z, -v4.xyzx, cb0[r1.z + 2].xyzx
+mad r2.xyz, r3.xyzx, v2.yyyy, r2.xyzx
+dp3 r3.x, -v4.xyzx, cb0[r1.w + 0].xyzx
+dp3 r3.y, -v4.xyzx, cb0[r1.w + 1].xyzx
+dp3 r3.z, -v4.xyzx, cb0[r1.w + 2].xyzx
+mad r2.xyz, r3.xyzx, v2.xxxx, r2.xyzx
+dp3 r0.x, r2.xyzx, r2.xyzx
+rsq r0.x, r0.x
+mul r2.xyz, r0.xxxx, r2.xyzx
+mov o2.x, r2.x
+dp3 r3.x, v3.xyzx, cb0[r1.y + 0].xyzx
+dp3 r3.y, v3.xyzx, cb0[r1.y + 1].xyzx
+dp3 r3.z, v3.xyzx, cb0[r1.y + 2].xyzx
+mul r3.xyz, r3.xyzx, v2.zzzz
+dp3 r4.x, v3.xyzx, cb0[r1.x + 0].xyzx
+dp3 r4.y, v3.xyzx, cb0[r1.x + 1].xyzx
+dp3 r4.z, v3.xyzx, cb0[r1.x + 2].xyzx
+mad r3.xyz, r4.xyzx, v2.wwww, r3.xyzx
+dp3 r4.x, v3.xyzx, cb0[r1.z + 0].xyzx
+dp3 r4.y, v3.xyzx, cb0[r1.z + 1].xyzx
+dp3 r4.z, v3.xyzx, cb0[r1.z + 2].xyzx
+mad r1.xyz, r4.xyzx, v2.yyyy, r3.xyzx
+dp3 r3.x, v3.xyzx, cb0[r1.w + 0].xyzx
+dp3 r3.y, v3.xyzx, cb0[r1.w + 1].xyzx
+dp3 r3.z, v3.xyzx, cb0[r1.w + 2].xyzx
+mad r1.xyz, r3.xyzx, v2.xxxx, r1.xyzx
+dp3 r0.x, r1.xyzx, r1.xyzx
+rsq r0.x, r0.x
+mul r1.xyz, r0.xxxx, r1.xyzx
+mov o2.z, r1.x
+mov o3.y, r0.y
+mov o4.y, r0.z
+mov o3.x, r2.y
+mov o4.x, r2.z
+mov o3.z, r1.y
+mov o4.z, r1.z
+mov o3.w, l(0)
+mov o4.w, l(0)
+mov o5.xy, v5.xyxx
+mov o5.zw, l(0,0,0,0)
+ret
+// Approximately 102 instruction slots used
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/

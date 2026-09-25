@@ -1,0 +1,655 @@
+#include "openvr_direct.h"
+
+#include "../sdk/logging.h"
+#include "../sdk/vr_math.h"
+#include "../hooks/companion_bridge.h"
+#include "../hooks/render_pose_stamp.h"
+#include "../shared/ipc_protocol.h"
+
+#include <windows.h>
+#include <d3d11.h>
+#include <dxgi.h>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <thread>
+
+namespace mohw::openvr_direct {
+namespace {
+
+constexpr const char* kLogFile = "mohwvr_openvr_direct.log";
+
+// Minimal OpenVR C-ABI surface, loaded dynamically -- see openvr_direct.h's top comment for why (DRM).
+using PFN_VR_IsHmdPresent = bool(__cdecl*)();
+using PFN_VR_InitInternal2 = uint32_t(__cdecl*)(int* peError, int eApplicationType, const char* pStartupInfo);
+using PFN_VR_GetGenericInterface = void*(__cdecl*)(const char* pchInterfaceVersion, int* peError);
+using PFN_VR_IsInterfaceVersionValid = bool(__cdecl*)(const char* pchInterfaceVersion);
+
+constexpr int kInitError_None = 0;
+constexpr int kAppType_Scene = 1; // EVRApplicationType::VRApplication_Scene
+
+// Minimal stand-in for vr::Texture_t -- plain data, no vtable, no ABI risk reproducing it by hand.
+struct DirectTexture
+{
+    void* handle;
+    int eType;       // ETextureType::TextureType_DirectX = 0
+    int eColorSpace; // EColorSpace::ColorSpace_Auto = 0
+};
+
+// Minimal stand-in for vr::VRTextureWithPose_t (third_party/openvr/headers/openvr.h): a DirectTexture
+// (Texture_t) followed by mDeviceToAbsoluteTracking, "the actual pose used to render scene textures" --
+// used with the Submit_TextureWithPose flag for render-pose stamping (see render_pose_stamp.h's
+// GetPendingRenderPoseStamp comment). Field order/layout must match Texture_t exactly followed by the
+// matrix, same "plain data, no vtable" reasoning as DirectTexture above.
+struct DirectTextureWithPose
+{
+    void* handle;
+    int eType;
+    int eColorSpace;
+    float mDeviceToAbsoluteTracking[3][4];
+};
+
+constexpr int kSubmitFlag_TextureWithPose = 0x08; // vr::Submit_TextureWithPose
+
+// IVRCompositor methods called through the raw vtable (IVRCompositor_029): SetTrackingSpace(0), GetTrackingSpace(1),
+// WaitGetPoses(2), GetLastPoses(3), GetLastPoseForTrackedDeviceIndex(4), GetSubmitTexture(5), Submit(6). C++ virtual
+// calls on Windows x86 use __thiscall (this in ECX).
+constexpr int kWaitGetPosesVtableIndex = 2;
+constexpr int kSubmitVtableIndex = 6;
+using PFN_WaitGetPoses = int(__thiscall*)(void* self, void* pRenderPoseArray, uint32_t unRenderPoseArrayCount, void* pGamePoseArray,
+                                            uint32_t unGamePoseArrayCount);
+using PFN_Submit = int(__thiscall*)(void* self, int eEye, const DirectTexture* pTexture, const void* pBounds, int nSubmitFlags);
+
+// IVRSystem methods, also called through the raw vtable (IVRSystem_026): GetRecommendedRenderTargetSize(0),
+// GetProjectionMatrix(1), GetProjectionRaw(2) -- see third_party/openvr/headers/openvr.h's IVRSystem class for the
+// declaration order this indexing depends on.
+constexpr int kGetProjectionRawVtableIndex = 2;
+using PFN_GetProjectionRaw = void(__thiscall*)(void* self, int eEye, float* pfLeft, float* pfRight, float* pfTop, float* pfBottom);
+
+// Byte-for-byte stand-in for vr::TrackedDevicePose_t (third_party/openvr/headers/openvr.h) -- same "plain data, no
+// vtable" reasoning as DirectTexture above. mDeviceToAbsoluteTracking is a row-major 3x4 matrix (float m[row][col]):
+// columns 0-2 are the right/up/forward basis vectors, column 3 is the position, all in the compositor's tracking
+// space (irrelevant which one -- everything this pipeline does with it is relative to a live recenter, see
+// hooks/aiming_controller_hook.cpp's Recenter/hooks/head_position.cpp).
+struct RawTrackedDevicePose
+{
+    float deviceToAbsoluteTracking[3][4];
+    float velocity[3];
+    float angularVelocity[3];
+    int trackingResult; // ETrackingResult -- unused, kept only so the struct's size/layout matches exactly
+    bool poseIsValid;
+    bool deviceIsConnected;
+};
+
+// Standard robust rotation-matrix -> quaternion conversion (Shepperd's method), applied to
+// RawTrackedDevicePose::deviceToAbsoluteTracking's upper-left 3x3. OpenVR and OpenXR share the same coordinate
+// convention (right-handed, Y-up, -Z-forward), so the result plugs directly into the SAME HeadPoseBlock consumers
+// (hooks/aiming_controller_hook.cpp, hooks/head_position.cpp) that were built against the companion's
+// OpenXR-sourced quaternion -- no axis remapping needed.
+mohw::Quat MatrixToQuat(const float m[3][4])
+{
+    float r00 = m[0][0], r01 = m[0][1], r02 = m[0][2];
+    float r10 = m[1][0], r11 = m[1][1], r12 = m[1][2];
+    float r20 = m[2][0], r21 = m[2][1], r22 = m[2][2];
+    float trace = r00 + r11 + r22;
+    mohw::Quat q{};
+    if (trace > 0.0f)
+    {
+        float s = sqrtf(trace + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (r21 - r12) / s;
+        q.y = (r02 - r20) / s;
+        q.z = (r10 - r01) / s;
+    }
+    else if (r00 > r11 && r00 > r22)
+    {
+        float s = sqrtf(1.0f + r00 - r11 - r22) * 2.0f;
+        q.w = (r21 - r12) / s;
+        q.x = 0.25f * s;
+        q.y = (r01 + r10) / s;
+        q.z = (r02 + r20) / s;
+    }
+    else if (r11 > r22)
+    {
+        float s = sqrtf(1.0f + r11 - r00 - r22) * 2.0f;
+        q.w = (r02 - r20) / s;
+        q.x = (r01 + r10) / s;
+        q.y = 0.25f * s;
+        q.z = (r12 + r21) / s;
+    }
+    else
+    {
+        float s = sqrtf(1.0f + r22 - r00 - r11) * 2.0f;
+        q.w = (r10 - r01) / s;
+        q.x = (r02 + r20) / s;
+        q.y = (r12 + r21) / s;
+        q.z = 0.25f * s;
+    }
+    return q;
+}
+
+// Inverse of MatrixToQuat above (render-pose stamping port -- see render_pose_stamp.h's GetPendingRenderPoseStamp
+// comment). Places the quaternion's rotated identity basis vectors into the SAME row/column slots MatrixToQuat
+// reads them from (column 0/1/2 = the rotated X/Y/Z axes), so this is a true round-trip of that function
+// regardless of what those axes physically mean in OpenVR's space -- MatrixToQuat(QuatToDeviceMatrix(q)) == q for
+// any q built from a real MatrixToQuat output (which is exactly how render_pose_stamp.cpp's stamped quaternion is
+// derived: rotating a MatrixToQuat-sourced HeadPoseBlock orientation by a small arc). posOverride supplies
+// m[row][3]; rotation-only otherwise.
+void QuatToDeviceMatrix(const mohw::Quat& q, const float pos[3], float outM[3][4])
+{
+    mohw::Vec3 axisX{1.0f, 0.0f, 0.0f};
+    mohw::Vec3 axisY{0.0f, 1.0f, 0.0f};
+    mohw::Vec3 axisZ{0.0f, 0.0f, 1.0f};
+    mohw::Vec3 col0 = mohw::QuatRotateVector(q, axisX);
+    mohw::Vec3 col1 = mohw::QuatRotateVector(q, axisY);
+    mohw::Vec3 col2 = mohw::QuatRotateVector(q, axisZ);
+    outM[0][0] = col0.x; outM[1][0] = col0.y; outM[2][0] = col0.z;
+    outM[0][1] = col1.x; outM[1][1] = col1.y; outM[2][1] = col1.z;
+    outM[0][2] = col2.x; outM[1][2] = col2.y; outM[2][2] = col2.z;
+    outM[0][3] = pos[0]; outM[1][3] = pos[1]; outM[2][3] = pos[2];
+}
+
+enum class ConnectState : int
+{
+    NotStarted = 0,
+    Connecting = 1,
+    Connected = 2,
+    Failed = 3,
+};
+std::atomic<int> g_state{static_cast<int>(ConnectState::NotStarted)};
+
+// Only meaningful once g_state == Connected. Plain (non-atomic) globals are safe here: they're fully populated on
+// the connect thread BEFORE the release-store to g_state below, and only ever read on the render thread AFTER an
+// acquire-load observes Connected -- standard one-time background-init handoff.
+void* g_compositor = nullptr;
+PFN_WaitGetPoses g_waitGetPoses = nullptr;
+PFN_Submit g_submit = nullptr;
+
+// Separate-device design (see openvr_direct.h's top comment for why): a second, fully independent ID3D11Device
+// (g_ownDevice below) is created on the SAME adapter as the game's device. The game thread creates its eye
+// textures with D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX and does CopyResource into them; a dedicated thread that
+// owns g_ownDevice exclusively opens those same textures via OpenSharedResource (standard cross-device GPU
+// resource sharing) and performs the paired WaitGetPoses+Submit sequence entirely on its own device/thread.
+ID3D11Texture2D* g_leftTex = nullptr;
+ID3D11Texture2D* g_rightTex = nullptr;
+UINT g_leftWidth = 0, g_leftHeight = 0;
+DXGI_FORMAT g_leftFormat = DXGI_FORMAT_UNKNOWN;
+UINT g_rightWidth = 0, g_rightHeight = 0;
+DXGI_FORMAT g_rightFormat = DXGI_FORMAT_UNKNOWN;
+
+// Published by the game thread (EnsurePersistentEyeTexture) whenever it (re)creates a shared eye texture;
+// consumed by SubmitThreadProc, which re-opens the texture on g_ownDevice whenever the generation changes.
+// HANDLE from IDXGIResource::GetSharedHandle is a "weak" reference tied to the source texture's lifetime --
+// no separate CloseHandle needed, unlike the newer NT-handle sharing API.
+std::atomic<HANDLE> g_leftSharedHandle{nullptr};
+std::atomic<HANDLE> g_rightSharedHandle{nullptr};
+std::atomic<int> g_leftGeneration{0};
+std::atomic<int> g_rightGeneration{0};
+
+// IDXGIKeyedMutex gives real GPU-level mutual exclusion between the game device's CopyResource writes and
+// g_ownDevice's Submit reads of the same shared texture -- D3D11_RESOURCE_MISC_SHARED alone allowed a genuine
+// torn-frame race between the two independent devices. Used as a plain lock (both sides always
+// Acquire(0)/Release(0), not a producer/consumer ping-pong key) since Submit must run for BOTH eyes every loop
+// iteration regardless of whether that eye rendered anything new this time (the other eye resubmits its last
+// content under alternating-eye). Game-thread-only pointers, created alongside g_leftTex/g_rightTex.
+IDXGIKeyedMutex* g_leftKeyedMutexGame = nullptr;
+IDXGIKeyedMutex* g_rightKeyedMutexGame = nullptr;
+constexpr DWORD kKeyedMutexTimeoutMs = 5; // bounded on purpose -- never let either side risk a real stall over this
+
+// The second, independent D3D11 device (see the design comment near g_leftTex) -- created once, lazily, the first
+// time UpdateOpenVrDirect runs with a real game device available (needed to find the matching adapter). Written
+// once on the game thread strictly BEFORE SubmitThreadProc is started (std::thread's constructor establishes a
+// happens-before relationship for everything written before it), then read-only for the rest of the process's
+// life -- no atomics needed for g_ownDevice itself.
+ID3D11Device* g_ownDevice = nullptr;
+std::atomic<bool> g_ownDeviceStarted{false};
+
+bool EnsurePersistentEyeTexture(ID3D11Device* device, ID3D11Texture2D*& tex, UINT& cachedWidth, UINT& cachedHeight,
+                                  DXGI_FORMAT& cachedFormat, const D3D11_TEXTURE2D_DESC& sourceDesc,
+                                  std::atomic<HANDLE>& outSharedHandle, std::atomic<int>& outGeneration,
+                                  IDXGIKeyedMutex*& outKeyedMutex)
+{
+    if (tex && cachedWidth == sourceDesc.Width && cachedHeight == sourceDesc.Height && cachedFormat == sourceDesc.Format)
+        return true;
+
+    if (tex)
+    {
+        tex->Release();
+        tex = nullptr;
+    }
+    if (outKeyedMutex)
+    {
+        outKeyedMutex->Release();
+        outKeyedMutex = nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = sourceDesc.Width;
+    desc.Height = sourceDesc.Height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = sourceDesc.Format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    // KEYEDMUTEX instead of plain SHARED -- the two flags are mutually exclusive per the D3D11 docs. Gives real
+    // GPU-level mutual exclusion between the game's device and g_ownDevice's access to this same resource.
+    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+
+    HRESULT hr = device->CreateTexture2D(&desc, nullptr, &tex);
+    if (FAILED(hr))
+    {
+        MOHW_LOG(kLogFile, "EnsurePersistentEyeTexture: CreateTexture2D(%ux%u fmt=%d) FAILED 0x%08lX", desc.Width, desc.Height,
+                  static_cast<int>(desc.Format), hr);
+        cachedWidth = cachedHeight = 0;
+        cachedFormat = DXGI_FORMAT_UNKNOWN;
+        return false;
+    }
+
+    cachedWidth = desc.Width;
+    cachedHeight = desc.Height;
+    cachedFormat = desc.Format;
+
+    if (FAILED(tex->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&outKeyedMutex))))
+    {
+        MOHW_LOG(kLogFile, "EnsurePersistentEyeTexture: QueryInterface(IDXGIKeyedMutex) FAILED");
+        outKeyedMutex = nullptr;
+    }
+
+    IDXGIResource* dxgiRes = nullptr;
+    if (SUCCEEDED(tex->QueryInterface(__uuidof(IDXGIResource), reinterpret_cast<void**>(&dxgiRes))) && dxgiRes)
+    {
+        HANDLE sharedHandle = nullptr;
+        if (SUCCEEDED(dxgiRes->GetSharedHandle(&sharedHandle)) && sharedHandle)
+        {
+            outSharedHandle.store(sharedHandle, std::memory_order_relaxed);
+            outGeneration.fetch_add(1, std::memory_order_release); // release: pairs with SubmitThreadProc's acquire-load
+        }
+        else
+        {
+            MOHW_LOG(kLogFile, "EnsurePersistentEyeTexture: GetSharedHandle FAILED");
+        }
+        dxgiRes->Release();
+    }
+    else
+    {
+        MOHW_LOG(kLogFile, "EnsurePersistentEyeTexture: QueryInterface(IDXGIResource) FAILED");
+    }
+
+    return true;
+}
+
+void ConnectThreadProc()
+{
+    char path[MAX_PATH] = {};
+    DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+    while (n > 0 && path[n - 1] != '\\')
+        --n;
+    path[n] = 0;
+    strcat_s(path, "openvr_api.dll"); // the game's own directory -- where the SteamVR-current copy was placed
+
+    MOHW_LOG(kLogFile, "loading %s ...", path);
+    HMODULE h = LoadLibraryA(path);
+    if (!h)
+    {
+        MOHW_LOG(kLogFile, "LoadLibraryA FAILED, GetLastError=%lu", GetLastError());
+        g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
+        return;
+    }
+
+    auto isHmdPresent = reinterpret_cast<PFN_VR_IsHmdPresent>(GetProcAddress(h, "VR_IsHmdPresent"));
+    auto initInternal2 = reinterpret_cast<PFN_VR_InitInternal2>(GetProcAddress(h, "VR_InitInternal2"));
+    auto getGenericInterface = reinterpret_cast<PFN_VR_GetGenericInterface>(GetProcAddress(h, "VR_GetGenericInterface"));
+    auto isInterfaceVersionValid =
+        reinterpret_cast<PFN_VR_IsInterfaceVersionValid>(GetProcAddress(h, "VR_IsInterfaceVersionValid"));
+    if (!isHmdPresent || !initInternal2 || !getGenericInterface || !isInterfaceVersionValid)
+    {
+        MOHW_LOG(kLogFile, "GetProcAddress FAILED for one or more exports");
+        g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
+        return;
+    }
+
+    bool hmdPresent = isHmdPresent();
+    MOHW_LOG(kLogFile, "VR_IsHmdPresent() = %d", hmdPresent);
+    if (!hmdPresent)
+    {
+        // Skip VR_InitInternal2 entirely when no headset present -- confirmed live it starts/talks to SteamVR
+        // regardless (standard OpenVR behavior), which stalled the game well before the main menu with SteamVR
+        // running headless. Every eye-matched/true-frustum code path already degrades gracefully when
+        // GetHmdView() never returns real data, same as it does before this thread finishes either way.
+        MOHW_LOG(kLogFile, "no HMD present -- skipping VR_InitInternal2 entirely, game renders normally");
+        g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
+        return;
+    }
+
+    MOHW_LOG(kLogFile,
+              "calling VR_InitInternal2() -- confirmed to sometimes hang indefinitely; this is a background thread "
+              "specifically so that can never freeze the game...");
+    int err = kInitError_None;
+    uint32_t token = initInternal2(&err, kAppType_Scene, nullptr);
+    MOHW_LOG(kLogFile, "VR_InitInternal2() returned token=%u err=%d", token, err);
+    if (err != kInitError_None)
+    {
+        MOHW_LOG(kLogFile, "init FAILED, err=%d -- staying disconnected, game renders normally", err);
+        g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
+        return;
+    }
+
+    bool ifaceOk = isInterfaceVersionValid("IVRSystem_026");
+    MOHW_LOG(kLogFile, "IVRSystem_026 valid = %d", ifaceOk);
+
+    // Real per-eye HMD frustum, published into the SAME HmdViewBlock hooks/eye_matched_fov.cpp already knows how
+    // to consume (true per-eye frustum, no crop).
+    int sysErr = kInitError_None;
+    void* system = getGenericInterface("IVRSystem_026", &sysErr);
+    MOHW_LOG(kLogFile, "IVRSystem_026 = %p, err=%d", system, sysErr);
+    if (system)
+    {
+        void** sysVtable = *reinterpret_cast<void***>(system);
+        auto getProjectionRaw = reinterpret_cast<PFN_GetProjectionRaw>(sysVtable[kGetProjectionRawVtableIndex]);
+
+        mohwvr::ipc::HmdViewBlock hmd{};
+        constexpr float kRadToDeg = 57.29577951f;
+        for (int eye = 0; eye < 2; ++eye)
+        {
+            float rawLeft = 0, rawRight = 0, rawTop = 0, rawBottom = 0;
+            getProjectionRaw(system, eye, &rawLeft, &rawRight, &rawTop, &rawBottom);
+            hmd.angleLeft[eye] = atanf(rawLeft);
+            hmd.angleRight[eye] = atanf(rawRight);
+            // VERIFIED LIVE: horizontal (Left/Right) matched shared/eye_frustum.h's documented Quest 3 ground
+            // truth (-54/+40 deg) directly, but vertical came out SWAPPED, not just sign-flipped -- raw pfTop's
+            // magnitude matched the expected DOWN angle and pfBottom's matched the expected UP angle. On this
+            // runtime, OpenVR's Top/Bottom raw params are transposed relative to HmdViewBlock's
+            // up-positive/down-negative convention, not merely negated.
+            hmd.angleUp[eye] = atanf(rawBottom);
+            hmd.angleDown[eye] = atanf(rawTop);
+            MOHW_LOG(kLogFile,
+                      "eye%d GetProjectionRaw: raw L/R/T/B = %.4f/%.4f/%.4f/%.4f -> angles L/R/U/D = %.1f/%.1f/%.1f/%.1f deg",
+                      eye, rawLeft, rawRight, rawTop, rawBottom, hmd.angleLeft[eye] * kRadToDeg, hmd.angleRight[eye] * kRadToDeg,
+                      hmd.angleUp[eye] * kRadToDeg, hmd.angleDown[eye] * kRadToDeg);
+        }
+        hmd.ready = 1;
+        hmd.viewMode = mohwvr::ipc::kViewModeTrueFrustum;
+        hmd.frustumCandidateIndex = -1; // write to every match
+        SetHmdViewOverride(hmd);
+        MOHW_LOG(kLogFile, "published HmdView override (true-frustum mode) from OpenVR's real per-eye geometry");
+    }
+
+    int compErr = kInitError_None;
+    void* compositor = getGenericInterface("IVRCompositor_029", &compErr);
+    MOHW_LOG(kLogFile, "IVRCompositor_029 = %p, err=%d", compositor, compErr);
+    if (!compositor)
+    {
+        g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
+        return;
+    }
+
+    void** vtable = *reinterpret_cast<void***>(compositor);
+    g_compositor = compositor;
+    g_waitGetPoses = reinterpret_cast<PFN_WaitGetPoses>(vtable[kWaitGetPosesVtableIndex]);
+    g_submit = reinterpret_cast<PFN_Submit>(vtable[kSubmitVtableIndex]);
+
+    MOHW_LOG(kLogFile, "CONNECTED -- game thread will start the separate-device SubmitThreadProc on its first call");
+    g_state.store(static_cast<int>(ConnectState::Connected), std::memory_order_release);
+}
+
+// Re-opens tex (and its keyed mutex) on g_ownDevice from sharedHandle whenever generationAtomic has moved
+// past lastOpenedGen (a resize on the game thread bumps the generation -- see EnsurePersistentEyeTexture).
+// Returns false if no shared handle has been published yet at all (startup grace period) or
+// OpenSharedResource/QueryInterface fails.
+bool EnsureOwnOpenedTexture(ID3D11Texture2D*& openedTex, IDXGIKeyedMutex*& openedMutex, int& lastOpenedGen,
+                              std::atomic<HANDLE>& sharedHandleAtomic, std::atomic<int>& generationAtomic)
+{
+    int currentGen = generationAtomic.load(std::memory_order_acquire); // acquire: pairs with the publisher's release-store
+    if (openedTex && currentGen == lastOpenedGen)
+        return true;
+
+    HANDLE handle = sharedHandleAtomic.load(std::memory_order_relaxed);
+    if (!handle)
+        return false;
+
+    if (openedMutex)
+    {
+        openedMutex->Release();
+        openedMutex = nullptr;
+    }
+    if (openedTex)
+    {
+        openedTex->Release();
+        openedTex = nullptr;
+    }
+
+    HRESULT hr = g_ownDevice->OpenSharedResource(handle, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&openedTex));
+    if (FAILED(hr))
+    {
+        MOHW_LOG(kLogFile, "EnsureOwnOpenedTexture: OpenSharedResource FAILED 0x%08lX", hr);
+        lastOpenedGen = -1;
+        return false;
+    }
+    if (FAILED(openedTex->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&openedMutex))))
+    {
+        MOHW_LOG(kLogFile, "EnsureOwnOpenedTexture: QueryInterface(IDXGIKeyedMutex) FAILED");
+        openedMutex = nullptr;
+        openedTex->Release();
+        openedTex = nullptr;
+        lastOpenedGen = -1;
+        return false;
+    }
+    lastOpenedGen = currentGen;
+    return true;
+}
+
+// Owns g_ownDevice exclusively for the rest of the process's life -- see the design comment near g_leftTex for
+// why this exists. WaitGetPoses and Submit are called together, paired, right here, on this dedicated thread.
+void SubmitThreadProc()
+{
+    ID3D11Texture2D* ownLeftTex = nullptr;
+    ID3D11Texture2D* ownRightTex = nullptr;
+    IDXGIKeyedMutex* ownLeftMutex = nullptr;
+    IDXGIKeyedMutex* ownRightMutex = nullptr;
+    int leftOpenedGen = -1;
+    int rightOpenedGen = -1;
+
+    for (;;)
+    {
+        RawTrackedDevicePose hmdPose{};
+        g_waitGetPoses(g_compositor, &hmdPose, 1, nullptr, 0);
+
+        if (hmdPose.poseIsValid)
+        {
+            mohw::Quat q = MatrixToQuat(hmdPose.deviceToAbsoluteTracking);
+            mohwvr::ipc::HeadPoseBlock headPose{};
+            headPose.ready = 1;
+            static UINT64 frameCounter = 0;
+            headPose.frameCounter = ++frameCounter;
+            headPose.orientationX = q.x;
+            headPose.orientationY = q.y;
+            headPose.orientationZ = q.z;
+            headPose.orientationW = q.w;
+            headPose.positionX = hmdPose.deviceToAbsoluteTracking[0][3];
+            headPose.positionY = hmdPose.deviceToAbsoluteTracking[1][3];
+            headPose.positionZ = hmdPose.deviceToAbsoluteTracking[2][3];
+            mohw::SetHeadPoseOverride(headPose);
+        }
+
+        bool haveLeft = EnsureOwnOpenedTexture(ownLeftTex, ownLeftMutex, leftOpenedGen, g_leftSharedHandle, g_leftGeneration);
+        bool haveRight = EnsureOwnOpenedTexture(ownRightTex, ownRightMutex, rightOpenedGen, g_rightSharedHandle, g_rightGeneration);
+        if (!haveLeft || !haveRight)
+            continue; // startup grace period -- wait until both eyes have published a shared texture at least once
+
+        auto buildSubmitArgs = [&](bool rightEye, ID3D11Texture2D* tex, DirectTextureWithPose* outTexWithPose,
+                                     int* outFlags) -> const void*
+        {
+            float stampQuat[4], stampPos[3];
+            bool stampPosValid = false;
+            if (!hmdPose.poseIsValid || !GetPendingRenderPoseStamp(rightEye, stampQuat, stampPos, &stampPosValid))
+            {
+                *outFlags = 0; // Submit_Default -- no fresh stamp, use the live pose (WaitGetPoses' own default)
+                return nullptr;
+            }
+            mohw::Quat q{stampQuat[0], stampQuat[1], stampQuat[2], stampQuat[3]};
+            float pos[3] = {hmdPose.deviceToAbsoluteTracking[0][3], hmdPose.deviceToAbsoluteTracking[1][3],
+                              hmdPose.deviceToAbsoluteTracking[2][3]};
+            if (stampPosValid)
+            {
+                float dx = stampPos[0] - pos[0], dy = stampPos[1] - pos[1], dz = stampPos[2] - pos[2];
+                if (sqrtf(dx * dx + dy * dy + dz * dz) < 0.5f) // sanity, same 50cm bound companion used
+                {
+                    pos[0] += dx;
+                    pos[1] += dy;
+                    pos[2] += dz;
+                }
+            }
+            outTexWithPose->handle = tex;
+            outTexWithPose->eType = 0;
+            outTexWithPose->eColorSpace = 0;
+            QuatToDeviceMatrix(q, pos, outTexWithPose->mDeviceToAbsoluteTracking);
+            *outFlags = kSubmitFlag_TextureWithPose;
+            return outTexWithPose;
+        };
+
+        static int lastLeftErr = -999, lastRightErr = -999; // only log on change
+        DirectTexture leftTex{ownLeftTex, /*TextureType_DirectX*/ 0, /*ColorSpace_Auto*/ 0};
+        DirectTexture rightTex{ownRightTex, /*TextureType_DirectX*/ 0, /*ColorSpace_Auto*/ 0};
+        DirectTextureWithPose leftTexPosed{}, rightTexPosed{};
+        int leftFlags = 0, rightFlags = 0;
+        const void* leftPosedPtr = buildSubmitArgs(false, ownLeftTex, &leftTexPosed, &leftFlags);
+        const void* rightPosedPtr = buildSubmitArgs(true, ownRightTex, &rightTexPosed, &rightFlags);
+        const DirectTexture* leftSubmitTex = leftPosedPtr ? reinterpret_cast<const DirectTexture*>(leftPosedPtr) : &leftTex;
+        const DirectTexture* rightSubmitTex = rightPosedPtr ? reinterpret_cast<const DirectTexture*>(rightPosedPtr) : &rightTex;
+
+        // AcquireSync/ReleaseSync around each eye's Submit: real GPU-level mutual exclusion against the game
+        // thread's CopyResource into the SAME shared texture -- see g_leftKeyedMutexGame's declaration comment.
+        // Used as a plain lock rather than a producer/consumer ping-pong key, because Submit must still run for
+        // BOTH eyes every single loop iteration regardless of whether that eye rendered anything new this time.
+        // A short, bounded timeout means a rare failure to acquire degrades to "submit anyway, log it" rather
+        // than ever risking a stall on this thread -- skipping Submit entirely would violate the
+        // WaitGetPoses/Submit pairing this whole design exists to protect.
+        static long long leftAcquireFails = 0, rightAcquireFails = 0;
+        bool leftLocked = ownLeftMutex && SUCCEEDED(ownLeftMutex->AcquireSync(0, kKeyedMutexTimeoutMs));
+        if (!leftLocked && (++leftAcquireFails <= 5 || leftAcquireFails % 1000 == 0))
+            MOHW_LOG(kLogFile, "left eye AcquireSync timed out (count=%lld) -- submitting anyway", leftAcquireFails);
+        bool rightLocked = ownRightMutex && SUCCEEDED(ownRightMutex->AcquireSync(0, kKeyedMutexTimeoutMs));
+        if (!rightLocked && (++rightAcquireFails <= 5 || rightAcquireFails % 1000 == 0))
+            MOHW_LOG(kLogFile, "right eye AcquireSync timed out (count=%lld) -- submitting anyway", rightAcquireFails);
+
+        int leftErr = g_submit(g_compositor, /*Eye_Left*/ 0, leftSubmitTex, nullptr, leftFlags);
+        int rightErr = g_submit(g_compositor, /*Eye_Right*/ 1, rightSubmitTex, nullptr, rightFlags);
+
+        if (leftLocked)
+            ownLeftMutex->ReleaseSync(0);
+        if (rightLocked)
+            ownRightMutex->ReleaseSync(0);
+
+        if (leftErr != lastLeftErr)
+        {
+            MOHW_LOG(kLogFile, "Submit(Eye_Left) -> %d", leftErr);
+            lastLeftErr = leftErr;
+        }
+        if (rightErr != lastRightErr)
+        {
+            MOHW_LOG(kLogFile, "Submit(Eye_Right) -> %d", rightErr);
+            lastRightErr = rightErr;
+        }
+    }
+}
+
+} // namespace
+
+void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Texture2D* rightEye)
+{
+    int state = g_state.load(std::memory_order_acquire);
+    if (state == static_cast<int>(ConnectState::NotStarted))
+    {
+        g_state.store(static_cast<int>(ConnectState::Connecting), std::memory_order_relaxed);
+        MOHW_LOG(kLogFile, "starting background connect attempt");
+        std::thread(ConnectThreadProc).detach();
+        return;
+    }
+    if (state != static_cast<int>(ConnectState::Connected))
+        return; // still connecting or failed -- game keeps rendering normally either way
+
+    // One-time: create the separate device (see the design comment near g_leftTex) on the SAME adapter as the
+    // game's device, then start SubmitThreadProc. Done here (not in ConnectThreadProc) because finding the
+    // matching adapter needs a real game ID3D11Device*, which ConnectThreadProc never has. compare_exchange_strong
+    // ensures exactly one caller wins this even though UpdateOpenVrDirect runs every frame.
+    bool expected = false;
+    if (g_ownDeviceStarted.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    {
+        IDXGIDevice* dxgiDevice = nullptr;
+        IDXGIAdapter* adapter = nullptr;
+        if (SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgiDevice))) && dxgiDevice)
+        {
+            dxgiDevice->GetAdapter(&adapter);
+            dxgiDevice->Release();
+        }
+        HRESULT hr = D3D11CreateDevice(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+                                          nullptr, 0, D3D11_SDK_VERSION, &g_ownDevice, nullptr, nullptr);
+        if (adapter)
+            adapter->Release();
+        if (FAILED(hr) || !g_ownDevice)
+        {
+            MOHW_LOG(kLogFile, "D3D11CreateDevice (own device) FAILED 0x%08lX -- VR submission will not start", hr);
+        }
+        else
+        {
+            MOHW_LOG(kLogFile, "own D3D11 device created on the game's adapter -- starting SubmitThreadProc");
+            std::thread(SubmitThreadProc).detach();
+        }
+    }
+
+    // leftEye/rightEye mirror UpdateCompanionEyes' contract: either may be nullptr meaning "this eye didn't render
+    // this frame" (alternating-eye's temporal-stereo mode -- see present_hook.cpp's routing). Only CopyResource
+    // into our own shared textures happens here -- WaitGetPoses/Submit are entirely on SubmitThreadProc (see its
+    // own comment), which reads these via OpenSharedResource on its own separate device.
+    ID3D11DeviceContext* context = nullptr;
+    device->GetImmediateContext(&context);
+    if (!context)
+        return;
+
+    // AcquireSync/ReleaseSync around each CopyResource: pairs with SubmitThreadProc's own Acquire/Release around
+    // Submit -- see g_leftKeyedMutexGame's declaration comment. Short, bounded timeout: if the submit thread is
+    // unusually slow to release (rare), skip this frame's copy rather than stall the game's own render thread --
+    // the eye just keeps showing its last successfully-copied content.
+    if (leftEye)
+    {
+        D3D11_TEXTURE2D_DESC desc{};
+        leftEye->GetDesc(&desc);
+        if (EnsurePersistentEyeTexture(device, g_leftTex, g_leftWidth, g_leftHeight, g_leftFormat, desc, g_leftSharedHandle,
+                                          g_leftGeneration, g_leftKeyedMutexGame))
+        {
+            bool locked = g_leftKeyedMutexGame && SUCCEEDED(g_leftKeyedMutexGame->AcquireSync(0, kKeyedMutexTimeoutMs));
+            if (locked || !g_leftKeyedMutexGame)
+            {
+                context->CopyResource(g_leftTex, leftEye);
+                if (locked)
+                    g_leftKeyedMutexGame->ReleaseSync(0);
+            }
+        }
+    }
+    if (rightEye)
+    {
+        D3D11_TEXTURE2D_DESC desc{};
+        rightEye->GetDesc(&desc);
+        if (EnsurePersistentEyeTexture(device, g_rightTex, g_rightWidth, g_rightHeight, g_rightFormat, desc,
+                                          g_rightSharedHandle, g_rightGeneration, g_rightKeyedMutexGame))
+        {
+            bool locked = g_rightKeyedMutexGame && SUCCEEDED(g_rightKeyedMutexGame->AcquireSync(0, kKeyedMutexTimeoutMs));
+            if (locked || !g_rightKeyedMutexGame)
+            {
+                context->CopyResource(g_rightTex, rightEye);
+                if (locked)
+                    g_rightKeyedMutexGame->ReleaseSync(0);
+            }
+        }
+    }
+    context->Release();
+}
+
+bool IsOpenVrDirectConnected()
+{
+    return g_state.load(std::memory_order_acquire) == static_cast<int>(ConnectState::Connected);
+}
+
+} // namespace mohw::openvr_direct

@@ -1,0 +1,39 @@
+Exports of the real dxgi.dll (32-bit / SysWOW64, since MOHW.exe is a 32-bit
+process), dumped via `dumpbin /exports` on this dev machine:
+
+    ordinal hint RVA      name
+
+          1    0 0002E6B0 ApplyCompatResolutionQuirking
+          2    1 0003D1B0 CompatString
+          3    2 0003CBE0 CompatValue
+         12    3 00033D60 CreateDXGIFactory
+         10    4 00039CD0 CreateDXGIFactory1
+         11    5 00035E40 CreateDXGIFactory2
+         13    6 0004CEC0 DXGID3D10CreateDevice
+         14    7 0004CEB0 DXGID3D10CreateLayeredDevice
+         15    8 0004CE70 DXGID3D10GetLayeredDeviceSize
+         16    9 0004C4D0 DXGID3D10RegisterLayers
+         17    A 00045190 DXGIDeclareAdapterRemovalSupport
+         18    B 0006A300 DXGIDisableVBlankVirtualization
+          4    C 000A6E50 DXGIDumpJournal
+         19    D 000A96A0 DXGIGetDebugInterface1
+         20    E 000513D0 DXGIReportAdapterConfiguration
+          5    F 0004CE70 PIXBeginCapture
+          6   10 0004C7C0 PIXEndCapture
+          7   11 0004CD10 PIXGetCaptureState
+          8   12 000A8680 SetAppCompatStringPointer
+          9   13 000A9440 UpdateHMDEmulationStatus
+
+Only CreateDXGIFactory / CreateDXGIFactory1 / CreateDXGIFactory2 are
+implemented by proxy_dll -- see dllmain.cpp for rationale (the other 17 are
+undocumented/internal and used only by other Microsoft system DLLs loading
+dxgi.dll directly from System32/SysWOW64, never through a game-directory
+proxy).
+
+Linker note (so this isn't re-discovered the hard way): MSVC's link.exe does
+NOT support GNU ld/binutils-style ".def forwarder" syntax
+(`EntryName=Module.Function` with no matching real symbol) -- confirmed by
+direct experiment, fails with LNK2001 on both x86 and x64. Real proxy-DLL
+projects (ReShade, Special K, ENB-style wrappers) instead write real typed
+trampoline functions for the handful of exports that matter and lazy-load the
+real system DLL by full path. That's what proxy_dll/dllmain.cpp does.

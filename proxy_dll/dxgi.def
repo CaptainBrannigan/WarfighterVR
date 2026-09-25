@@ -1,0 +1,14 @@
+; Exports for our proxy dxgi.dll. Only the 3 documented, actually-called
+; DXGI factory functions are implemented (see dllmain.cpp for why the other
+; 17 undocumented exports don't need forwarding). Plain name-only entries
+; work here because the functions are declared extern "C" in dllmain.cpp,
+; giving them simple decorated names (link.exe strips the leading
+; underscore/stdcall @N suffix automatically when matching a plain .def
+; identifier against an extern "C" symbol).
+
+LIBRARY dxgi
+
+EXPORTS
+CreateDXGIFactory
+CreateDXGIFactory1
+CreateDXGIFactory2

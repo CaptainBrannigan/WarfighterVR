@@ -1,0 +1,368 @@
+#include "present_hook.h"
+
+#include "../third_party/minhook/include/MinHook.h"
+#include "../sdk/logging.h"
+#include "companion_bridge.h"
+#include "memory_dump.h"
+#include "aiming_controller_hook.h"
+#include "fov_scale_hook.h"
+#include "alternating_eye.h"
+#include "constantbuffer_hook.h"
+#include "controller_trigger_hook.h"
+
+#include <d3d11.h>
+#include "render_pose_stamp.h"
+#include "draw_trace_diag.h"
+#include "projection_aspect_hook.h"
+#include "eye_matched_fov.h"
+#include "../openvr_direct/openvr_direct.h"
+#include <atomic>
+#include <thread>
+#include <mutex>
+
+namespace mohw {
+namespace {
+
+constexpr const char* kLogFile = "mohwvr_present.log";
+constexpr wchar_t kDummyWindowClass[] = L"MohwVrDummyWindow";
+
+using PresentFn = HRESULT(__stdcall*)(IDXGISwapChain*, UINT, UINT);
+using ResizeBuffersFn = HRESULT(__stdcall*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+
+PresentFn g_originalPresent = nullptr;
+ResizeBuffersFn g_originalResizeBuffers = nullptr;
+void* g_presentAddress = nullptr;
+void* g_resizeBuffersAddress = nullptr;
+
+// FIX (2026-08-23): the left eye's cross-process copy source used to be
+// the REAL swap-chain backbuffer directly (self->GetBuffer(0)). Confirmed
+// live via paired instrumentation: writes into a shared texture sourced directly from the real swap-chain
+// backbuffer skipped far more often than one sourced from an independent render target, since the backbuffer is
+// a resource the swap chain machinery is ALSO actively using for the real Present(). Fix: copy the backbuffer
+// into our OWN independent, persistent texture first (a plain in-process GPU copy, same device/context), and
+// hand THAT onward instead of the backbuffer itself.
+ID3D11Texture2D* g_leftCaptureTexture = nullptr;
+UINT g_leftCaptureWidth = 0;
+UINT g_leftCaptureHeight = 0;
+DXGI_FORMAT g_leftCaptureFormat = DXGI_FORMAT_UNKNOWN;
+
+// Recreates g_leftCaptureTexture to match the backbuffer's current size/format if it doesn't already.
+bool EnsureLeftCaptureTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& backbufferDesc)
+{
+    if (g_leftCaptureTexture && g_leftCaptureWidth == backbufferDesc.Width &&
+        g_leftCaptureHeight == backbufferDesc.Height && g_leftCaptureFormat == backbufferDesc.Format)
+        return true;
+
+    if (g_leftCaptureTexture)
+    {
+        g_leftCaptureTexture->Release();
+        g_leftCaptureTexture = nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = backbufferDesc.Width;
+    desc.Height = backbufferDesc.Height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = backbufferDesc.Format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+    HRESULT hr = device->CreateTexture2D(&desc, nullptr, &g_leftCaptureTexture);
+    if (FAILED(hr))
+    {
+        MOHW_LOG(kLogFile, "EnsureLeftCaptureTexture: CreateTexture2D(%ux%u fmt=%d) FAILED 0x%08lX", desc.Width,
+                  desc.Height, static_cast<int>(desc.Format), hr);
+        g_leftCaptureWidth = g_leftCaptureHeight = 0;
+        g_leftCaptureFormat = DXGI_FORMAT_UNKNOWN;
+        return false;
+    }
+
+    g_leftCaptureWidth = desc.Width;
+    g_leftCaptureHeight = desc.Height;
+    g_leftCaptureFormat = desc.Format;
+    MOHW_LOG(kLogFile, "EnsureLeftCaptureTexture: created %ux%u fmt=%d", desc.Width, desc.Height,
+              static_cast<int>(desc.Format));
+    return true;
+}
+
+std::atomic<long long> g_presentCalls{0};
+std::atomic<long long> g_resizeBuffersCalls{0};
+
+HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT flags)
+{
+    long long n = ++g_presentCalls;
+    if (n == 1 || n % 300 == 0)
+        MOHW_LOG(kLogFile, "Present #%lld self=%p syncInterval=%u flags=%u", n, static_cast<void*>(self),
+                  syncInterval, flags);
+
+    // Set below, inside the eye-routing block, to whether THIS frame (the one just captured/rendered) was the
+    // left eye -- captured BEFORE AdvanceEyeToNextFrame() flips parity for the NEXT frame, since
+    // IsRightEyeActive() itself no longer reflects this frame's eye once that's happened.
+    bool presentedFrameWasLeftEye = true;
+
+    // Trigger-as-left-mouse-click (task: "make the controller trigger act
+    // as a left mouse input for the time being") -- cheap poll, no-ops if
+    // the companion isn't running/publishing yet. See controller_trigger_hook.h.
+    UpdateControllerTriggerMouseInput();
+
+    // F9 one-shot: dumps the live (already-decrypted) MOHW.exe module to
+    // disk for Ghidra -- see memory_dump.h.
+    CheckMemoryDumpHotkey();
+    // F10 one-shot: walks the live per-module dispatch array to find the
+    // sibling module (camera/player/input) alongside the render module --
+    // see memory_dump.h.
+    CheckModuleRegistryDumpHotkey();
+    // NUMPAD4 toggle: live A/B for render-pose stamping (Submit_TextureWithPose) -- see render_pose_stamp.h.
+    CheckRenderPoseStampDebugHotkey();
+    // F5,F6 step: live control for the game's internal FOV scale -- see fov_scale_hook.h.
+    CheckFovScaleHotkeys();
+    // F12 toggle / F1,F2 step / F3 recenter / F4 invert-yaw toggle: live
+    // controls for head-driven aim/facing (AimingController+0xC/+0x10) --
+    // see aiming_controller_hook.h.
+    CheckAimingControllerHotkeys();
+    // F7,F8 step: live control for IPD scale -- see alternating_eye.h.
+    CheckAlternatingEyeHotkeys();
+    // Delete toggle / Numpad+,Numpad- range start / Numpad*,Numpad/ range
+    // end: live controls for the bone-hide proof-of-concept -- see
+    // constantbuffer_hook.h.
+    CheckBoneHideHotkeys();
+
+    // Every frame: hand this frame's real backbuffer to the companion (and openvr_direct) via the shared D3D11
+    // textures. Called here specifically because by the time Present fires, all of this frame's draws have
+    // already happened.
+    ID3D11Device* device = nullptr;
+    self->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device));
+    if (device)
+    {
+        ID3D11Texture2D* backbuffer = nullptr;
+        self->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&backbuffer));
+        if (backbuffer)
+        {
+            DrawTraceOnPresent(device, backbuffer); // diagnostic, see hooks/draw_trace_diag.h
+
+            D3D11_TEXTURE2D_DESC backbufferDesc{};
+            backbuffer->GetDesc(&backbufferDesc);
+
+            // Copy into our own independent texture BEFORE anything below touches it as a cross-process source --
+            // see EnsureLeftCaptureTexture's comment for why. leftEye (not backbuffer) is what actually goes to
+            // UpdateOpenVrDirect.
+            ID3D11Texture2D* leftEye = backbuffer;
+            ID3D11DeviceContext* immediateContext = nullptr;
+            device->GetImmediateContext(&immediateContext);
+            if (immediateContext)
+            {
+                if (EnsureLeftCaptureTexture(device, backbufferDesc))
+                {
+                    immediateContext->CopyResource(g_leftCaptureTexture, backbuffer);
+                    leftEye = g_leftCaptureTexture;
+                }
+                immediateContext->Release();
+            }
+
+            // Alternating-eye routing (hooks/alternating_eye.h): this frame's single, plain render already
+            // carries the correct per-eye position offset (fov_scale_hook.cpp's CommitViewTransform hook called
+            // ApplyEyeOffset using whatever parity was current when THIS frame's transform was committed, before
+            // this Present call ever ran). Route it to the matching slot and leave the OTHER slot's shared
+            // texture untouched (nullptr) -- UpdateOpenVrDirect treats a null source that way, which is exactly
+            // temporal stereo's "other eye still shows its last frame" semantics.
+            bool rightEye = IsRightEyeActive();
+            // PublishRenderPoseForEye must run BEFORE UpdateOpenVrDirect, not after -- UpdateOpenVrDirect's
+            // in-process render-pose-stamp lookup (GetPendingRenderPoseStamp) reads whatever this function last
+            // published for the ACTIVE eye; the reverse order fed Submit_TextureWithPose a stale pose every frame.
+            PublishRenderPoseForEye(rightEye); // EXPERIMENTAL, see hooks/render_pose_stamp.h
+            // STALENESS ISOLATION TEST (2026-09-24), RIGHT ARROW: every content/order/index/parity swap tried so
+            // far always left the physical right eye (OpenVR index 1) receiving SOME alternating stale/fresh
+            // stream -- none of them ever tested "what if that slot is never held stale at all". When armed, the
+            // right eye's shared texture gets a fresh CopyResource every single frame (this frame's captured
+            // content, whichever real eye it actually belongs to) instead of being left untouched on off-parity
+            // frames. This makes the right eye's visual CONTENT wrong about half the time (a real diagnostic
+            // cost, expected) but isolates staleness-duration from content-identity as the variable under test.
+            // Left eye, game-side rendering (IPD/frustum/pose-stamp), and AdvanceEyeToNextFrame are all untouched.
+            bool forceRightAlwaysFresh = IsStalenessIsolationTestActive();
+            ID3D11Texture2D* rightArg = (rightEye || forceRightAlwaysFresh) ? leftEye : nullptr;
+            mohw::openvr_direct::UpdateOpenVrDirect(device, rightEye ? nullptr : leftEye, rightArg);
+            presentedFrameWasLeftEye = !rightEye; // captured before the flip below -- see its declaration comment
+            // Advance parity now, after this frame's capture/routing is done, so it's ready before the NEXT
+            // frame's CommitViewTransform fires.
+            AdvanceEyeToNextFrame();
+
+            backbuffer->Release();
+        }
+        device->Release();
+    }
+
+    // Skip the REAL desktop swap-chain present on right-eye frames, same technique BF2VR-Alpha's
+    // DirectXService.cpp uses ("Only render the left eye on screen because of stereo shake") -- see
+    // presentedFrameWasLeftEye's declaration comment for why that captured bool is used here instead of
+    // re-querying IsRightEyeActive() (already flipped for next frame by AdvanceEyeToNextFrame() above). The full
+    // scene render for this eye has ALREADY happened by the time this hook fires -- skipping the desktop present
+    // doesn't skip any of that draw-call/shading cost, only the swap-chain flip/blit and whatever DWM compositor
+    // work rides on it.
+    if (presentedFrameWasLeftEye)
+        return g_originalPresent(self, syncInterval, flags);
+    return S_OK;
+}
+
+HRESULT __stdcall Hooked_ResizeBuffers(IDXGISwapChain* self, UINT bufferCount, UINT width, UINT height,
+                                        DXGI_FORMAT newFormat, UINT swapChainFlags)
+{
+    long long n = ++g_resizeBuffersCalls;
+    MOHW_LOG(kLogFile, "ResizeBuffers #%lld self=%p %ux%u format=%d bufferCount=%u", n, static_cast<void*>(self),
+              width, height, static_cast<int>(newFormat), bufferCount);
+
+    return g_originalResizeBuffers(self, bufferCount, width, height, newFormat, swapChainFlags);
+}
+
+// Creates a throwaway device+swapchain purely to read the real Present/
+// ResizeBuffers vtable slots (indices 8 and 13 in IDXGISwapChain's vtable),
+// then tears everything down. The vtable is shared per-driver across every
+// swapchain instance of the same kind, so patching it here affects the
+// game's own real swapchain too -- we never need to intercept its creation.
+bool GetRealSwapChainVtableSlots(void** outPresent, void** outResizeBuffers)
+{
+    MOHW_LOG(kLogFile, "GetRealSwapChainVtableSlots: creating dummy window");
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = kDummyWindowClass;
+    RegisterClassExW(&wc);
+
+    HWND hwnd = CreateWindowExW(0, kDummyWindowClass, L"", WS_OVERLAPPEDWINDOW, 0, 0, 2, 2, nullptr, nullptr,
+                                 wc.hInstance, nullptr);
+    if (!hwnd)
+    {
+        MOHW_LOG(kLogFile, "GetRealSwapChainVtableSlots: dummy window creation FAILED (err=%lu)", GetLastError());
+        return false;
+    }
+
+    DXGI_SWAP_CHAIN_DESC desc{};
+    desc.BufferCount = 1;
+    desc.BufferDesc.Width = 2;
+    desc.BufferDesc.Height = 2;
+    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    desc.BufferDesc.RefreshRate.Numerator = 60;
+    desc.BufferDesc.RefreshRate.Denominator = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.OutputWindow = hwnd;
+    desc.SampleDesc.Count = 1;
+    desc.Windowed = TRUE;
+
+    IDXGISwapChain* swapChain = nullptr;
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* context = nullptr;
+
+    MOHW_LOG(kLogFile, "GetRealSwapChainVtableSlots: calling D3D11CreateDeviceAndSwapChain");
+    HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+                                                D3D11_SDK_VERSION, &desc, &swapChain, &device, nullptr, &context);
+    if (FAILED(hr) || !swapChain)
+    {
+        MOHW_LOG(kLogFile, "GetRealSwapChainVtableSlots: D3D11CreateDeviceAndSwapChain FAILED hr=0x%08lX", hr);
+        DestroyWindow(hwnd);
+        return false;
+    }
+    MOHW_LOG(kLogFile, "GetRealSwapChainVtableSlots: dummy device+swapchain created OK, reading vtable");
+
+    void** vtable = *reinterpret_cast<void***>(swapChain);
+    *outPresent = vtable[8];        // IDXGISwapChain::Present
+    *outResizeBuffers = vtable[13]; // IDXGISwapChain::ResizeBuffers
+
+    swapChain->Release();
+    context->Release();
+    device->Release();
+    DestroyWindow(hwnd);
+    return true;
+}
+
+// Runs entirely on its own thread, off whatever thread called our proxied
+// CreateDXGIFactory/1/2 (almost certainly the game's own thread, mid-way
+// through its own DXGI/D3D11 initialization). A first attempt built this
+// synchronously into that call and it deadlocked the game -- no log output
+// at all appeared, even from failure paths, meaning it hung inside
+// D3D11CreateDeviceAndSwapChain itself: creating a second, independent
+// device+swapchain reentrantly from inside the game's own in-flight
+// DXGI factory call risks contending for an internal DXGI/driver lock the
+// outer call already holds. Running on a fresh thread avoids that entirely;
+// the real Present hook isn't needed until the game's render loop starts,
+// well after its own device/swapchain setup finishes, so there's no rush.
+void InstallThreadProc()
+{
+    void* presentAddr = nullptr;
+    void* resizeBuffersAddr = nullptr;
+    if (!GetRealSwapChainVtableSlots(&presentAddr, &resizeBuffersAddr))
+        return;
+
+    MH_STATUS initStatus = MH_Initialize();
+    if (initStatus != MH_OK && initStatus != MH_ERROR_ALREADY_INITIALIZED)
+    {
+        MOHW_LOG(kLogFile, "MH_Initialize FAILED: %s", MH_StatusToString(initStatus));
+        return;
+    }
+
+    g_presentAddress = presentAddr;
+    g_resizeBuffersAddress = resizeBuffersAddr;
+
+    MH_STATUS s = MH_CreateHook(g_presentAddress, &Hooked_Present, reinterpret_cast<void**>(&g_originalPresent));
+    if (s != MH_OK)
+    {
+        MOHW_LOG(kLogFile, "MH_CreateHook(Present @ %p) FAILED: %s", g_presentAddress, MH_StatusToString(s));
+        return;
+    }
+
+    s = MH_CreateHook(g_resizeBuffersAddress, &Hooked_ResizeBuffers,
+                       reinterpret_cast<void**>(&g_originalResizeBuffers));
+    if (s != MH_OK)
+    {
+        MOHW_LOG(kLogFile, "MH_CreateHook(ResizeBuffers @ %p) FAILED: %s", g_resizeBuffersAddress,
+                  MH_StatusToString(s));
+        return;
+    }
+
+    s = MH_EnableHook(g_presentAddress);
+    if (s != MH_OK)
+    {
+        MOHW_LOG(kLogFile, "MH_EnableHook(Present) FAILED: %s", MH_StatusToString(s));
+        return;
+    }
+
+    s = MH_EnableHook(g_resizeBuffersAddress);
+    if (s != MH_OK)
+    {
+        MOHW_LOG(kLogFile, "MH_EnableHook(ResizeBuffers) FAILED: %s", MH_StatusToString(s));
+        return;
+    }
+
+    MOHW_LOG(kLogFile, "Present hook installed @ %p, ResizeBuffers hook installed @ %p", g_presentAddress,
+              g_resizeBuffersAddress);
+}
+
+} // namespace
+
+bool InstallPresentHook()
+{
+    MOHW_LOG(kLogFile, "InstallPresentHook: spawning background thread for dummy-device vtable grab");
+    std::thread(&InstallThreadProc).detach();
+    return true; // install outcome is logged asynchronously; this just confirms the thread was spawned
+}
+
+void RemovePresentHook()
+{
+    if (g_presentAddress)
+    {
+        MH_DisableHook(g_presentAddress);
+        MH_RemoveHook(g_presentAddress);
+        g_presentAddress = nullptr;
+    }
+    if (g_resizeBuffersAddress)
+    {
+        MH_DisableHook(g_resizeBuffersAddress);
+        MH_RemoveHook(g_resizeBuffersAddress);
+        g_resizeBuffersAddress = nullptr;
+    }
+    // MH_Uninitialize() is called once centrally from dllmain.cpp, not here --
+    // multiple hook modules share one MinHook instance.
+}
+
+} // namespace mohw

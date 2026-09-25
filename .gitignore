@@ -1,0 +1,30 @@
+# Build outputs
+/bin/
+/obj/
+proxy_dll/bin/
+proxy_dll/obj/
+companion/bin/
+companion/obj/
+*.obj
+*.pdb
+*.ilk
+*.iobj
+*.ipdb
+*.tlog
+*.exp
+*.lib
+*.exe
+!third_party/**/*.exe
+!third_party/**/*.lib
+!third_party/**/*.dll
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Game log files (generated at runtime, not source)
+mohwvr_*.log
+
+# Local settings written by the mod at runtime
+mohwvr_settings.ini
