@@ -16,6 +16,11 @@ bool GetHeadPose(mohwvr::ipc::HeadPoseBlock* out);
 // whenever set (which is effectively always, once connected).
 void SetHeadPoseOverride(const mohwvr::ipc::HeadPoseBlock& block);
 
+// NUMPAD5 one-shot: arms a 300-call unconditional (unrated) burst of GetHeadPose staleness logging to
+// mohwvr_headpose_staleness.log, instead of the normal 200ms-sampled rate -- see companion_bridge.cpp's
+// LogStalenessIfDue comment.
+void CheckHeadPoseStalenessBurstHotkey();
+
 // The right motion controller's live "aim" pose (see shared/ipc_protocol.h's ControllerPoseBlock), read from a
 // file-mapping a producer would publish. No in-process producer publishes this yet, so this currently always
 // returns false -- kept because hooks/controller_trigger_hook.cpp and hooks/camera_matrix_test_hook.cpp both

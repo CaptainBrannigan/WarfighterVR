@@ -229,7 +229,22 @@ bool GetPendingRenderPoseStamp(bool rightEye, float outQuat[4], float outPos[3],
     if (!g_stampDebugEnabled.load(std::memory_order_relaxed))
         return false;
     std::lock_guard<std::mutex> lock(g_mutex);
-    const EyeStamp& s = g_eyeStamps[rightEye ? 1 : 0];
+    int eyeIdx = rightEye ? 1 : 0;
+    const EyeStamp& s = g_eyeStamps[eyeIdx];
+
+    // L/R COMPARISON DIAGNOSTIC (2026-09-25): pose-stamp Submit confirmed (via elimination -- rotation smoothing
+    // fully removed, ghost persisted) to be the right-eye ghost's actual source, but static reading of
+    // ComputeRenderPoseStamp/buildSubmitArgs found no eye-dependent branching in either. Logging per-eye
+    // staleFrames/quat/validity here, at the actual consumption point, to compare L vs R from a live run instead
+    // of guessing further from code alone.
+    static std::atomic<unsigned long long> nextCmpLogMs[2] = {0, 0};
+    unsigned long long nowCmp = GetTickCount64();
+    unsigned long long allowedCmp = nextCmpLogMs[eyeIdx].load(std::memory_order_relaxed);
+    if (nowCmp >= allowedCmp && nextCmpLogMs[eyeIdx].compare_exchange_strong(allowedCmp, nowCmp + 500, std::memory_order_relaxed))
+        MOHW_LOG(kLogFile, "STAMP CONSUME eye=%s valid=%d staleFrames=%d quat=(%.5f,%.5f,%.5f,%.5f) posValid=%d pos=(%.4f,%.4f,%.4f)",
+                  eyeIdx ? "RIGHT" : "LEFT", s.valid ? 1 : 0, s.staleFrames, s.quat[0], s.quat[1], s.quat[2], s.quat[3],
+                  s.posValid ? 1 : 0, s.pos[0], s.pos[1], s.pos[2]);
+
     if (!s.valid || s.staleFrames > 30) // ~same "menu/loading/paused -> use the live pose" convention as companion/main.cpp's ApplyPoseStamp
         return false;
     for (int i = 0; i < 4; ++i)

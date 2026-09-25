@@ -273,6 +273,10 @@ struct ThisCallTrampoline
         if (n == 1 || n % 300 == 0)
             MOHW_LOG(kLogFile, "AimingControllerUpdate #%lld", n);
 
+        // TRACK 2 DISABLE TEST (2026-09-25) RESULT: disabling ApplyHeadAim entirely (so g_haveRecenter/pose-stamp
+        // never activate) produced correctly-fused stereo 3D with NO right-eye ghost -- BETTER than the baseline
+        // with Track 2 active. Restored here to isolate pose-stamping specifically as the next suspect: see
+        // openvr_direct.cpp's buildSubmitArgs, which is now forced to Submit_Default unconditionally instead.
         ApplyHeadAim(self);
     }
 };

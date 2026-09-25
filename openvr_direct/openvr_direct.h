@@ -36,4 +36,9 @@ void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Te
 
 bool IsOpenVrDirectConnected();
 
+// The HMD's real display refresh rate, queried live via IVRSystem::GetFloatTrackedDeviceProperty
+// (Prop_DisplayFrequency_Float) once connected -- see openvr_direct.cpp's g_detectedDisplayFrequencyHz comment.
+// Returns 0.0f if not yet known (not connected, or the query failed/returned an implausible value).
+float GetDetectedDisplayFrequencyHz();
+
 } // namespace mohw::openvr_direct

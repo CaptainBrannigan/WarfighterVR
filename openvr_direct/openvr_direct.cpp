@@ -62,10 +62,15 @@ using PFN_WaitGetPoses = int(__thiscall*)(void* self, void* pRenderPoseArray, ui
 using PFN_Submit = int(__thiscall*)(void* self, int eEye, const DirectTexture* pTexture, const void* pBounds, int nSubmitFlags);
 
 // IVRSystem methods, also called through the raw vtable (IVRSystem_026): GetRecommendedRenderTargetSize(0),
-// GetProjectionMatrix(1), GetProjectionRaw(2) -- see third_party/openvr/headers/openvr.h's IVRSystem class for the
-// declaration order this indexing depends on.
+// GetProjectionMatrix(1), GetProjectionRaw(2), ..., GetFloatTrackedDeviceProperty(23) -- see
+// third_party/openvr/headers/openvr.h's IVRSystem class for the declaration order this indexing depends on
+// (counted directly from that header, 0-based, through every virtual method in between).
 constexpr int kGetProjectionRawVtableIndex = 2;
 using PFN_GetProjectionRaw = void(__thiscall*)(void* self, int eEye, float* pfLeft, float* pfRight, float* pfTop, float* pfBottom);
+constexpr int kGetFloatTrackedDevicePropertyVtableIndex = 23;
+using PFN_GetFloatTrackedDeviceProperty = float(__thiscall*)(void* self, uint32_t unDeviceIndex, int prop, int* pError);
+constexpr uint32_t kTrackedDeviceIndexHmd = 0; // vr::k_unTrackedDeviceIndex_Hmd
+constexpr int kProp_DisplayFrequency_Float = 2002; // vr::Prop_DisplayFrequency_Float
 
 // Byte-for-byte stand-in for vr::TrackedDevicePose_t (third_party/openvr/headers/openvr.h) -- same "plain data, no
 // vtable" reasoning as DirectTexture above. mDeviceToAbsoluteTracking is a row-major 3x4 matrix (float m[row][col]):
@@ -158,6 +163,16 @@ enum class ConnectState : int
     Failed = 3,
 };
 std::atomic<int> g_state{static_cast<int>(ConnectState::NotStarted)};
+
+// DYNAMIC FRAME-PACE TARGET (2026-09-25): populated once via IVRSystem::GetFloatTrackedDeviceProperty
+// (Prop_DisplayFrequency_Float) during connect, instead of hardcoding an assumed display rate -- present_hook.cpp
+// paces Present() off this so it tracks whatever the real headset/Steam Link target actually is (confirmed live
+// this session: Present was running at an uncapped ~200Hz against a 120Hz real submit target, a 5:3 mismatch
+// with no clean integer relationship -- the kind of thing that produces beat-frequency judder, visible only when
+// the underlying value is actually changing, i.e. during rotation). Atomic since it's set on the connect thread
+// and read on the game's own render thread, with no other ordering guarantee tying the two together the way the
+// g_compositor/g_waitGetPoses/g_submit one-time handoff below has. 0.0f means "not yet known".
+std::atomic<float> g_detectedDisplayFrequencyHz{0.0f};
 
 // Only meaningful once g_state == Connected. Plain (non-atomic) globals are safe here: they're fully populated on
 // the connect thread BEFORE the release-store to g_state below, and only ever read on the render thread AFTER an
@@ -348,6 +363,14 @@ void ConnectThreadProc()
     {
         void** sysVtable = *reinterpret_cast<void***>(system);
         auto getProjectionRaw = reinterpret_cast<PFN_GetProjectionRaw>(sysVtable[kGetProjectionRawVtableIndex]);
+        auto getFloatProp =
+            reinterpret_cast<PFN_GetFloatTrackedDeviceProperty>(sysVtable[kGetFloatTrackedDevicePropertyVtableIndex]);
+
+        int freqErr = 0;
+        float displayHz = getFloatProp(system, kTrackedDeviceIndexHmd, kProp_DisplayFrequency_Float, &freqErr);
+        MOHW_LOG(kLogFile, "GetFloatTrackedDeviceProperty(DisplayFrequency) = %.3f Hz, err=%d", displayHz, freqErr);
+        if (freqErr == 0 && displayHz > 1.0f && displayHz < 1000.0f) // sanity bound, same philosophy as other hooks' transform checks
+            g_detectedDisplayFrequencyHz.store(displayHz, std::memory_order_relaxed);
 
         mohwvr::ipc::HmdViewBlock hmd{};
         constexpr float kRadToDeg = 57.29577951f;
@@ -440,6 +463,21 @@ bool EnsureOwnOpenedTexture(ID3D11Texture2D*& openedTex, IDXGIKeyedMutex*& opene
     return true;
 }
 
+// DIRECT SUBMIT-RATE MEASUREMENT (2026-09-25): the ~200Hz submission loop rate was previously inferred indirectly
+// via GetHeadPose's producer frameCounter (companion_bridge.cpp) -- structurally the same rate, since
+// WaitGetPoses/Submit are paired in this one loop, but the user asked for it measured directly rather than
+// inferred. Self-contained NUMPAD5 burst here (own edge-detection, own counter, own high-res QPC timing) --
+// deliberately independent of companion_bridge.cpp's identical-looking burst so this thread doesn't need any
+// cross-module coupling; both fire off the same keypress since present_hook.cpp's poll and this thread's own
+// poll run in parallel.
+long long QpcMicros()
+{
+    LARGE_INTEGER freq{}, now{};
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (now.QuadPart * 1000000LL) / freq.QuadPart;
+}
+
 // Owns g_ownDevice exclusively for the rest of the process's life -- see the design comment near g_leftTex for
 // why this exists. WaitGetPoses and Submit are called together, paired, right here, on this dedicated thread.
 void SubmitThreadProc()
@@ -451,8 +489,20 @@ void SubmitThreadProc()
     int leftOpenedGen = -1;
     int rightOpenedGen = -1;
 
+    bool submitBurstKeyWasDown = false;
+    int submitBurstRemaining = 0;
+    long long lastSubmitUs = 0;
+
     for (;;)
     {
+        bool submitBurstKeyDown = (GetAsyncKeyState(VK_NUMPAD5) & 0x8000) != 0;
+        if (submitBurstKeyDown && !submitBurstKeyWasDown)
+        {
+            submitBurstRemaining = 300;
+            MOHW_LOG(kLogFile, "===== SUBMIT BURST ARMED: logging next 300 loop iterations unconditionally =====");
+        }
+        submitBurstKeyWasDown = submitBurstKeyDown;
+
         RawTrackedDevicePose hmdPose{};
         g_waitGetPoses(g_compositor, &hmdPose, 1, nullptr, 0);
 
@@ -478,22 +528,28 @@ void SubmitThreadProc()
         if (!haveLeft || !haveRight)
             continue; // startup grace period -- wait until both eyes have published a shared texture at least once
 
-        auto buildSubmitArgs = [&](bool rightEye, ID3D11Texture2D* tex, DirectTextureWithPose* outTexWithPose,
+        // POSE-STAMP SUBMIT DISABLED (2026-09-25): pair-freeze rotation smoothing just restored (fov_scale_hook.cpp)
+        // -- forcing Submit_Default so SteamVR's own reprojection isn't also acting on top of it, muddying whether
+        // the pair-freeze fix alone resolves the rotation jitter. haveSharedStamp forced false; the shared-pose
+        // query above it is skipped entirely so it can't mask this test either.
+        float sharedStampQuat[4], sharedStampPos[3];
+        bool sharedStampPosValid = false;
+        bool haveSharedStamp = false;
+
+        auto buildSubmitArgs = [&](ID3D11Texture2D* tex, DirectTextureWithPose* outTexWithPose,
                                      int* outFlags) -> const void*
         {
-            float stampQuat[4], stampPos[3];
-            bool stampPosValid = false;
-            if (!hmdPose.poseIsValid || !GetPendingRenderPoseStamp(rightEye, stampQuat, stampPos, &stampPosValid))
+            if (!haveSharedStamp)
             {
                 *outFlags = 0; // Submit_Default -- no fresh stamp, use the live pose (WaitGetPoses' own default)
                 return nullptr;
             }
-            mohw::Quat q{stampQuat[0], stampQuat[1], stampQuat[2], stampQuat[3]};
+            mohw::Quat q{sharedStampQuat[0], sharedStampQuat[1], sharedStampQuat[2], sharedStampQuat[3]};
             float pos[3] = {hmdPose.deviceToAbsoluteTracking[0][3], hmdPose.deviceToAbsoluteTracking[1][3],
                               hmdPose.deviceToAbsoluteTracking[2][3]};
-            if (stampPosValid)
+            if (sharedStampPosValid)
             {
-                float dx = stampPos[0] - pos[0], dy = stampPos[1] - pos[1], dz = stampPos[2] - pos[2];
+                float dx = sharedStampPos[0] - pos[0], dy = sharedStampPos[1] - pos[1], dz = sharedStampPos[2] - pos[2];
                 if (sqrtf(dx * dx + dy * dy + dz * dz) < 0.5f) // sanity, same 50cm bound companion used
                 {
                     pos[0] += dx;
@@ -514,8 +570,8 @@ void SubmitThreadProc()
         DirectTexture rightTex{ownRightTex, /*TextureType_DirectX*/ 0, /*ColorSpace_Auto*/ 0};
         DirectTextureWithPose leftTexPosed{}, rightTexPosed{};
         int leftFlags = 0, rightFlags = 0;
-        const void* leftPosedPtr = buildSubmitArgs(false, ownLeftTex, &leftTexPosed, &leftFlags);
-        const void* rightPosedPtr = buildSubmitArgs(true, ownRightTex, &rightTexPosed, &rightFlags);
+        const void* leftPosedPtr = buildSubmitArgs(ownLeftTex, &leftTexPosed, &leftFlags);
+        const void* rightPosedPtr = buildSubmitArgs(ownRightTex, &rightTexPosed, &rightFlags);
         const DirectTexture* leftSubmitTex = leftPosedPtr ? reinterpret_cast<const DirectTexture*>(leftPosedPtr) : &leftTex;
         const DirectTexture* rightSubmitTex = rightPosedPtr ? reinterpret_cast<const DirectTexture*>(rightPosedPtr) : &rightTex;
 
@@ -534,8 +590,22 @@ void SubmitThreadProc()
         if (!rightLocked && (++rightAcquireFails <= 5 || rightAcquireFails % 1000 == 0))
             MOHW_LOG(kLogFile, "right eye AcquireSync timed out (count=%lld) -- submitting anyway", rightAcquireFails);
 
-        int leftErr = g_submit(g_compositor, /*Eye_Left*/ 0, leftSubmitTex, nullptr, leftFlags);
+        // SUBMIT ORDER SWAP TEST (2026-09-25): ghost survived identical L/R pose data (shared-pose test above),
+        // ruling out per-eye pose divergence. Testing whether the ghost is actually tied to "whichever eye is
+        // submitted SECOND" rather than "the right eye specifically" -- if it jumps to the left eye now, that's
+        // a genuine SteamVR submission-order quirk; if it stays on the right eye, order is ruled out too.
         int rightErr = g_submit(g_compositor, /*Eye_Right*/ 1, rightSubmitTex, nullptr, rightFlags);
+        int leftErr = g_submit(g_compositor, /*Eye_Left*/ 0, leftSubmitTex, nullptr, leftFlags);
+
+        if (submitBurstRemaining > 0)
+        {
+            long long nowUs = QpcMicros();
+            long long deltaUs = lastSubmitUs != 0 ? (nowUs - lastSubmitUs) : 0;
+            lastSubmitUs = nowUs;
+            MOHW_LOG(kLogFile, "SUBMIT BURST %d: usSinceLastLoopIteration=%lld leftErr=%d rightErr=%d",
+                      submitBurstRemaining, deltaUs, leftErr, rightErr);
+            --submitBurstRemaining;
+        }
 
         if (leftLocked)
             ownLeftMutex->ReleaseSync(0);
@@ -650,6 +720,11 @@ void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Te
 bool IsOpenVrDirectConnected()
 {
     return g_state.load(std::memory_order_acquire) == static_cast<int>(ConnectState::Connected);
+}
+
+float GetDetectedDisplayFrequencyHz()
+{
+    return g_detectedDisplayFrequencyHz.load(std::memory_order_relaxed);
 }
 
 } // namespace mohw::openvr_direct

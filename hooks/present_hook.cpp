@@ -10,6 +10,7 @@
 #include "constantbuffer_hook.h"
 #include "controller_trigger_hook.h"
 
+#include <windows.h>
 #include <d3d11.h>
 #include "render_pose_stamp.h"
 #include "draw_trace_diag.h"
@@ -90,8 +91,88 @@ bool EnsureLeftCaptureTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& 
 std::atomic<long long> g_presentCalls{0};
 std::atomic<long long> g_resizeBuffersCalls{0};
 
+// LOG MARKER HOTKEY (2026-09-25): F11 (unused by any other hook, confirmed via a full grep of hooks/ -- the old
+// draw-duplication stereo debug toggle that used to own this key is retired/uncompiled). Lets the user bound a
+// time window in the logs during live testing ("press F11, do the thing, press F11 again, tell Claude what
+// happened between marker N and N+1") instead of guessing which stretch of a log capture is relevant. Deliberately
+// wired OUTSIDE the disabled polling-table block below so it works regardless of that test's on/off state. Logs
+// to its own small file so it's easy to find regardless of which other log a given test is watching.
+void CheckLogMarkerHotkey()
+{
+    static bool wasDown = false;
+    static std::atomic<int> counter{0};
+    bool down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    if (down && !wasDown)
+    {
+        int n = ++counter;
+        MOHW_LOG("mohwvr_marker.log", "===== MARKER #%d =====", n);
+    }
+    wasDown = down;
+}
+
+// DYNAMIC FRAME PACE (2026-09-25): confirmed live this session that Present was running at an uncapped ~200Hz
+// against the real 120Hz Steam Link submit target (openvr_direct.cpp's SubmitThreadProc, itself confirmed
+// rock-solid and correctly paced) -- a 5:3 ratio with no clean integer relationship, the kind of mismatch that
+// produces beat-frequency judder visible only when the underlying pose is actually changing (invisible when
+// still, visible during rotation -- matches everything observed chasing this tonight). Paces to 2x the REAL,
+// LIVE-DETECTED display frequency (GetDetectedDisplayFrequencyHz, queried via
+// IVRSystem::GetFloatTrackedDeviceProperty -- never hardcoded, per explicit request) rather than a fixed assumed
+// number: alternating-eye means each eye only gets a fresh render every OTHER Present call, so pacing the
+// eye-PAIR rate to 2x the display rate gives each INDIVIDUAL eye a fresh render exactly once per real submit
+// interval -- a clean 1:1 relationship instead of an uncontrolled beat pattern. Deliberately a no-op (runs
+// uncapped, original behavior) until a real display frequency has actually been detected -- never falls back to
+// a hardcoded guess. Single-threaded (game thread only, same thread Present always runs on), so plain statics
+// are safe with no atomics needed.
+void PaceToDisplayFrequency()
+{
+    float displayHz = mohw::openvr_direct::GetDetectedDisplayFrequencyHz();
+    if (displayHz <= 1.0f)
+        return; // not yet detected -- run uncapped rather than guess at a number
+
+    static LARGE_INTEGER freq{};
+    static bool haveFreq = false;
+    if (!haveFreq)
+    {
+        QueryPerformanceFrequency(&freq);
+        haveFreq = true;
+    }
+
+    static LARGE_INTEGER lastPresent{};
+    static bool haveLast = false;
+
+    long long targetPeriodTicks = static_cast<long long>(static_cast<double>(freq.QuadPart) / (displayHz * 2.0));
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (!haveLast)
+    {
+        lastPresent = now;
+        haveLast = true;
+        return;
+    }
+
+    long long remainingTicks = targetPeriodTicks - (now.QuadPart - lastPresent.QuadPart);
+    if (remainingTicks > 0)
+    {
+        // Hybrid sleep+spin: Sleep() for the bulk (coarse ~1-15ms granularity, yields the CPU), then spin-wait the
+        // final ~2ms for real precision -- Sleep() alone isn't accurate enough at these sub-millisecond targets,
+        // spinning the whole remaining time would waste a full CPU core for no reason.
+        double remainingMs = static_cast<double>(remainingTicks) * 1000.0 / static_cast<double>(freq.QuadPart);
+        if (remainingMs > 2.0)
+            Sleep(static_cast<DWORD>(remainingMs - 2.0));
+        do
+        {
+            QueryPerformanceCounter(&now);
+        } while (now.QuadPart - lastPresent.QuadPart < targetPeriodTicks);
+    }
+
+    lastPresent = now;
+}
+
 HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT flags)
 {
+    PaceToDisplayFrequency();
+
     long long n = ++g_presentCalls;
     if (n == 1 || n % 300 == 0)
         MOHW_LOG(kLogFile, "Present #%lld self=%p syncInterval=%u flags=%u", n, static_cast<void*>(self),
@@ -107,32 +188,34 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
     // the companion isn't running/publishing yet. See controller_trigger_hook.h.
     UpdateControllerTriggerMouseInput();
 
-    // POLLING TABLE DISABLED (2026-09-25), PERFORMANCE TEST: testing whether per-frame GetAsyncKeyState polling
-    // across all hooks is a measurable contributor to the frame-timing/encoding-spike pattern from the right-eye
-    // ghost investigation. Result: spikes reduced somewhat but the ghost persists, so this is being left disabled
-    // while the investigation moves to the video-encoding temporal-coherence theory. Function bodies themselves
-    // are untouched (git-reverted after an earlier per-function gutting pass) -- uncomment below to restore.
+    // Always active regardless of the polling-table test below -- see its own declaration comment.
+    CheckLogMarkerHotkey();
+    // NUMPAD5: arms an every-call burst capture of GetHeadPose staleness -- see companion_bridge.h.
+    CheckHeadPoseStalenessBurstHotkey();
+
+    // POLLING TABLE RE-ENABLED (2026-09-25): needed live so the user can toggle head-aim (F12) at will to test
+    // mouse-driven rotation with smoothing left on, decoupled from HMD/head-tracking entirely.
     // F9 one-shot: dumps the live (already-decrypted) MOHW.exe module to
     // disk for Ghidra -- see memory_dump.h.
-    // CheckMemoryDumpHotkey();
+    CheckMemoryDumpHotkey();
     // F10 one-shot: walks the live per-module dispatch array to find the
     // sibling module (camera/player/input) alongside the render module --
     // see memory_dump.h.
-    // CheckModuleRegistryDumpHotkey();
+    CheckModuleRegistryDumpHotkey();
     // NUMPAD4 toggle: live A/B for render-pose stamping (Submit_TextureWithPose) -- see render_pose_stamp.h.
-    // CheckRenderPoseStampDebugHotkey();
+    CheckRenderPoseStampDebugHotkey();
     // F5,F6 step: live control for the game's internal FOV scale -- see fov_scale_hook.h.
-    // CheckFovScaleHotkeys();
+    CheckFovScaleHotkeys();
     // F12 toggle / F1,F2 step / F3 recenter / F4 invert-yaw toggle: live
     // controls for head-driven aim/facing (AimingController+0xC/+0x10) --
     // see aiming_controller_hook.h.
-    // CheckAimingControllerHotkeys();
+    CheckAimingControllerHotkeys();
     // F7,F8 step: live control for IPD scale -- see alternating_eye.h.
-    // CheckAlternatingEyeHotkeys();
+    CheckAlternatingEyeHotkeys();
     // Delete toggle / Numpad+,Numpad- range start / Numpad*,Numpad/ range
     // end: live controls for the bone-hide proof-of-concept -- see
     // constantbuffer_hook.h.
-    // CheckBoneHideHotkeys();
+    CheckBoneHideHotkeys();
 
     // Every frame: hand this frame's real backbuffer to the companion (and openvr_direct) via the shared D3D11
     // textures. Called here specifically because by the time Present fires, all of this frame's draws have

@@ -253,63 +253,100 @@ bool SmoothCameraRotation(void* transformPtr)
     float rawYaw = atan2f(forward.x, forward.z);
     float rawPitch = asinf(clampedY);
 
-    // BUG FIX (2026-09-21): this state used to be ONE shared instance for both eyes, even though alternating-eye rendering
-    // calls this once per eye with each eye's OWN (pre-freeze) raw camera transform. L and R don't share a rotation
-    // (FreezeRotationForPair only overwrites R's rotation with L's AFTER this runs), so feeding both into one interpolation
-    // history let R's raw sample corrupt the "new tick" detection and transition timing L's own smoothing relies on --
-    // and since the freeze makes L's result the one that (via the copy) ends up driving BOTH eyes, L was the one whose
-    // smoothing baseline kept getting polluted by R's interleaved samples. Confirmed by code reading (2026-09-21), not
-    // measurement, while investigating the user's report of head-turn ghosting appearing only in the left eye. Per-eye
-    // state (index 0 = left, 1 = right) restores independent smoothing for each eye's own raw stream.
-    int eyeIdx = IsRightEyeActive() ? 1 : 0;
-    static bool haveSample[2] = {false, false};
-    static float prevYaw[2] = {0.0f, 0.0f}, prevPitch[2] = {0.0f, 0.0f};
-    static float currYaw[2] = {0.0f, 0.0f}, currPitch[2] = {0.0f, 0.0f};
-    static unsigned long long transitionStartMs[2] = {0, 0};
+    // PAIR FREEZE, RESTORED (2026-09-25): the original design (per ipc_protocol.h/render_pose_stamp.h's own
+    // "smoothing + pair freeze" comments, and the 2026-09-21 bug-fix comment describing "FreezeRotationForPair")
+    // always made the right eye reuse the LEFT eye's already-smoothed rotation, guaranteeing both eyes agree.
+    // That function no longer exists anywhere in the codebase (confirmed via a full grep) -- at some point it was
+    // removed without the callers/comments describing it being updated, leaving each eye smoothing fully
+    // independently with nothing reconciling them. Diagnosed as the cause of a rotation-only jitter (present at
+    // every window size and with head-roll off) that raw-sample logging showed was NOT noise in either eye's own
+    // data -- consistent with two individually-smooth but mutually-unsynced per-eye trajectories drifting apart
+    // by small amounts, which no per-eye window tuning could ever fix.
+    //
+    // Reimplemented here rather than as a separate post-step: only the LEFT eye runs real tick-detection/
+    // interpolation (single, non-indexed state -- also sidesteps the ORIGINAL pre-2026-09-21 bug, since the
+    // right eye's raw sample never touches this state at all now); the right eye just reuses left's last
+    // computed result. Falls through (returns false, transform untouched) if no left value exists yet.
+    bool rightEye = IsRightEyeActive();
+    static bool haveLeftValue = false;
+    static float lastLeftInterpYaw = 0.0f, lastLeftInterpPitch = 0.0f;
+    float interpYaw, interpPitch;
 
-    unsigned long long now = GetTickCount64();
-
-    if (!haveSample[eyeIdx])
+    if (rightEye)
     {
-        prevYaw[eyeIdx] = currYaw[eyeIdx] = rawYaw;
-        prevPitch[eyeIdx] = currPitch[eyeIdx] = rawPitch;
-        transitionStartMs[eyeIdx] = now;
-        haveSample[eyeIdx] = true;
-        return false; // first call for this eye -- nothing to interpolate from yet, leave untouched
+        if (!haveLeftValue)
+            return false;
+        interpYaw = lastLeftInterpYaw;
+        interpPitch = lastLeftInterpPitch;
     }
-
-    // Detect a new tick: the native sync's own output actually moved since
-    // the last-known target, not just float noise.
-    constexpr float kTickChangeEpsilon = 0.0005f; // ~0.03 degrees
-    float deltaFromTarget = fabsf(WrapAngleSigned(rawYaw - currYaw[eyeIdx])) + fabsf(rawPitch - currPitch[eyeIdx]);
-    if (deltaFromTarget > kTickChangeEpsilon)
+    else
     {
-        prevYaw[eyeIdx] = currYaw[eyeIdx];
-        prevPitch[eyeIdx] = currPitch[eyeIdx];
-        currYaw[eyeIdx] = rawYaw;
-        currPitch[eyeIdx] = rawPitch;
-        transitionStartMs[eyeIdx] = now;
+        // CONTINUOUS LOW-PASS FILTER (2026-09-25), REPLACING TICK-DETECTION: the old design assumed a discrete
+        // 30Hz staircase to interpolate between ticks -- but logging showed its own `t` pinned near 0.19
+        // regardless of window size, meaning nearly every call was being treated as "a new tick," so the
+        // interpolation never actually progressed. Independently confirmed the same night: native MOUSE-driven
+        // rotation (zero mod code involved before our own AimingController overwrite even runs) shows the
+        // identical jitter signature as head-tracked rotation -- meaning the raw signal reaching this function
+        // was never a clean staircase this design could smooth in the first place. Replaced with a standard
+        // frame-rate-independent exponential filter: no tick detection, no reset, a continuous blend toward the
+        // raw value every call, with blend strength derived from real elapsed time via QueryPerformanceCounter
+        // (GetTickCount64's confirmed ~15.6ms resolution is too coarse for a sub-frame filter). Still reuses
+        // RotationSmoothingWindowMs as the tuning knob -- now the filter's time constant in ms, not an assumed
+        // tick interval.
+        static bool haveSample = false;
+        static float smoothYaw = 0.0f, smoothPitch = 0.0f;
+        static LARGE_INTEGER lastCallQpc{};
+        static LARGE_INTEGER qpcFreq{};
+        static bool haveQpcFreq = false;
+        if (!haveQpcFreq)
+        {
+            QueryPerformanceFrequency(&qpcFreq);
+            haveQpcFreq = true;
+        }
+
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+
+        if (!haveSample)
+        {
+            smoothYaw = rawYaw;
+            smoothPitch = rawPitch;
+            lastCallQpc = now;
+            haveSample = true;
+            return false; // nothing to blend from yet, leave untouched
+        }
+
+        double dtSeconds = static_cast<double>(now.QuadPart - lastCallQpc.QuadPart) / static_cast<double>(qpcFreq.QuadPart);
+        lastCallQpc = now;
+        if (dtSeconds < 0.0)
+            dtSeconds = 0.0;
+
+        float tauMs = GetRotationSmoothingWindowMs();
+        if (tauMs < 1.0f) // guard against div-by-zero/negative from a bad manual ini edit
+            tauMs = 1.0f;
+        double tauSeconds = static_cast<double>(tauMs) / 1000.0;
+
+        // Standard frame-rate-independent exponential smoothing: alpha = 1 - e^(-dt/tau). A fast call (small dt)
+        // barely moves toward raw this call; a slow call (large dt, e.g. after a stall) snaps close to raw
+        // rather than lagging forever.
+        float alpha = static_cast<float>(1.0 - exp(-dtSeconds / tauSeconds));
+        if (alpha < 0.0f)
+            alpha = 0.0f;
+        if (alpha > 1.0f)
+            alpha = 1.0f;
+
+        smoothYaw = smoothYaw + WrapAngleSigned(rawYaw - smoothYaw) * alpha;
+        smoothPitch = smoothPitch + (rawPitch - smoothPitch) * alpha;
+
+        interpYaw = smoothYaw;
+        interpPitch = smoothPitch;
+
+        LogSmoothingIfDue(rawYaw, rawPitch, interpYaw, interpPitch, alpha, tauMs);
+
+        lastLeftInterpYaw = interpYaw;
+        lastLeftInterpPitch = interpPitch;
+        haveLeftValue = true;
     }
-
-    // Assumed transition window -- defaults to matching the live-measured
-    // ~30Hz tick rate (see this function's header comment), but live-
-    // tunable (PageUp/PageDown, sdk/settings.h's RotationSmoothingWindowMs)
-    // rather than a fixed constant, so shorter/longer can be A/B'd
-    // directly. Not adaptive to the ACTUAL tick rate; revisit if that ever
-    // turns out to vary.
-    float assumedTickIntervalMs = GetRotationSmoothingWindowMs();
-    if (assumedTickIntervalMs < 1.0f) // guard against div-by-zero/negative from a bad manual ini edit
-        assumedTickIntervalMs = 1.0f;
-    float t = static_cast<float>(now - transitionStartMs[eyeIdx]) / assumedTickIntervalMs;
-    if (t < 0.0f)
-        t = 0.0f;
-    if (t > 1.0f)
-        t = 1.0f;
-
-    float interpYaw = prevYaw[eyeIdx] + WrapAngleSigned(currYaw[eyeIdx] - prevYaw[eyeIdx]) * t;
-    float interpPitch = prevPitch[eyeIdx] + (currPitch[eyeIdx] - prevPitch[eyeIdx]) * t;
-
-    LogSmoothingIfDue(rawYaw, rawPitch, interpYaw, interpPitch, t, assumedTickIntervalMs);
 
     // NEGATED vs. the retired commit_view_transform_hook.cpp's
     // MakeYawPitchDelta, which this was otherwise copied from -- confirmed
