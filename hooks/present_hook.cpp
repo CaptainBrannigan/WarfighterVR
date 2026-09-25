@@ -107,27 +107,32 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
     // the companion isn't running/publishing yet. See controller_trigger_hook.h.
     UpdateControllerTriggerMouseInput();
 
+    // POLLING TABLE DISABLED (2026-09-25), PERFORMANCE TEST: testing whether per-frame GetAsyncKeyState polling
+    // across all hooks is a measurable contributor to the frame-timing/encoding-spike pattern from the right-eye
+    // ghost investigation. Result: spikes reduced somewhat but the ghost persists, so this is being left disabled
+    // while the investigation moves to the video-encoding temporal-coherence theory. Function bodies themselves
+    // are untouched (git-reverted after an earlier per-function gutting pass) -- uncomment below to restore.
     // F9 one-shot: dumps the live (already-decrypted) MOHW.exe module to
     // disk for Ghidra -- see memory_dump.h.
-    CheckMemoryDumpHotkey();
+    // CheckMemoryDumpHotkey();
     // F10 one-shot: walks the live per-module dispatch array to find the
     // sibling module (camera/player/input) alongside the render module --
     // see memory_dump.h.
-    CheckModuleRegistryDumpHotkey();
+    // CheckModuleRegistryDumpHotkey();
     // NUMPAD4 toggle: live A/B for render-pose stamping (Submit_TextureWithPose) -- see render_pose_stamp.h.
-    CheckRenderPoseStampDebugHotkey();
+    // CheckRenderPoseStampDebugHotkey();
     // F5,F6 step: live control for the game's internal FOV scale -- see fov_scale_hook.h.
-    CheckFovScaleHotkeys();
+    // CheckFovScaleHotkeys();
     // F12 toggle / F1,F2 step / F3 recenter / F4 invert-yaw toggle: live
     // controls for head-driven aim/facing (AimingController+0xC/+0x10) --
     // see aiming_controller_hook.h.
-    CheckAimingControllerHotkeys();
+    // CheckAimingControllerHotkeys();
     // F7,F8 step: live control for IPD scale -- see alternating_eye.h.
-    CheckAlternatingEyeHotkeys();
+    // CheckAlternatingEyeHotkeys();
     // Delete toggle / Numpad+,Numpad- range start / Numpad*,Numpad/ range
     // end: live controls for the bone-hide proof-of-concept -- see
     // constantbuffer_hook.h.
-    CheckBoneHideHotkeys();
+    // CheckBoneHideHotkeys();
 
     // Every frame: hand this frame's real backbuffer to the companion (and openvr_direct) via the shared D3D11
     // textures. Called here specifically because by the time Present fires, all of this frame's draws have

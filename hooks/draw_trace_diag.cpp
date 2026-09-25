@@ -396,22 +396,26 @@ void DrawTraceOnPresent(ID3D11Device* device, ID3D11Texture2D* backbuffer)
     InstallOnce(device);
     g_backbuffer = backbuffer;
 
-    static bool wasDown = false;
-    bool down = (GetAsyncKeyState(VK_SCROLL) & 0x8000) != 0;
-    if (down && !wasDown)
-    {
-        g_armed.store(true, std::memory_order_relaxed);
-        // Same keypress dumps THIS (about-to-end) frame's UI snapshot -- it was captured during this frame's draws,
-        // which already happened by the time Present runs.
-        ID3D11DeviceContext* ctx = nullptr;
-        device->GetImmediateContext(&ctx);
-        if (ctx)
-        {
-            DumpUiSnapshotBmp(ctx, device);
-            ctx->Release();
-        }
-    }
-    wasDown = down;
+    // POLLING TABLE DISABLED (2026-09-25), PERFORMANCE TEST -- see present_hook.cpp's identical comment. This
+    // disables the Scroll Lock arm-a-trace trigger; g_armed can be hardcoded to true directly if this capture is
+    // needed again before it's restored. The rest of this function's per-frame work (g_tracing dump-if-armed
+    // below) is untouched.
+    // static bool wasDown = false;
+    // bool down = (GetAsyncKeyState(VK_SCROLL) & 0x8000) != 0;
+    // if (down && !wasDown)
+    // {
+    //     g_armed.store(true, std::memory_order_relaxed);
+    //     // Same keypress dumps THIS (about-to-end) frame's UI snapshot -- it was captured during this frame's draws,
+    //     // which already happened by the time Present runs.
+    //     ID3D11DeviceContext* ctx = nullptr;
+    //     device->GetImmediateContext(&ctx);
+    //     if (ctx)
+    //     {
+    //         DumpUiSnapshotBmp(ctx, device);
+    //         ctx->Release();
+    //     }
+    // }
+    // wasDown = down;
 
     if (g_tracing.load(std::memory_order_relaxed))
     {

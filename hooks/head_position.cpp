@@ -68,7 +68,9 @@ void PollToggle()
 
 void ApplyHeadPosition(void* transformPtr)
 {
-    PollToggle();
+    // POLLING TABLE DISABLED (2026-09-25), PERFORMANCE TEST -- see present_hook.cpp's identical comment. Higher
+    // priority than the others: this poll ran once PER EYE per frame, not just once per Present.
+    // PollToggle();
     g_lastPosValid.store(false, std::memory_order_relaxed); // set again below only if this frame actually applied an offset
     if (!transformPtr || !GetHeadPositionEnabled() || !GetHeadAimEnabled())
         return;
