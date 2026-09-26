@@ -79,11 +79,16 @@ void CheckAimingControllerHotkeys();
 // way to read AimingController.
 bool GetLastAppliedYawPitch(float* outYaw, float* outPitch);
 
-// The head-aim mapping currently in force: the HMD yaw/pitch captured at the last recenter (zeroHead*) and the game
-// yaw/pitch it maps to (baseline*). AimingController yaw/pitch = baseline + sign * sensitivity * (headAngle - zeroHead).
-// Returns false until head-aim has recentered at least once. Used by hooks/render_pose_stamp.cpp to invert the mapping.
+// The head-aim mapping currently in force, in the form AimingController angle = baseline + sign * sensitivity *
+// (headAngle - zeroHead). Yaw is additive: baselineYaw is the game's own (mouse/stick-driven) yaw as of the latest
+// tick, zeroHeadYaw the head yaw at the last recenter. Pitch is absolute: zeroHeadPitch and baselinePitch are both 0.
+// Returns false until head-aim has recentered at least once. Used by hooks/head_position.cpp and
+// hooks/render_pose_stamp.cpp.
 bool GetHeadAimMapping(float* zeroHeadYaw, float* zeroHeadPitch, float* baselineYaw, float* baselinePitch);
 
+// The head-driven yaw (radians, AimingController space) added on top of the game's own yaw at the latest tick,
+// i.e. sign * sensitivity * (headYaw - zeroHeadYaw). 0 until head-aim has applied at least once.
+float GetHeadYawOffset();
 // HMD position (XR local space, meters) captured at the last recenter -- the origin head-position tracking measures from.
 bool GetHeadAimPositionOrigin(float out[3]);
 

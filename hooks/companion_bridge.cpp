@@ -5,37 +5,31 @@
 
 #include <windows.h>
 #include <atomic>
+#include <mutex>
 
 namespace mohw {
 namespace {
 
 constexpr const char* kLogFile = "mohwvr_headpose_staleness.log";
 
-// Right controller pose -- lazy-open-and-keep-mapped: read every Present, not just occasionally, so it's worth
-// keeping the mapping open rather than paying OpenFileMappingW's cost every call.
-HANDLE g_rightControllerPoseMapping = nullptr;
-const mohwvr::ipc::ControllerPoseBlock* g_rightControllerPoseBlock = nullptr;
+// Written on the submit thread, read on the game thread (shot hooks, trigger polling) -- locked so a reader can
+// never see half of one publish's quaternion and half of the next.
+std::mutex g_controllerMutex;
+mohwvr::ipc::ControllerPoseBlock g_controllerPose[2]{}; // 0 = left, 1 = right
 
-bool EnsureRightControllerPoseMappingOpen()
+bool GetControllerPose(int hand, mohwvr::ipc::ControllerPoseBlock* out)
 {
-    if (g_rightControllerPoseBlock)
-        return true;
-    if (!g_rightControllerPoseMapping)
-    {
-        g_rightControllerPoseMapping =
-            OpenFileMappingW(FILE_MAP_READ, FALSE, mohwvr::ipc::kRightControllerPoseMapName);
-        if (!g_rightControllerPoseMapping)
-            return false; // no publisher running yet
-    }
-    g_rightControllerPoseBlock = static_cast<const mohwvr::ipc::ControllerPoseBlock*>(
-        MapViewOfFile(g_rightControllerPoseMapping, FILE_MAP_READ, 0, 0, sizeof(mohwvr::ipc::ControllerPoseBlock)));
-    if (!g_rightControllerPoseBlock)
-    {
-        CloseHandle(g_rightControllerPoseMapping);
-        g_rightControllerPoseMapping = nullptr;
+    std::lock_guard<std::mutex> lock(g_controllerMutex);
+    if (!g_controllerPose[hand].ready)
         return false;
-    }
+    *out = g_controllerPose[hand];
     return true;
+}
+
+void SetControllerPose(int hand, const mohwvr::ipc::ControllerPoseBlock& block)
+{
+    std::lock_guard<std::mutex> lock(g_controllerMutex);
+    g_controllerPose[hand] = block;
 }
 
 } // namespace
@@ -151,24 +145,22 @@ bool GetHmdView(mohwvr::ipc::HmdViewBlock* out)
 
 bool GetRightControllerPose(mohwvr::ipc::ControllerPoseBlock* out)
 {
-    if (!EnsureRightControllerPoseMappingOpen() || !g_rightControllerPoseBlock->ready)
-        return false;
-    *out = *g_rightControllerPoseBlock; // small POD copy, no lock -- same reasoning as GetHeadPose
-    return true;
+    return GetControllerPose(1, out);
 }
 
-void ShutdownCompanionBridge()
+bool GetLeftControllerPose(mohwvr::ipc::ControllerPoseBlock* out)
 {
-    if (g_rightControllerPoseBlock)
-    {
-        UnmapViewOfFile(const_cast<mohwvr::ipc::ControllerPoseBlock*>(g_rightControllerPoseBlock));
-        g_rightControllerPoseBlock = nullptr;
-    }
-    if (g_rightControllerPoseMapping)
-    {
-        CloseHandle(g_rightControllerPoseMapping);
-        g_rightControllerPoseMapping = nullptr;
-    }
+    return GetControllerPose(0, out);
+}
+
+void SetRightControllerPoseOverride(const mohwvr::ipc::ControllerPoseBlock& block)
+{
+    SetControllerPose(1, block);
+}
+
+void SetLeftControllerPoseOverride(const mohwvr::ipc::ControllerPoseBlock& block)
+{
+    SetControllerPose(0, block);
 }
 
 } // namespace mohw

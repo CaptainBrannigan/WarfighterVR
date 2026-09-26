@@ -51,6 +51,7 @@ constexpr float kDefaultBoneHideRange2End = 5.0f;
 // player-distance range (0.48-1.9) overlaps 1-2m false positives, so this
 // is a starting point to dial in live, not a solved value.
 constexpr float kDefaultPlayerBoneDistanceThreshold = 6.2f;
+constexpr float kDefaultVrTurnSpeed = 1.0f; // hooks/xinput_hook.cpp
 
 std::atomic<float> g_fovScale{kDefaultFovScale};
 std::atomic<float> g_ipdScale{kDefaultIpdScale};
@@ -73,6 +74,7 @@ std::atomic<float> g_boneHideRangeEnd{kDefaultBoneHideRangeEnd};
 std::atomic<float> g_boneHideRange2Start{kDefaultBoneHideRange2Start};
 std::atomic<float> g_boneHideRange2End{kDefaultBoneHideRange2End};
 std::atomic<float> g_playerBoneDistanceThreshold{kDefaultPlayerBoneDistanceThreshold};
+std::atomic<float> g_vrTurnSpeed{kDefaultVrTurnSpeed};
 // Guards the settings FILE's read-modify-write access -- unrelated to the
 // atomics above, which are already independently safe for concurrent
 // get/set from the render/hotkey-poll threads.
@@ -121,6 +123,7 @@ void WriteSettingsFileLocked()
     fprintf(f, "BoneHideRange2Start=%.4f\n", g_boneHideRange2Start.load(std::memory_order_relaxed));
     fprintf(f, "BoneHideRange2End=%.4f\n", g_boneHideRange2End.load(std::memory_order_relaxed));
     fprintf(f, "PlayerBoneDistanceThreshold=%.4f\n", g_playerBoneDistanceThreshold.load(std::memory_order_relaxed));
+    fprintf(f, "VrTurnSpeed=%.4f\n", g_vrTurnSpeed.load(std::memory_order_relaxed));
     fclose(f);
 }
 
@@ -222,6 +225,8 @@ void LoadSettings()
             g_boneHideRange2End.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "PlayerBoneDistanceThreshold", &value))
             g_playerBoneDistanceThreshold.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "VrTurnSpeed", &value))
+            g_vrTurnSpeed.store(value, std::memory_order_relaxed);
     }
     fclose(f);
 
@@ -486,6 +491,11 @@ void SetPlayerBoneDistanceThreshold(float value)
     g_playerBoneDistanceThreshold.store(value, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(g_fileMutex);
     WriteSettingsFileLocked();
+}
+
+float GetVrTurnSpeed()
+{
+    return g_vrTurnSpeed.load(std::memory_order_relaxed);
 }
 
 } // namespace mohw

@@ -105,7 +105,7 @@ struct ThisCallTrampoline
         }
 
         Vec3 controllerDir;
-        if (!GetControllerAimDirection(&controllerDir))
+        if (!GetControllerAimDirection(direction, &controllerDir))
         {
             MOHW_LOG(kLogFile, "call #%d: no controller pose available, leaving unmodified", n);
             return g_originalRayCast(param1, ident, rayCastTest, start, end, hits, maxHitCount, materialFlags,

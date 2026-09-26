@@ -25,6 +25,7 @@
 #include "../hooks/companion_bridge.h"
 #include "../hooks/engine_function_hook.h"
 #include "../hooks/aiming_controller_hook.h"
+#include "../hooks/xinput_hook.h"
 #include "../hooks/fov_scale_hook.h"
 #include "../hooks/projection_aspect_hook.h"
 #include "../hooks/alternating_eye.h"
@@ -126,6 +127,10 @@ void EnsureInitialized()
         if (!mohw::InstallAimingControllerHook())
             MOHW_LOG(kLogFile, "InstallAimingControllerHook FAILED -- see mohwvr_aimingcontroller.log");
 
+        // VR thumbsticks presented to the game as XInput controller 0 (see hooks/xinput_hook.h).
+        if (!mohw::InstallXInputHook())
+            MOHW_LOG(kLogFile, "InstallXInputHook FAILED -- see mohwvr_xinput.log");
+
         // Cosmetic bullet-travel/impact-VFX redirect to the right motion controller's live aim direction --
         // the visual feedback channel alongside InstallFireCandidateRedirectHook's actual hit-scan redirect.
         if (!mohw::InstallBulletRaycastRedirectHook())
@@ -184,12 +189,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/)
         mohw::RemoveConstantBufferHook();
         mohw::RemoveEngineFunctionHook();
         mohw::RemoveAimingControllerHook();
+        mohw::RemoveXInputHook();
         mohw::RemoveBulletRaycastRedirectHook();
         mohw::RemoveFireCandidateRedirectHook();
         mohw::RemoveCameraMatrixTestHook();
         mohw::RemoveFovScaleHook();
         mohw::RemoveProjectionAspectHook();
-        mohw::ShutdownCompanionBridge();
         MH_Uninitialize(); // centralized here -- all hook modules share one MinHook instance
         MOHW_LOG(kLogFile, "proxy dxgi.dll detached from process");
         break;

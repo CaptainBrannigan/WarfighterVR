@@ -1,6 +1,6 @@
 #include "controller_trigger_hook.h"
 
-#include "companion_bridge.h"
+#include "../openvr_direct/vr_input.h"
 #include "../sdk/logging.h"
 
 #include <windows.h>
@@ -9,12 +9,6 @@ namespace mohw {
 namespace {
 
 constexpr const char* kLogFile = "mohwvr_controllertrigger.log";
-
-// Simple hysteresis so a trigger value hovering right at the edge doesn't
-// chatter between down/up every frame -- press past 0.6 to register a
-// click, release back below 0.4 to end it.
-constexpr float kPressThreshold = 0.6f;
-constexpr float kReleaseThreshold = 0.4f;
 
 bool g_mouseDown = false;
 
@@ -30,21 +24,23 @@ void SendLeftMouseEvent(DWORD flag)
 
 void UpdateControllerTriggerMouseInput()
 {
-    mohwvr::ipc::ControllerPoseBlock pose{};
-    if (!GetRightControllerPose(&pose))
+    openvr_direct::VrActionState state{};
+    if (!openvr_direct::GetVrActionState(&state))
         return;
 
-    if (!g_mouseDown && pose.triggerValue >= kPressThreshold)
+    // Fire is a SteamVR boolean action, so SteamVR applies its own press/release thresholds (adjustable in its
+    // binding UI) -- no hysteresis needed here.
+    if (state.fire && !g_mouseDown)
     {
         g_mouseDown = true;
         SendLeftMouseEvent(MOUSEEVENTF_LEFTDOWN);
-        MOHW_LOG(kLogFile, "trigger=%.3f -> LEFTDOWN", pose.triggerValue);
+        MOHW_LOG(kLogFile, "Fire pressed -> LEFTDOWN");
     }
-    else if (g_mouseDown && pose.triggerValue <= kReleaseThreshold)
+    else if (!state.fire && g_mouseDown)
     {
         g_mouseDown = false;
         SendLeftMouseEvent(MOUSEEVENTF_LEFTUP);
-        MOHW_LOG(kLogFile, "trigger=%.3f -> LEFTUP", pose.triggerValue);
+        MOHW_LOG(kLogFile, "Fire released -> LEFTUP");
     }
 }
 

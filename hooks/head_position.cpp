@@ -75,8 +75,8 @@ void ApplyHeadPosition(void* transformPtr)
     if (!transformPtr || !GetHeadPositionEnabled() || !GetHeadAimEnabled())
         return;
 
-    float zeroYaw = 0, zeroPitch = 0, baseYaw = 0, basePitch = 0, origin[3] = {0, 0, 0};
-    if (!GetHeadAimMapping(&zeroYaw, &zeroPitch, &baseYaw, &basePitch) || !GetHeadAimPositionOrigin(origin))
+    float origin[3] = {0, 0, 0};
+    if (!GetHeadAimPositionOrigin(origin))
         return; // head-aim hasn't recentered yet
 
     mohwvr::ipc::HeadPoseBlock pose{};
@@ -105,20 +105,10 @@ void ApplyHeadPosition(void* transformPtr)
     float dy = pose.positionY - origin[1];
     float dz = pose.positionZ - origin[2];
 
-    // XR world -> game world is a rotation about the vertical axis by theta = -(zeroYaw + baseYaw)
-    // (derived from the head-aim mapping the render-pose stamp already inverts successfully; see
-    // project_mohw_render_pose_stamping / this file's header). Rotation about +Y: x' = x cos + z sin, z' = -x sin + z cos.
-    float theta = -(zeroYaw + baseYaw);
-    float c = cosf(theta), s = sinf(theta);
-    float scale = GetHeadPositionScale();
-    float ox = (dx * c + dz * s) * scale;
-    float oy = dy * scale;
-    float oz = (-dx * s + dz * c) * scale;
-    if (GetHeadPositionInvertHorizontal()) // live-confirmed 2026-09-21: forward and lateral were both reversed
-    {
-        ox = -ox;
-        oz = -oz;
-    }
+    float offset[3];
+    if (!TrackingOffsetToGameWorld(dx, dy, dz, offset))
+        return;
+    float ox = offset[0], oy = offset[1], oz = offset[2];
 
     float len = sqrtf(ox * ox + oy * oy + oz * oz);
     if (len > kMaxOffsetMeters)
@@ -144,8 +134,31 @@ void ApplyHeadPosition(void* transformPtr)
     unsigned long long allowed = nextLogMs.load(std::memory_order_relaxed);
     if (now >= allowed && nextLogMs.compare_exchange_strong(allowed, now + 1000, std::memory_order_relaxed))
         MOHW_LOG(kLogFile,
-                  "head position: delta XR(%.3f,%.3f,%.3f) m -> game offset(%.3f,%.3f,%.3f) scale %.2f theta %.3f | camera trans (%.3f,%.3f,%.3f)",
-                  dx, dy, dz, ox, oy, oz, scale, theta, cam[12], cam[13], cam[14]);
+                  "head position: delta XR(%.3f,%.3f,%.3f) m -> game offset(%.3f,%.3f,%.3f) scale %.2f | camera trans (%.3f,%.3f,%.3f)",
+                  dx, dy, dz, ox, oy, oz, GetHeadPositionScale(), cam[12], cam[13], cam[14]);
+}
+
+bool TrackingOffsetToGameWorld(float dx, float dy, float dz, float out[3])
+{
+    float zeroYaw = 0, zeroPitch = 0, baseYaw = 0, basePitch = 0;
+    if (!GetHeadAimInvertYaw() || !GetHeadAimMapping(&zeroYaw, &zeroPitch, &baseYaw, &basePitch))
+        return false;
+
+    // XR world -> game world is a rotation about the vertical axis by theta = -(zeroYaw + baseYaw) (derived from the
+    // head-aim mapping; baseYaw is the game's live yaw, so mouse/stick turning is included). Rotation about +Y:
+    // x' = x cos + z sin, z' = -x sin + z cos.
+    float theta = -(zeroYaw + baseYaw);
+    float c = cosf(theta), s = sinf(theta);
+    float scale = GetHeadPositionScale();
+    out[0] = (dx * c + dz * s) * scale;
+    out[1] = dy * scale;
+    out[2] = (-dx * s + dz * c) * scale;
+    if (GetHeadPositionInvertHorizontal()) // live-confirmed 2026-09-21: forward and lateral were both reversed
+    {
+        out[0] = -out[0];
+        out[2] = -out[2];
+    }
+    return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
 }
 
 bool GetLastAppliedHeadPosition(float out[3])

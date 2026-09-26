@@ -167,4 +167,9 @@ void SetBoneHideRange2End(float value);
 float GetPlayerBoneDistanceThreshold();
 void SetPlayerBoneDistanceThreshold(float value);
 
+// Scales the Turn stick before it's handed to the game as the virtual gamepad's right stick (hooks/xinput_hook.cpp).
+// Ini-only (VrTurnSpeed). Values above 1 reach full deflection sooner; the game's own controller look sensitivity
+// still sets the fastest possible turn.
+float GetVrTurnSpeed();
+
 } // namespace mohw

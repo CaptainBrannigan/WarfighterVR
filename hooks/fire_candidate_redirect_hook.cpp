@@ -99,7 +99,7 @@ struct ThisCallTrampoline
         }
 
         Vec3 controllerDir;
-        if (!GetControllerAimDirection(&controllerDir))
+        if (!GetControllerAimDirection(direction, &controllerDir))
         {
             MOHW_LOG(kLogFile, "call #%d: no controller pose available, calling original unmodified", n);
             unsigned char result = g_originalFireCandidate(param1, param2, param3);
@@ -108,28 +108,38 @@ struct ThisCallTrampoline
             return result;
         }
 
-        // Only this+0x190 (the end point) is redirected -- origin stays put,
-        // same convention as player_hitscan_redirect_hook.cpp. Restore the
-        // caller's buffer after the call so nothing is left permanently
-        // altered on this per-shot context object.
+        // The shot starts at the controller (the game's origin moved by the hand's offset from the head, see
+        // GetControllerOriginOffset) and points along the controller. Both of this per-shot context object's points
+        // are restored after the call so nothing is left permanently altered.
         float saved[3] = {endPtr[0], endPtr[1], endPtr[2]};
+        float savedOrigin[3] = {originPtr[0], originPtr[1], originPtr[2]};
 
-        Vec3 newEnd = origin + controllerDir * rayLength;
+        Vec3 handOffset{};
+        bool fromHand = GetControllerOriginOffset(&handOffset);
+        Vec3 newOrigin = fromHand ? origin + handOffset : origin;
+        Vec3 newEnd = newOrigin + controllerDir * rayLength;
 
+        originPtr[0] = newOrigin.x;
+        originPtr[1] = newOrigin.y;
+        originPtr[2] = newOrigin.z;
         endPtr[0] = newEnd.x;
         endPtr[1] = newEnd.y;
         endPtr[2] = newEnd.z;
 
         MOHW_LOG(kLogFile,
-                   "call #%d: origin={%.3f,%.3f,%.3f} original end={%.3f,%.3f,%.3f} controller-redirected "
-                   "end={%.3f,%.3f,%.3f} (candidateCount before=%d)",
-                   n, origin.x, origin.y, origin.z, end.x, end.y, end.z, newEnd.x, newEnd.y, newEnd.z, countBefore);
+                   "call #%d: origin={%.3f,%.3f,%.3f} -> %s{%.3f,%.3f,%.3f} original end={%.3f,%.3f,%.3f} "
+                   "controller-redirected end={%.3f,%.3f,%.3f} (candidateCount before=%d)",
+                   n, origin.x, origin.y, origin.z, fromHand ? "hand " : "unchanged ", newOrigin.x, newOrigin.y,
+                   newOrigin.z, end.x, end.y, end.z, newEnd.x, newEnd.y, newEnd.z, countBefore);
 
         unsigned char result = g_originalFireCandidate(param1, param2, param3);
 
         endPtr[0] = saved[0];
         endPtr[1] = saved[1];
         endPtr[2] = saved[2];
+        originPtr[0] = savedOrigin[0];
+        originPtr[1] = savedOrigin[1];
+        originPtr[2] = savedOrigin[2];
 
         int countAfter = *countField;
         MOHW_LOG(kLogFile, "call #%d: result=%u candidateCount %d -> %d (done)", n, result, countBefore, countAfter);

@@ -51,4 +51,10 @@ void RemoveFovScaleHook();
 // axis in this project needing a live sign-flip test.
 void CheckFovScaleHotkeys();
 
+// The head-driven share of the yaw in the camera transform just processed (AimingController space, radians):
+// aiming_controller_hook.h's GetHeadYawOffset run through the same smoothing filter and pair-freeze as the camera's
+// own rotation, so it matches what was actually rendered. Separates head yaw from mouse/stick turning for
+// hooks/render_pose_stamp.cpp. Equals GetHeadYawOffset() when rotation smoothing is off.
+float GetRenderedHeadYawOffset();
+
 } // namespace mohw

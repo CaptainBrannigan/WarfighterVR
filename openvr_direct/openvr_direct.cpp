@@ -1,4 +1,6 @@
 #include "openvr_direct.h"
+#include "openvr_types.h"
+#include "vr_input.h"
 
 #include "../sdk/logging.h"
 #include "../sdk/vr_math.h"
@@ -56,8 +58,10 @@ constexpr int kSubmitFlag_TextureWithPose = 0x08; // vr::Submit_TextureWithPose
 // IVRCompositor methods called through the raw vtable (IVRCompositor_029): SetTrackingSpace(0), GetTrackingSpace(1),
 // WaitGetPoses(2), GetLastPoses(3), GetLastPoseForTrackedDeviceIndex(4), GetSubmitTexture(5), Submit(6). C++ virtual
 // calls on Windows x86 use __thiscall (this in ECX).
+constexpr int kGetTrackingSpaceVtableIndex = 1;
 constexpr int kWaitGetPosesVtableIndex = 2;
 constexpr int kSubmitVtableIndex = 6;
+using PFN_GetTrackingSpace = int(__thiscall*)(void* self);
 using PFN_WaitGetPoses = int(__thiscall*)(void* self, void* pRenderPoseArray, uint32_t unRenderPoseArrayCount, void* pGamePoseArray,
                                             uint32_t unGamePoseArrayCount);
 using PFN_Submit = int(__thiscall*)(void* self, int eEye, const DirectTexture* pTexture, const void* pBounds, int nSubmitFlags);
@@ -72,68 +76,6 @@ constexpr int kGetFloatTrackedDevicePropertyVtableIndex = 23;
 using PFN_GetFloatTrackedDeviceProperty = float(__thiscall*)(void* self, uint32_t unDeviceIndex, int prop, int* pError);
 constexpr uint32_t kTrackedDeviceIndexHmd = 0; // vr::k_unTrackedDeviceIndex_Hmd
 constexpr int kProp_DisplayFrequency_Float = 2002; // vr::Prop_DisplayFrequency_Float
-
-// Byte-for-byte stand-in for vr::TrackedDevicePose_t (third_party/openvr/headers/openvr.h) -- same "plain data, no
-// vtable" reasoning as DirectTexture above. mDeviceToAbsoluteTracking is a row-major 3x4 matrix (float m[row][col]):
-// columns 0-2 are the right/up/forward basis vectors, column 3 is the position, all in the compositor's tracking
-// space (irrelevant which one -- everything this pipeline does with it is relative to a live recenter, see
-// hooks/aiming_controller_hook.cpp's Recenter/hooks/head_position.cpp).
-struct RawTrackedDevicePose
-{
-    float deviceToAbsoluteTracking[3][4];
-    float velocity[3];
-    float angularVelocity[3];
-    int trackingResult; // ETrackingResult -- unused, kept only so the struct's size/layout matches exactly
-    bool poseIsValid;
-    bool deviceIsConnected;
-};
-
-// Standard robust rotation-matrix -> quaternion conversion (Shepperd's method), applied to
-// RawTrackedDevicePose::deviceToAbsoluteTracking's upper-left 3x3. OpenVR and OpenXR share the same coordinate
-// convention (right-handed, Y-up, -Z-forward), so the result plugs directly into the SAME HeadPoseBlock consumers
-// (hooks/aiming_controller_hook.cpp, hooks/head_position.cpp) that were built against the companion's
-// OpenXR-sourced quaternion -- no axis remapping needed.
-mohw::Quat MatrixToQuat(const float m[3][4])
-{
-    float r00 = m[0][0], r01 = m[0][1], r02 = m[0][2];
-    float r10 = m[1][0], r11 = m[1][1], r12 = m[1][2];
-    float r20 = m[2][0], r21 = m[2][1], r22 = m[2][2];
-    float trace = r00 + r11 + r22;
-    mohw::Quat q{};
-    if (trace > 0.0f)
-    {
-        float s = sqrtf(trace + 1.0f) * 2.0f;
-        q.w = 0.25f * s;
-        q.x = (r21 - r12) / s;
-        q.y = (r02 - r20) / s;
-        q.z = (r10 - r01) / s;
-    }
-    else if (r00 > r11 && r00 > r22)
-    {
-        float s = sqrtf(1.0f + r00 - r11 - r22) * 2.0f;
-        q.w = (r21 - r12) / s;
-        q.x = 0.25f * s;
-        q.y = (r01 + r10) / s;
-        q.z = (r02 + r20) / s;
-    }
-    else if (r11 > r22)
-    {
-        float s = sqrtf(1.0f + r11 - r00 - r22) * 2.0f;
-        q.w = (r02 - r20) / s;
-        q.x = (r01 + r10) / s;
-        q.y = 0.25f * s;
-        q.z = (r12 + r21) / s;
-    }
-    else
-    {
-        float s = sqrtf(1.0f + r22 - r00 - r11) * 2.0f;
-        q.w = (r10 - r01) / s;
-        q.x = (r02 + r20) / s;
-        q.y = (r12 + r21) / s;
-        q.z = 0.25f * s;
-    }
-    return q;
-}
 
 // Inverse of MatrixToQuat above (render-pose stamping port -- see render_pose_stamp.h's GetPendingRenderPoseStamp
 // comment). Places the quaternion's rotated identity basis vectors into the SAME row/column slots MatrixToQuat
@@ -419,6 +361,14 @@ void ConnectThreadProc()
     g_waitGetPoses = reinterpret_cast<PFN_WaitGetPoses>(vtable[kWaitGetPosesVtableIndex]);
     g_submit = reinterpret_cast<PFN_Submit>(vtable[kSubmitVtableIndex]);
 
+    // Controllers: SteamVR Input, in the compositor's own tracking space so hand poses match the head pose.
+    int trackingUniverse = reinterpret_cast<PFN_GetTrackingSpace>(vtable[kGetTrackingSpaceVtableIndex])(compositor);
+    int inputErr = kInitError_None;
+    void* input = getGenericInterface("IVRInput_011", &inputErr);
+    MOHW_LOG(kLogFile, "IVRInput_011 = %p, err=%d", input, inputErr);
+    if (!InitVrInput(input, trackingUniverse))
+        MOHW_LOG(kLogFile, "SteamVR Input setup FAILED -- continuing without controllers (see mohwvr_vrinput.log)");
+
     MOHW_LOG(kLogFile, "CONNECTED -- game thread will start the separate-device SubmitThreadProc on its first call");
     g_state.store(static_cast<int>(ConnectState::Connected), std::memory_order_release);
 }
@@ -550,6 +500,7 @@ void SubmitThreadProc()
 
         RawTrackedDevicePose hmdPose{};
         g_waitGetPoses(g_compositor, &hmdPose, 1, nullptr, 0);
+        UpdateVrInput();
 
         if (hmdPose.poseIsValid)
         {

@@ -28,6 +28,18 @@ constexpr float kFallbackPitchClampMinDeg = -75.0f;
 constexpr float kFallbackPitchClampMaxDeg = 72.0f;
 constexpr float kDegToRad = 0.017453292519943295f;
 
+// Pitch input sources inside FUN_009DDA90's 37-dword by-value parameter block (dword i = [EBP + 8 + 4*i]), read
+// from its disassembly in the Scylla dump (2026-09-26):
+//   dword 0  = input device object (normal aim mode); GetAxis(i) for i < 12 is a plain float at device + 4*i, and
+//              axis 5 is the stick pitch RATE the update caches into AimingController+0x50.
+//   dword 20 = per-tick mouse pitch delta, added straight onto the final pitch at the update's tail (0x009DE8C4).
+// Zeroing both before the call means the game never applies any pitch input, rather than applying it and having
+// ApplyHeadAim overwrite it afterwards.
+constexpr int kArgInputDevice = 0;
+constexpr int kArgFirePullYaw = 19; // subtracted from the final yaw at the update's tail (0x009DE8B5), see FIRE PULL
+constexpr int kArgMousePitchDelta = 20;
+constexpr int kDevicePitchRateByteOffset = 5 * 4;
+
 // Isolated, no C++ objects requiring unwinding in the frame -- same
 // __try/__except-can't-coexist-with-object-unwinding constraint as every
 // other SEH-safe helper in this project (see engine_function_hook.cpp's
@@ -58,72 +70,143 @@ bool SehSafeWriteFloat(void* dst, float value)
     }
 }
 
-// Recenter anchor -- captured once when head-aim turns on (or on an
-// explicit F3 press), NOT re-read every frame, so the anchor stays fixed
-// while the HMD delta since that moment accumulates on top of it. Same
-// "baseline = whatever was already there" philosophy as
-// commit_view_transform_hook.cpp's rotation composition, just in scalar
-// yaw/pitch space instead of a full basis (AimingController stores plain
-// angles, not a rotation matrix).
+// HEAD LOOK MODEL (2026-09-26): yaw is ADDITIVE, pitch is AUTHORITATIVE.
+//   yaw   = the game's own yaw after its update (mouse/stick turning, untouched) + sign * sens * (headYaw - zeroHeadYaw)
+//   pitch = sign * sens * headPitch, absolute: a level head is always a level view, and recentering can't shift it.
+// The game's own yaw really is independent of what we write: every update restarts from its own stored heading
+// (0x009DE77C copies [this+8]+0xC/+0x10 in first), which is also why a raw read of +0xC used to return the same fixed
+// value no matter where we'd pointed the view (2026-08-22). So "additive" is just game yaw + head offset each tick,
+// with no risk of the offset feeding back into itself.
+//
+// g_baselineYaw tracks that game yaw every tick; g_zeroHeadPitch/g_baselinePitch stay 0 (absolute pitch). Consumers of
+// GetHeadAimMapping (hooks/head_position.cpp, hooks/render_pose_stamp.cpp) depend on these meanings.
 std::atomic<bool> g_haveRecenter{false};
 std::atomic<bool> g_recenterRequested{true}; // true on module load so the very first eligible call recenters
 std::atomic<float> g_zeroHeadYaw{0.0f};
 std::atomic<float> g_zeroHeadPitch{0.0f};
 std::atomic<float> g_baselineYaw{0.0f};
 std::atomic<float> g_baselinePitch{0.0f};
+std::atomic<float> g_headYawOffset{0.0f}; // radians added on top of the game's own yaw this tick (AimingController space)
 // HMD position at the last recenter (XR local space, meters) -- origin for head-position tracking (hooks/head_position.cpp).
 std::atomic<float> g_zeroHeadPosX{0.0f}, g_zeroHeadPosY{0.0f}, g_zeroHeadPosZ{0.0f};
 
-// The last yaw/pitch WE ourselves successfully wrote -- see Recenter()'s
-// comment for why this, not a fresh memory read, is what recenter should
-// baseline from.
+// The last yaw/pitch this hook wrote (diagnostics only, see GetLastAppliedYawPitch).
 std::atomic<bool> g_haveLastWritten{false};
 std::atomic<float> g_lastWrittenYaw{0.0f};
 std::atomic<float> g_lastWrittenPitch{0.0f};
 
-// fallbackYaw/fallbackPitch: whatever's currently in AimingController's
-// fields, ONLY used on the very first-ever recenter (before we've written
-// anything ourselves yet). On every SUBSEQUENT recenter, baseline instead
-// from our OWN last-written value, not a fresh memory read -- confirmed
-// live (2026-08-22) that a fresh read at recenter time is unreliable: it
-// consistently returned the exact same fixed value (matching this
-// project's already-documented "upstream corrector pulls this field
-// toward a stored baseline" mystery, see project_mohw_yaw_facing_
-// investigation.md's "Addendum" section) rather than wherever the
-// character was actually, visibly facing. On every NORMAL (non-recenter)
-// frame this was never a problem, since newYaw/newPitch are computed
-// purely from baseline+delta and the fresh read is never used for
-// anything -- recenter was the ONLY place a corrector-contaminated raw
-// read could leak into the mod's own state. Baselining from our own last
-// write instead sidesteps the corrector entirely, since it reflects
-// wherever OUR continuous override actually placed the character, which
-// is exactly what "recenter to current facing" should mean.
-void Recenter(float fallbackYaw, float fallbackPitch)
+// Makes the direction the head currently faces the game's forward: the yaw offset restarts at 0, so the view lines up
+// with the game's own (body) yaw. Pitch has no recenter state, it's absolute.
+void Recenter(float gameYaw)
 {
     mohwvr::ipc::HeadPoseBlock pose{};
     if (!GetHeadPose(&pose))
-        return; // companion not running / no pose yet -- try again next call
+        return; // no head pose yet -- try again next call
 
     Quat q{pose.orientationX, pose.orientationY, pose.orientationZ, pose.orientationW};
     float headYaw = 0.0f, headPitch = 0.0f;
     QuatToYawPitch(q, &headYaw, &headPitch);
 
-    bool haveLastWritten = g_haveLastWritten.load(std::memory_order_relaxed);
-    float baselineYaw = haveLastWritten ? g_lastWrittenYaw.load(std::memory_order_relaxed) : fallbackYaw;
-    float baselinePitch = haveLastWritten ? g_lastWrittenPitch.load(std::memory_order_relaxed) : fallbackPitch;
-
     g_zeroHeadYaw.store(headYaw, std::memory_order_relaxed);
-    g_zeroHeadPitch.store(headPitch, std::memory_order_relaxed);
-    g_baselineYaw.store(baselineYaw, std::memory_order_relaxed);
-    g_baselinePitch.store(baselinePitch, std::memory_order_relaxed);
+    g_zeroHeadPitch.store(0.0f, std::memory_order_relaxed);
+    g_baselineYaw.store(gameYaw, std::memory_order_relaxed);
+    g_baselinePitch.store(0.0f, std::memory_order_relaxed);
+    g_headYawOffset.store(0.0f, std::memory_order_relaxed);
     g_zeroHeadPosX.store(pose.positionX, std::memory_order_relaxed);
     g_zeroHeadPosY.store(pose.positionY, std::memory_order_relaxed);
     g_zeroHeadPosZ.store(pose.positionZ, std::memory_order_relaxed);
     g_haveRecenter.store(true, std::memory_order_relaxed);
 
-    MOHW_LOG(kLogFile,
-              "Recenter: zeroHead(yaw=%.4f pitch=%.4f) baseline(yaw=%.4f pitch=%.4f) source=%s", headYaw, headPitch,
-              baselineYaw, baselinePitch, haveLastWritten ? "last-written" : "fresh-read(first-ever recenter)");
+    MOHW_LOG(kLogFile, "Recenter: zeroHeadYaw=%.4f gameYaw=%.4f (pitch is absolute, no anchor)", headYaw, gameYaw);
+}
+
+// Runs just before the game's own update while head-aim is on: removes all pitch input so the update never moves
+// pitch at all (see kArgMousePitchDelta's comment). The stick axis lives in a game-owned input snapshot, so its
+// original value is handed back for RestoreStickPitch after the call; the mouse delta is our own copy of the args.
+float* SuppressPitchInput(uint32_t* argDwords, float* savedStickPitch)
+{
+    float zero = 0.0f;
+    memcpy(&argDwords[kArgMousePitchDelta], &zero, sizeof(float));
+
+    auto* device = reinterpret_cast<unsigned char*>(static_cast<uintptr_t>(argDwords[kArgInputDevice]));
+    if (!device)
+        return nullptr;
+    float* stickPitch = reinterpret_cast<float*>(device + kDevicePitchRateByteOffset);
+    if (!SehSafeReadFloat(savedStickPitch, stickPitch) || !SehSafeWriteFloat(stickPitch, 0.0f))
+        return nullptr;
+    return stickPitch;
+}
+
+void RestoreStickPitch(float* stickPitch, float savedStickPitch)
+{
+    if (stickPitch)
+        SehSafeWriteFloat(stickPitch, savedStickPitch);
+}
+
+// FIRE PULL (2026-09-26): after a shot, the game pulls its aim toward where the shot actually went. Invisible in the
+// stock game, where shots go where the view points, but with the shot redirected to the controller it drags the view
+// toward the controller (and round 180 degrees when a build had the direction backwards). It arrives two ways, both
+// live-confirmed with the head still and the controller held 90 degrees out:
+//   1. inside the update, through dword 19 (added onto the final yaw at the tail, 0x009DE8B5) -- ramp-and-decay
+//      values after each shot, never on an empty magazine. Dword 19 is NOT the mouse: a real mouse push turned the
+//      game +3.9 deg a tick with dword 19 exactly 0. So it's simply zeroed while head-aim is on (SuppressFirePullYaw).
+//   2. between updates, by writing the stored heading ([this+8]+0xC): ~70 deg over a held burst with every update's
+//      own change zeroed, plus copies of the yaw we write (head offset included) on each shot. Undone by
+//      GuardStoredHeading.
+void SuppressFirePullYaw(uint32_t* argDwords)
+{
+    float zero = 0.0f;
+    memcpy(&argDwords[kArgFirePullYaw], &zero, sizeof(float));
+}
+
+// Runs before each update while head-aim is on. The game's own yaw only legitimately changes inside the update
+// (mouse, stick); within continuous play the stored heading it restarts from equals the yaw the previous update
+// produced. Anything that moved it in between is put back, whatever its size -- the fire pull (see FIRE PULL above)
+// and its copies of the yaw we write. Live-confirmed that size can't separate those from the game placing the player:
+// with the head turned, each shot copied our yaw from a tick or two earlier (so not an exact match) ~30 deg away, and
+// a "big jump = placement" exception accepted it every tick, spinning the view. Placement is instead recognised by
+// the update's own continuity: a different AimingController (respawn, level load), or a gap since the last update
+// (it doesn't run in menus, loading or cutscenes) -- then the stored heading is taken as the game's yaw as-is.
+void GuardStoredHeading(void* aimingController)
+{
+    constexpr unsigned long long kContinuityGapMs = 500;
+    static void* lastController = nullptr;
+    static unsigned long long lastUpdateMs = 0;
+    unsigned long long now = GetTickCount64();
+    bool continuous = aimingController == lastController && now - lastUpdateMs <= kContinuityGapMs;
+    lastController = aimingController;
+    lastUpdateMs = now;
+
+    if (!g_haveRecenter.load(std::memory_order_relaxed) || !g_haveLastWritten.load(std::memory_order_relaxed))
+        return;
+    uint32_t source = 0;
+    unsigned char* base = reinterpret_cast<unsigned char*>(aimingController);
+    if (!SehSafeReadFloat(reinterpret_cast<float*>(&source), base + 0x8) || source == 0)
+        return;
+    float* storedYaw = reinterpret_cast<float*>(static_cast<uintptr_t>(source) + 0xC);
+    float stored = 0.0f;
+    if (!SehSafeReadFloat(&stored, storedYaw) || !std::isfinite(stored))
+        return;
+
+    float gameYaw = g_baselineYaw.load(std::memory_order_relaxed);
+    float drift = WrapAngleSigned(stored - gameYaw);
+    if (fabsf(drift) <= 1e-4f)
+        return;
+    if (!continuous)
+    {
+        MOHW_LOG(kLogFile, "stored heading moved %.1f deg across a gap or new AimingController -- accepted as the game's",
+                  drift / kDegToRad);
+        return;
+    }
+    if (!SehSafeWriteFloat(storedYaw, gameYaw))
+        return;
+
+    static unsigned long long nextLogMs = 0;
+    if (now >= nextLogMs)
+    {
+        nextLogMs = now + 1000;
+        MOHW_LOG(kLogFile, "reverted stored heading change of %.2f deg", drift / kDegToRad);
+    }
 }
 
 void ApplyHeadAim(void* aimingController)
@@ -144,28 +227,32 @@ void ApplyHeadAim(void* aimingController)
 
     if (g_recenterRequested.exchange(false, std::memory_order_relaxed) || !g_haveRecenter.load(std::memory_order_relaxed))
     {
-        Recenter(currentYaw, currentPitch);
+        Recenter(currentYaw);
         return; // no meaningful delta on the very same call as the anchor
     }
 
     mohwvr::ipc::HeadPoseBlock pose{};
     if (!GetHeadPose(&pose))
-        return; // companion not running / no pose yet -- leave the field untouched this call
+        return; // no head pose yet -- leave the field untouched this call
 
     Quat q{pose.orientationX, pose.orientationY, pose.orientationZ, pose.orientationW};
     float headYaw = 0.0f, headPitch = 0.0f;
     QuatToYawPitch(q, &headYaw, &headPitch);
 
+    // currentYaw is the game's own yaw after this tick's update, mouse/stick turning included (see the HEAD LOOK
+    // MODEL comment above).
     float sensitivity = GetHeadAimSensitivity();
-    float yawDelta = WrapAngleSigned(headYaw - g_zeroHeadYaw.load(std::memory_order_relaxed)) * sensitivity;
-    float pitchDelta = WrapAngleSigned(headPitch - g_zeroHeadPitch.load(std::memory_order_relaxed)) * sensitivity;
+    float yawOffset = WrapAngleSigned(headYaw - g_zeroHeadYaw.load(std::memory_order_relaxed)) * sensitivity;
+    float pitchDelta = headPitch * sensitivity;
     if (GetHeadAimInvertYaw())
-        yawDelta = -yawDelta;
+        yawOffset = -yawOffset;
     if (GetHeadAimInvertPitch())
         pitchDelta = -pitchDelta;
 
-    float newYaw = WrapAngleUnsigned(g_baselineYaw.load(std::memory_order_relaxed) + yawDelta);
-    float newPitch = g_baselinePitch.load(std::memory_order_relaxed) + pitchDelta;
+    g_baselineYaw.store(currentYaw, std::memory_order_relaxed);
+    g_headYawOffset.store(yawOffset, std::memory_order_relaxed);
+    float newYaw = WrapAngleUnsigned(currentYaw + yawOffset);
+    float newPitch = pitchDelta;
 
     float clampMinDeg = kFallbackPitchClampMinDeg, clampMaxDeg = kFallbackPitchClampMaxDeg;
     if (GetHeadAimClampPitch())
@@ -204,9 +291,9 @@ void ApplyHeadAim(void* aimingController)
     if (now >= allowed && nextLogAllowedMs.compare_exchange_strong(allowed, now + 1000, std::memory_order_relaxed))
     {
         MOHW_LOG(kLogFile,
-                  "head-aim applied: head(yaw=%.4f pitch=%.4f) delta(yaw=%.4f pitch=%.4f) -> AimingController now "
+                  "head-aim applied: head(yaw=%.4f pitch=%.4f) gameYaw=%.4f yawOffset=%.4f -> AimingController now "
                   "(yaw=%.4f pitch=%.4f) clamp=%s[%.1f,%.1f]deg",
-                  headYaw, headPitch, yawDelta, pitchDelta, newYaw, newPitch,
+                  headYaw, headPitch, currentYaw, yawOffset, newYaw, newPitch,
                   GetHeadAimClampPitch() ? "" : "(off) ", clampMinDeg, clampMaxDeg);
     }
 }
@@ -263,11 +350,18 @@ struct ThisCallTrampoline
     void Hooked(Passthrough37 args)
     {
         void* self = this;
-        // ALWAYS forward first, byte-identical args -- preserves every
-        // other side effect this function has (aim-assist state, etc.);
-        // we only want to override the two facing fields afterward, not
-        // replace the function.
+        // Forward to the original every call, preserving every other side effect (aim-assist state, etc.). With
+        // head-aim on, pitch input is removed from the args first so the update never applies any.
+        bool headAimOn = GetHeadAimEnabled();
+        if (headAimOn)
+        {
+            GuardStoredHeading(self);
+            SuppressFirePullYaw(args.dwords);
+        }
+        float savedStickPitch = 0.0f;
+        float* stickPitch = headAimOn ? SuppressPitchInput(args.dwords, &savedStickPitch) : nullptr;
         g_original(self, args);
+        RestoreStickPitch(stickPitch, savedStickPitch);
 
         long long n = ++g_updateCalls;
         if (n == 1 || n % 300 == 0)
@@ -474,6 +568,11 @@ bool GetHeadAimMapping(float* zeroHeadYaw, float* zeroHeadPitch, float* baseline
     *baselineYaw = g_baselineYaw.load(std::memory_order_relaxed);
     *baselinePitch = g_baselinePitch.load(std::memory_order_relaxed);
     return true;
+}
+
+float GetHeadYawOffset()
+{
+    return g_headYawOffset.load(std::memory_order_relaxed);
 }
 
 } // namespace mohw

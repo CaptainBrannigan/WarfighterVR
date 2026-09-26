@@ -15,4 +15,9 @@ void ApplyHeadPosition(void* transformPtr);
 // this frame. Used by the render-pose stamp so the compositor knows where the head was when the frame was rendered.
 bool GetLastAppliedHeadPosition(float out[3]);
 
+// Converts a displacement in tracking space (meters, e.g. controller minus head) into a game-world offset: the same
+// yaw alignment, HeadPositionScale and horizontal flip ApplyHeadPosition uses. False until head-aim has recentered,
+// or if HeadAimInvertYaw is off (that mapping is a mirror and has no rigid world equivalent).
+bool TrackingOffsetToGameWorld(float dx, float dy, float dz, float out[3]);
+
 } // namespace mohw

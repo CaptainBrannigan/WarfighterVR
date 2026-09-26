@@ -227,8 +227,14 @@ void LogSmoothingIfDue(float rawYaw, float rawPitch, float interpYaw, float inte
                   rawYaw, rawPitch, interpYaw, interpPitch, t, windowMs);
 }
 
+// See GetRenderedHeadYawOffset's declaration comment. Written by SmoothCameraRotation, read (same thread, right after,
+// via ComputeRenderPoseStamp) through GetRenderedHeadYawOffset.
+std::atomic<float> g_renderedHeadYawOffset{0.0f};
+std::atomic<bool> g_haveRenderedHeadYawOffset{false};
+
 bool SmoothCameraRotation(void* transformPtr)
 {
+    g_haveRenderedHeadYawOffset.store(false, std::memory_order_relaxed);
     if (!GetRotationSmoothingEnabled())
         return false;
 
@@ -269,7 +275,7 @@ bool SmoothCameraRotation(void* transformPtr)
     // computed result. Falls through (returns false, transform untouched) if no left value exists yet.
     bool rightEye = IsRightEyeActive();
     static bool haveLeftValue = false;
-    static float lastLeftInterpYaw = 0.0f, lastLeftInterpPitch = 0.0f;
+    static float lastLeftInterpYaw = 0.0f, lastLeftInterpPitch = 0.0f, lastLeftHeadYawOffset = 0.0f;
     float interpYaw, interpPitch;
 
     if (rightEye)
@@ -278,6 +284,8 @@ bool SmoothCameraRotation(void* transformPtr)
             return false;
         interpYaw = lastLeftInterpYaw;
         interpPitch = lastLeftInterpPitch;
+        g_renderedHeadYawOffset.store(lastLeftHeadYawOffset, std::memory_order_relaxed);
+        g_haveRenderedHeadYawOffset.store(true, std::memory_order_relaxed);
     }
     else
     {
@@ -295,6 +303,10 @@ bool SmoothCameraRotation(void* transformPtr)
         // tick interval.
         static bool haveSample = false;
         static float smoothYaw = 0.0f, smoothPitch = 0.0f;
+        // The head-driven part of the yaw, filtered identically. The filter is linear, so smoothing the head
+        // offset on its own gives exactly the head's share of the smoothed yaw, with mouse/stick turning left out.
+        static float smoothHeadYawOffset = 0.0f;
+        float rawHeadYawOffset = GetHeadYawOffset();
         static LARGE_INTEGER lastCallQpc{};
         static LARGE_INTEGER qpcFreq{};
         static bool haveQpcFreq = false;
@@ -311,6 +323,7 @@ bool SmoothCameraRotation(void* transformPtr)
         {
             smoothYaw = rawYaw;
             smoothPitch = rawPitch;
+            smoothHeadYawOffset = rawHeadYawOffset;
             lastCallQpc = now;
             haveSample = true;
             return false; // nothing to blend from yet, leave untouched
@@ -337,6 +350,8 @@ bool SmoothCameraRotation(void* transformPtr)
 
         smoothYaw = smoothYaw + WrapAngleSigned(rawYaw - smoothYaw) * alpha;
         smoothPitch = smoothPitch + (rawPitch - smoothPitch) * alpha;
+        smoothHeadYawOffset = WrapAngleSigned(smoothHeadYawOffset +
+                                              WrapAngleSigned(rawHeadYawOffset - smoothHeadYawOffset) * alpha);
 
         interpYaw = smoothYaw;
         interpPitch = smoothPitch;
@@ -345,7 +360,10 @@ bool SmoothCameraRotation(void* transformPtr)
 
         lastLeftInterpYaw = interpYaw;
         lastLeftInterpPitch = interpPitch;
+        lastLeftHeadYawOffset = smoothHeadYawOffset;
         haveLeftValue = true;
+        g_renderedHeadYawOffset.store(smoothHeadYawOffset, std::memory_order_relaxed);
+        g_haveRenderedHeadYawOffset.store(true, std::memory_order_relaxed);
     }
 
     // NEGATED vs. the retired commit_view_transform_hook.cpp's
@@ -737,6 +755,13 @@ void CheckFovScaleHotkeys()
                   newWindow, newWindow * 80.0f / 1000.0f);
     }
     windowDownKeyWasDown = windowDownKeyDown;
+}
+
+float GetRenderedHeadYawOffset()
+{
+    if (g_haveRenderedHeadYawOffset.load(std::memory_order_relaxed))
+        return g_renderedHeadYawOffset.load(std::memory_order_relaxed);
+    return GetHeadYawOffset();
 }
 
 } // namespace mohw

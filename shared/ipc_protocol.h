@@ -116,32 +116,17 @@ struct HeadPoseBlock
     float positionX, positionY, positionZ;                        // meters, XR LOCAL space
 };
 
-// Right motion controller's aim pose, companion -> proxy_dll -- same
-// transport pattern and same "no lock, publish-and-overwrite" reasoning as
-// HeadPoseBlock above. Sourced from the OpenXR "aim" pose (not "grip") on
-// /user/hand/right, since aim is the pose meant for pointing/targeting
-// (grip is oriented for how the controller sits in the hand, which differs
-// by controller model). Orientation only -- position is included for
-// completeness but the first consumer (hooks/fire_candidate_redirect_hook.cpp,
-// hooks/bullet_raycast_redirect_hook.cpp) only uses orientation, per the
-// user's explicit direction to redirect the shot's ROTATION from the
-// controller, not its position (the game's own muzzle/reticle origin is
-// left as-is).
-constexpr wchar_t kRightControllerPoseMapName[] = L"MOHWVR_RightControllerPose";
-
+// One motion controller's aim pose, published in-process by openvr_direct/vr_input.cpp from SteamVR Input's
+// per-hand pose actions (default binding: /pose/tip, the pointing pose). Position is included but the shot hooks
+// (hooks/fire_candidate_redirect_hook.cpp, hooks/bullet_raycast_redirect_hook.cpp) only use orientation: they
+// redirect the shot's ROTATION, leaving the game's own muzzle origin as-is. Buttons/sticks are separate, see
+// openvr_direct/vr_input.h's VrActionState.
 struct ControllerPoseBlock
 {
-    LONG ready;          // 0 until the companion has published at least one real pose
+    LONG ready;          // 0 when this hand has no tracked pose right now
     UINT64 frameCounter; // increments on every publish
-    float orientationX, orientationY, orientationZ, orientationW; // quaternion, XR LOCAL space
-    float positionX, positionY, positionZ;                        // meters, XR LOCAL space
-    // Analog trigger value on /user/hand/right/input/trigger/value, 0
-    // (released) to 1 (fully pulled). Added so the trigger can stand in for
-    // a left mouse click (task: "make the controller trigger act as a left
-    // mouse input for the time being") without a separate IPC channel --
-    // it's cheap to publish alongside the pose every frame regardless of
-    // whether a consumer is using it yet.
-    float triggerValue;
+    float orientationX, orientationY, orientationZ, orientationW; // quaternion, compositor tracking space
+    float positionX, positionY, positionZ;                        // meters, compositor tracking space
 };
 
 // Headset view geometry, companion -> proxy_dll (2026-09-20). Published every frame

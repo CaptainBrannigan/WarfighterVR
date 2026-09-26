@@ -3,6 +3,7 @@
 #include "aiming_controller_hook.h"
 #include "alternating_eye.h"
 #include "companion_bridge.h"
+#include "fov_scale_hook.h"
 #include "head_position.h"
 #include "../sdk/logging.h"
 #include "../sdk/settings.h"
@@ -105,13 +106,13 @@ void ComputeRenderPoseStamp(void* transformPtr)
         float sens = GetHeadAimSensitivity();
         if (lenSq > 0.5f && lenSq < 2.0f && sens > 0.01f)
         {
-            float yawT = atan2f(fwd.x, fwd.z);
             float pitchT = asinf(fwd.y > 1.0f ? 1.0f : (fwd.y < -1.0f ? -1.0f : fwd.y));
-            // Measured from the ORDERING PROBE log: the camera transform's yaw/pitch are the AimingController's mirrored:
-            // yawT = pi - yawAC, pitchT = -pitchAC.
-            float yawAC = kPi - yawT;
+            // Measured from the ORDERING PROBE log: the camera transform's pitch is the AimingController's negated
+            // (pitchT = -pitchAC). Yaw can't be inverted from the transform any more: it's the game's own
+            // mouse/stick yaw plus the head offset (aiming_controller_hook.cpp's HEAD LOOK MODEL), so take the head
+            // offset that went into this rendered frame directly instead.
             float pitchAC = -pitchT;
-            float yawDelta = WrapAngleSigned(yawAC - baseYaw);
+            float yawDelta = GetRenderedHeadYawOffset();
             float pitchDelta = pitchAC - basePitch;
             // Invert the head-aim mapping: AC = baseline + sign * sens * (head - zeroHead).
             float headYawDelta = yawDelta / sens * (GetHeadAimInvertYaw() ? -1.0f : 1.0f);

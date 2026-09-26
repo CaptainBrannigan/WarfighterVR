@@ -21,10 +21,11 @@ constexpr float kYawDegrees = 0.0f; // yaw test retired -- now a translation tes
 
 // Translation test (2026-09-19): objects move by right*row0 + up*row1 + fwd*(-row2)
 // of the camera matrix passed to the setter; the camera position moves the opposite way
-// (view = inverse of camera). Units assumed metres. Numpad 4/6 = right -/+ 0.1,
-// 8/2 = up +/- 0.1, 1/3 = forward -/+ 0.1, 5 = reset to defaults (0.5, 0.5, 0).
-constexpr float kDefaultRight = 0.5f;
-constexpr float kDefaultUp = 0.5f;
+// (view = inverse of camera). Units assumed metres. The hotkeys that stepped these are
+// retired (see PollHotkeys); defaults are 0 so the weapon sits where the game puts it --
+// the 0.5/0.5 test offset used to verify this hook was still being applied (2026-09-26).
+constexpr float kDefaultRight = 0.0f;
+constexpr float kDefaultUp = 0.0f;
 constexpr float kDefaultFwd = 0.0f;
 std::atomic<float> g_offRight{kDefaultRight};
 std::atomic<float> g_offUp{kDefaultUp};
@@ -365,7 +366,8 @@ bool ApplyControllerDrive(float m[16], float manualRight, float manualUp, float 
 // every frame from HookImpl (needed for camera_matrix_test_hook.h's IsPlayerSkeletonLoaded, and to leave the
 // existing default offset/selector values -- e.g. g_offRight/g_offUp's 0.5/0.5 default, g_selected's 0 -- exactly as
 // they already were, since it's untested whether anything currently visible depends on them). Only the interactive
-// hotkey polling was removed; nothing about what HookImpl actually does to a matched draw call changed.
+// hotkey polling was removed. The g_offRight/g_offUp test offset has since been zeroed (2026-09-26), so matched
+// weapon batches now pass through unchanged.
 void PollHotkeys()
 {
 }
