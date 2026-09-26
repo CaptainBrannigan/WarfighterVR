@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <thread>
 
 namespace mohw::openvr_direct {
@@ -211,6 +212,11 @@ std::atomic<int> g_rightGeneration{0};
 IDXGIKeyedMutex* g_leftKeyedMutexGame = nullptr;
 IDXGIKeyedMutex* g_rightKeyedMutexGame = nullptr;
 constexpr DWORD kKeyedMutexTimeoutMs = 5; // bounded on purpose -- never let either side risk a real stall over this
+
+// Written by UpdateOpenVrDirectPair while it holds both keyed mutexes; read by SubmitThreadProc while it holds both.
+std::mutex g_pairStampMutex;
+PairStamp g_pairStamp;
+std::atomic<bool> g_pairPublishEnabled{true};
 
 // The second, independent D3D11 device (see the design comment near g_leftTex) -- created once, lazily, the first
 // time UpdateOpenVrDirect runs with a real game device available (needed to find the matching adapter). Written
@@ -493,6 +499,21 @@ void SubmitThreadProc()
     int submitBurstRemaining = 0;
     long long lastSubmitUs = 0;
 
+    // POSE PERTURBATION TEST (2026-09-25), NUMPAD7 cycles: 0 = off, 1 = right eye's submitted pose yawed,
+    // 2 = left eye's submitted pose yawed. Tests whether the compositor honours eye 1's pose at all: if mode 1
+    // doesn't visibly shift the right eye's image, SteamVR is using something other than eye 1's own pose.
+    constexpr float kPosePerturbYawDeg = 5.0f;
+    bool perturbKeyWasDown = false;
+    int perturbMode = 0;
+
+    // STAMP SLOT FLIP TEST (2026-09-25), NUMPAD6 toggles: the compositor applies eye 0's pose to both eyes (NUMPAD7
+    // result), so the shared stamp decides which eye's texture matches it. Taking it from the right eye's slot
+    // instead of the left should move the every-other-Present mismatch, and so the ghost, onto the left eye.
+    bool stampFlipKeyWasDown = false;
+    bool stampFromRightSlot = false;
+
+    bool pairKeyWasDown = false;
+
     for (;;)
     {
         bool submitBurstKeyDown = (GetAsyncKeyState(VK_NUMPAD5) & 0x8000) != 0;
@@ -502,6 +523,30 @@ void SubmitThreadProc()
             MOHW_LOG(kLogFile, "===== SUBMIT BURST ARMED: logging next 300 loop iterations unconditionally =====");
         }
         submitBurstKeyWasDown = submitBurstKeyDown;
+
+        bool perturbKeyDown = (GetAsyncKeyState(VK_NUMPAD7) & 0x8000) != 0;
+        bool perturbModeChanged = perturbKeyDown && !perturbKeyWasDown;
+        if (perturbModeChanged)
+            perturbMode = (perturbMode + 1) % 3;
+        perturbKeyWasDown = perturbKeyDown;
+
+        bool stampFlipKeyDown = (GetAsyncKeyState(VK_NUMPAD6) & 0x8000) != 0;
+        if (stampFlipKeyDown && !stampFlipKeyWasDown)
+        {
+            stampFromRightSlot = !stampFromRightSlot;
+            MOHW_LOG(kLogFile, "NUMPAD6 stamp slot flip test -> shared stamp now taken from the %s eye's slot",
+                      stampFromRightSlot ? "RIGHT" : "LEFT (normal)");
+        }
+        stampFlipKeyWasDown = stampFlipKeyDown;
+
+        bool pairKeyDown = (GetAsyncKeyState(VK_NUMPAD3) & 0x8000) != 0;
+        if (pairKeyDown && !pairKeyWasDown)
+        {
+            bool enabled = !g_pairPublishEnabled.load(std::memory_order_relaxed);
+            g_pairPublishEnabled.store(enabled, std::memory_order_relaxed);
+            MOHW_LOG(kLogFile, "NUMPAD3 pair publish -> %s", enabled ? "ON (fix active; NUMPAD6 flip ignored)" : "OFF (old per-eye publishing)");
+        }
+        pairKeyWasDown = pairKeyDown;
 
         RawTrackedDevicePose hmdPose{};
         g_waitGetPoses(g_compositor, &hmdPose, 1, nullptr, 0);
@@ -528,26 +573,72 @@ void SubmitThreadProc()
         if (!haveLeft || !haveRight)
             continue; // startup grace period -- wait until both eyes have published a shared texture at least once
 
-        // POSE-STAMP SUBMIT DISABLED (2026-09-25): pair-freeze rotation smoothing just restored (fov_scale_hook.cpp)
-        // -- forcing Submit_Default so SteamVR's own reprojection isn't also acting on top of it, muddying whether
-        // the pair-freeze fix alone resolves the rotation jitter. haveSharedStamp forced false; the shared-pose
-        // query above it is skipped entirely so it can't mask this test either.
+        // AcquireSync/ReleaseSync around each eye's Submit: real GPU-level mutual exclusion against the game
+        // thread's CopyResource into the SAME shared texture -- see g_leftKeyedMutexGame's declaration comment.
+        // Used as a plain lock rather than a producer/consumer ping-pong key, because Submit must still run for
+        // BOTH eyes every single loop iteration regardless of whether that eye rendered anything new this time.
+        // A short, bounded timeout means a rare failure to acquire degrades to "submit anyway, log it" rather
+        // than ever risking a stall on this thread -- skipping Submit entirely would violate the
+        // WaitGetPoses/Submit pairing this whole design exists to protect. Taken BEFORE reading the pair stamp, so
+        // the stamp and both textures always come from the same published pair.
+        static long long leftAcquireFails = 0, rightAcquireFails = 0;
+        bool leftLocked = ownLeftMutex && SUCCEEDED(ownLeftMutex->AcquireSync(0, kKeyedMutexTimeoutMs));
+        if (!leftLocked && (++leftAcquireFails <= 5 || leftAcquireFails % 1000 == 0))
+            MOHW_LOG(kLogFile, "left eye AcquireSync timed out (count=%lld) -- submitting anyway", leftAcquireFails);
+        bool rightLocked = ownRightMutex && SUCCEEDED(ownRightMutex->AcquireSync(0, kKeyedMutexTimeoutMs));
+        if (!rightLocked && (++rightAcquireFails <= 5 || rightAcquireFails % 1000 == 0))
+            MOHW_LOG(kLogFile, "right eye AcquireSync timed out (count=%lld) -- submitting anyway", rightAcquireFails);
+
+        // One stamp for both eyes: SteamVR applies eye 0's pose to both and ignores eye 1's. With pair publish on
+        // it's the stamp the current pair was rendered with; otherwise the old per-eye slot query.
         float sharedStampQuat[4], sharedStampPos[3];
         bool sharedStampPosValid = false;
         bool haveSharedStamp = false;
-
-        auto buildSubmitArgs = [&](ID3D11Texture2D* tex, DirectTextureWithPose* outTexWithPose,
-                                     int* outFlags) -> const void*
+        if (g_pairPublishEnabled.load(std::memory_order_relaxed))
         {
-            if (!haveSharedStamp)
+            std::lock_guard<std::mutex> lock(g_pairStampMutex);
+            haveSharedStamp = hmdPose.poseIsValid && g_pairStamp.valid;
+            for (int i = 0; i < 4; ++i)
+                sharedStampQuat[i] = g_pairStamp.quat[i];
+            for (int i = 0; i < 3; ++i)
+                sharedStampPos[i] = g_pairStamp.pos[i];
+            sharedStampPosValid = g_pairStamp.posValid;
+        }
+        else
+        {
+            haveSharedStamp = hmdPose.poseIsValid && GetPendingRenderPoseStamp(stampFromRightSlot, sharedStampQuat,
+                                                                                 sharedStampPos, &sharedStampPosValid);
+        }
+
+        if (perturbModeChanged)
+        {
+            static const char* kPerturbModeNames[3] = {"OFF", "RIGHT eye pose yawed", "LEFT eye pose yawed"};
+            MOHW_LOG(kLogFile, "NUMPAD7 pose perturbation test -> mode %d (%s, %.1f deg), pose stamp currently %s",
+                      perturbMode, kPerturbModeNames[perturbMode], kPosePerturbYawDeg,
+                      haveSharedStamp ? "ACTIVE" : "inactive (perturbed eye falls back to the live pose)");
+        }
+
+        auto buildSubmitArgs = [&](ID3D11Texture2D* tex, DirectTextureWithPose* outTexWithPose, int* outFlags,
+                                     float yawOffsetDeg) -> const void*
+        {
+            bool perturb = yawOffsetDeg != 0.0f && hmdPose.poseIsValid;
+            if (!haveSharedStamp && !perturb)
             {
                 *outFlags = 0; // Submit_Default -- no fresh stamp, use the live pose (WaitGetPoses' own default)
                 return nullptr;
             }
-            mohw::Quat q{sharedStampQuat[0], sharedStampQuat[1], sharedStampQuat[2], sharedStampQuat[3]};
+            mohw::Quat q = haveSharedStamp
+                               ? mohw::Quat{sharedStampQuat[0], sharedStampQuat[1], sharedStampQuat[2], sharedStampQuat[3]}
+                               : MatrixToQuat(hmdPose.deviceToAbsoluteTracking);
+            if (perturb)
+            {
+                float halfRad = yawOffsetDeg * (mohw::kPi / 180.0f) * 0.5f;
+                mohw::Quat yawQ{0.0f, sinf(halfRad), 0.0f, cosf(halfRad)}; // world-up (tracking space +Y)
+                q = mohw::QuatMultiply(yawQ, q);
+            }
             float pos[3] = {hmdPose.deviceToAbsoluteTracking[0][3], hmdPose.deviceToAbsoluteTracking[1][3],
                               hmdPose.deviceToAbsoluteTracking[2][3]};
-            if (sharedStampPosValid)
+            if (haveSharedStamp && sharedStampPosValid)
             {
                 float dx = sharedStampPos[0] - pos[0], dy = sharedStampPos[1] - pos[1], dz = sharedStampPos[2] - pos[2];
                 if (sqrtf(dx * dx + dy * dy + dz * dz) < 0.5f) // sanity, same 50cm bound companion used
@@ -570,25 +661,12 @@ void SubmitThreadProc()
         DirectTexture rightTex{ownRightTex, /*TextureType_DirectX*/ 0, /*ColorSpace_Auto*/ 0};
         DirectTextureWithPose leftTexPosed{}, rightTexPosed{};
         int leftFlags = 0, rightFlags = 0;
-        const void* leftPosedPtr = buildSubmitArgs(ownLeftTex, &leftTexPosed, &leftFlags);
-        const void* rightPosedPtr = buildSubmitArgs(ownRightTex, &rightTexPosed, &rightFlags);
+        const void* leftPosedPtr =
+            buildSubmitArgs(ownLeftTex, &leftTexPosed, &leftFlags, perturbMode == 2 ? kPosePerturbYawDeg : 0.0f);
+        const void* rightPosedPtr =
+            buildSubmitArgs(ownRightTex, &rightTexPosed, &rightFlags, perturbMode == 1 ? kPosePerturbYawDeg : 0.0f);
         const DirectTexture* leftSubmitTex = leftPosedPtr ? reinterpret_cast<const DirectTexture*>(leftPosedPtr) : &leftTex;
         const DirectTexture* rightSubmitTex = rightPosedPtr ? reinterpret_cast<const DirectTexture*>(rightPosedPtr) : &rightTex;
-
-        // AcquireSync/ReleaseSync around each eye's Submit: real GPU-level mutual exclusion against the game
-        // thread's CopyResource into the SAME shared texture -- see g_leftKeyedMutexGame's declaration comment.
-        // Used as a plain lock rather than a producer/consumer ping-pong key, because Submit must still run for
-        // BOTH eyes every single loop iteration regardless of whether that eye rendered anything new this time.
-        // A short, bounded timeout means a rare failure to acquire degrades to "submit anyway, log it" rather
-        // than ever risking a stall on this thread -- skipping Submit entirely would violate the
-        // WaitGetPoses/Submit pairing this whole design exists to protect.
-        static long long leftAcquireFails = 0, rightAcquireFails = 0;
-        bool leftLocked = ownLeftMutex && SUCCEEDED(ownLeftMutex->AcquireSync(0, kKeyedMutexTimeoutMs));
-        if (!leftLocked && (++leftAcquireFails <= 5 || leftAcquireFails % 1000 == 0))
-            MOHW_LOG(kLogFile, "left eye AcquireSync timed out (count=%lld) -- submitting anyway", leftAcquireFails);
-        bool rightLocked = ownRightMutex && SUCCEEDED(ownRightMutex->AcquireSync(0, kKeyedMutexTimeoutMs));
-        if (!rightLocked && (++rightAcquireFails <= 5 || rightAcquireFails % 1000 == 0))
-            MOHW_LOG(kLogFile, "right eye AcquireSync timed out (count=%lld) -- submitting anyway", rightAcquireFails);
 
         // SUBMIT ORDER SWAP TEST (2026-09-25): ghost survived identical L/R pose data (shared-pose test above),
         // ruling out per-eye pose divergence. Testing whether the ghost is actually tied to "whichever eye is
@@ -625,9 +703,9 @@ void SubmitThreadProc()
     }
 }
 
-} // namespace
-
-void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Texture2D* rightEye)
+// Kicks off the connect attempt, and once connected creates g_ownDevice and starts SubmitThreadProc. Returns true
+// only when connected, i.e. when it's worth copying eye textures at all.
+bool PrepareForUpdate(ID3D11Device* device)
 {
     int state = g_state.load(std::memory_order_acquire);
     if (state == static_cast<int>(ConnectState::NotStarted))
@@ -635,10 +713,10 @@ void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Te
         g_state.store(static_cast<int>(ConnectState::Connecting), std::memory_order_relaxed);
         MOHW_LOG(kLogFile, "starting background connect attempt");
         std::thread(ConnectThreadProc).detach();
-        return;
+        return false;
     }
     if (state != static_cast<int>(ConnectState::Connected))
-        return; // still connecting or failed -- game keeps rendering normally either way
+        return false; // still connecting or failed -- game keeps rendering normally either way
 
     // One-time: create the separate device (see the design comment near g_leftTex) on the SAME adapter as the
     // game's device, then start SubmitThreadProc. Done here (not in ConnectThreadProc) because finding the
@@ -668,6 +746,15 @@ void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Te
             std::thread(SubmitThreadProc).detach();
         }
     }
+    return true;
+}
+
+} // namespace
+
+void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Texture2D* rightEye)
+{
+    if (!PrepareForUpdate(device))
+        return;
 
     // leftEye/rightEye mirror UpdateCompanionEyes' contract: either may be nullptr meaning "this eye didn't render
     // this frame" (alternating-eye's temporal-stereo mode -- see present_hook.cpp's routing). Only CopyResource
@@ -715,6 +802,58 @@ void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Te
         }
     }
     context->Release();
+}
+
+void UpdateOpenVrDirectPair(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Texture2D* rightEye,
+                            const PairStamp& stamp)
+{
+    if (!leftEye || !rightEye || !PrepareForUpdate(device))
+        return;
+
+    D3D11_TEXTURE2D_DESC leftDesc{}, rightDesc{};
+    leftEye->GetDesc(&leftDesc);
+    rightEye->GetDesc(&rightDesc);
+    if (!EnsurePersistentEyeTexture(device, g_leftTex, g_leftWidth, g_leftHeight, g_leftFormat, leftDesc,
+                                    g_leftSharedHandle, g_leftGeneration, g_leftKeyedMutexGame) ||
+        !EnsurePersistentEyeTexture(device, g_rightTex, g_rightWidth, g_rightHeight, g_rightFormat, rightDesc,
+                                    g_rightSharedHandle, g_rightGeneration, g_rightKeyedMutexGame))
+        return;
+
+    ID3D11DeviceContext* context = nullptr;
+    device->GetImmediateContext(&context);
+    if (!context)
+        return;
+
+    // Same lock order as SubmitThreadProc (left, then right). If either can't be taken, skip the whole pair: the
+    // submitter keeps showing the previous, still-consistent pair rather than a half-updated one.
+    bool leftAcquired = g_leftKeyedMutexGame && SUCCEEDED(g_leftKeyedMutexGame->AcquireSync(0, kKeyedMutexTimeoutMs));
+    bool rightAcquired = (leftAcquired || !g_leftKeyedMutexGame) && g_rightKeyedMutexGame &&
+                         SUCCEEDED(g_rightKeyedMutexGame->AcquireSync(0, kKeyedMutexTimeoutMs));
+    bool leftOk = leftAcquired || !g_leftKeyedMutexGame;
+    bool rightOk = rightAcquired || !g_rightKeyedMutexGame;
+    if (leftOk && rightOk)
+    {
+        context->CopyResource(g_leftTex, leftEye);
+        context->CopyResource(g_rightTex, rightEye);
+        std::lock_guard<std::mutex> lock(g_pairStampMutex);
+        g_pairStamp = stamp;
+    }
+    else
+    {
+        static long long skipped = 0;
+        if (++skipped <= 5 || skipped % 1000 == 0)
+            MOHW_LOG(kLogFile, "pair publish skipped, keyed mutex busy (count=%lld)", skipped);
+    }
+    if (rightAcquired)
+        g_rightKeyedMutexGame->ReleaseSync(0);
+    if (leftAcquired)
+        g_leftKeyedMutexGame->ReleaseSync(0);
+    context->Release();
+}
+
+bool IsPairPublishEnabled()
+{
+    return g_pairPublishEnabled.load(std::memory_order_relaxed);
 }
 
 bool IsOpenVrDirectConnected()

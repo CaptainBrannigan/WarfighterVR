@@ -34,6 +34,25 @@ namespace mohw::openvr_direct {
 // regardless of connection state.
 void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Texture2D* rightEye);
 
+// The render pose both eyes of one published pair were rendered with.
+struct PairStamp
+{
+    bool valid = false;
+    float quat[4] = {0, 0, 0, 1};
+    float pos[3] = {0, 0, 0};
+    bool posValid = false;
+};
+
+// PAIR PUBLISH (2026-09-25): SteamVR applies eye 0's submitted pose to BOTH eyes and ignores eye 1's (live-confirmed,
+// see project memory project_mohw_steamvr_eye1_pose_ignored.md), so both textures must always match one pose. Copies
+// both eyes and stores their shared stamp as one unit under both keyed mutexes: all or nothing, so SubmitThreadProc
+// can never see half of a pair. Both textures are required.
+void UpdateOpenVrDirectPair(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Texture2D* rightEye,
+                            const PairStamp& stamp);
+
+// NUMPAD3 toggle, default on. When off, present_hook.cpp falls back to per-eye publishing (UpdateOpenVrDirect).
+bool IsPairPublishEnabled();
+
 bool IsOpenVrDirectConnected();
 
 // The HMD's real display refresh rate, queried live via IVRSystem::GetFloatTrackedDeviceProperty

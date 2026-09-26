@@ -88,6 +88,46 @@ bool EnsureLeftCaptureTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& 
     return true;
 }
 
+// PAIR PUBLISH (2026-09-25): holds a left-eye frame until its right-eye partner renders, so both eyes are handed
+// over together (see openvr_direct.h's UpdateOpenVrDirectPair). Game thread only.
+ID3D11Texture2D* g_pairLeftTexture = nullptr;
+bool g_pairLeftStaged = false;
+
+bool EnsurePairLeftTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& sourceDesc)
+{
+    if (g_pairLeftTexture)
+    {
+        D3D11_TEXTURE2D_DESC existing{};
+        g_pairLeftTexture->GetDesc(&existing);
+        if (existing.Width == sourceDesc.Width && existing.Height == sourceDesc.Height &&
+            existing.Format == sourceDesc.Format)
+            return true;
+        g_pairLeftTexture->Release();
+        g_pairLeftTexture = nullptr;
+    }
+
+    D3D11_TEXTURE2D_DESC desc{};
+    desc.Width = sourceDesc.Width;
+    desc.Height = sourceDesc.Height;
+    desc.MipLevels = 1;
+    desc.ArraySize = 1;
+    desc.Format = sourceDesc.Format;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    HRESULT hr = device->CreateTexture2D(&desc, nullptr, &g_pairLeftTexture);
+    if (FAILED(hr))
+    {
+        MOHW_LOG(kLogFile, "EnsurePairLeftTexture: CreateTexture2D(%ux%u fmt=%d) FAILED 0x%08lX", desc.Width,
+                  desc.Height, static_cast<int>(desc.Format), hr);
+        g_pairLeftTexture = nullptr;
+        return false;
+    }
+    MOHW_LOG(kLogFile, "EnsurePairLeftTexture: created %ux%u fmt=%d", desc.Width, desc.Height,
+              static_cast<int>(desc.Format));
+    return true;
+}
+
 std::atomic<long long> g_presentCalls{0};
 std::atomic<long long> g_resizeBuffersCalls{0};
 
@@ -246,7 +286,6 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
                     immediateContext->CopyResource(g_leftCaptureTexture, backbuffer);
                     leftEye = g_leftCaptureTexture;
                 }
-                immediateContext->Release();
             }
 
             // Alternating-eye routing (hooks/alternating_eye.h): this frame's single, plain render already
@@ -269,8 +308,31 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
             // cost, expected) but isolates staleness-duration from content-identity as the variable under test.
             // Left eye, game-side rendering (IPD/frustum/pose-stamp), and AdvanceEyeToNextFrame are all untouched.
             bool forceRightAlwaysFresh = IsStalenessIsolationTestActive();
-            ID3D11Texture2D* rightArg = (rightEye || forceRightAlwaysFresh) ? leftEye : nullptr;
-            mohw::openvr_direct::UpdateOpenVrDirect(device, rightEye ? nullptr : leftEye, rightArg);
+            if (mohw::openvr_direct::IsPairPublishEnabled() && !forceRightAlwaysFresh)
+            {
+                // PAIR PUBLISH: pair-freeze renders right N+1 with left N's rotation, so (left N, right N+1) is one
+                // consistent pair and right N+1's stamp fits both. Hold the left frame, publish both on the right.
+                if (!rightEye)
+                {
+                    g_pairLeftStaged = immediateContext && EnsurePairLeftTexture(device, backbufferDesc);
+                    if (g_pairLeftStaged)
+                        immediateContext->CopyResource(g_pairLeftTexture, leftEye);
+                }
+                else if (g_pairLeftStaged)
+                {
+                    mohw::openvr_direct::PairStamp stamp{};
+                    stamp.valid = GetPendingRenderPoseStamp(true, stamp.quat, stamp.pos, &stamp.posValid);
+                    mohw::openvr_direct::UpdateOpenVrDirectPair(device, g_pairLeftTexture, leftEye, stamp);
+                    g_pairLeftStaged = false;
+                }
+            }
+            else
+            {
+                ID3D11Texture2D* rightArg = (rightEye || forceRightAlwaysFresh) ? leftEye : nullptr;
+                mohw::openvr_direct::UpdateOpenVrDirect(device, rightEye ? nullptr : leftEye, rightArg);
+            }
+            if (immediateContext)
+                immediateContext->Release();
             presentedFrameWasLeftEye = !rightEye; // captured before the flip below -- see its declaration comment
             // Advance parity now, after this frame's capture/routing is done, so it's ready before the NEXT
             // frame's CommitViewTransform fires.
