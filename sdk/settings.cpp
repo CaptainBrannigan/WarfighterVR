@@ -271,6 +271,10 @@ void LoadSettings()
               g_headAimInvertYaw.load(std::memory_order_relaxed) ? 1 : 0,
               g_headAimInvertPitch.load(std::memory_order_relaxed) ? 1 : 0,
               g_headAimClampPitch.load(std::memory_order_relaxed) ? 1 : 0);
+
+    // Rewrite with every current key, so an ini from an older build picks up settings added since (at their
+    // defaults) instead of only gaining them the next time a hotkey happens to save. Loaded values are kept as-is.
+    WriteSettingsFileLocked();
 }
 
 float GetFovScale()

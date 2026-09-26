@@ -9,6 +9,7 @@
 #include "companion_bridge.h"
 #include "head_position.h"
 #include "../sdk/settings.h"
+#include "fov_scale_hook.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -182,15 +183,48 @@ Rigid GripInCamera()
     return j;
 }
 
-// Rewrites m (a weapon batch's local camera matrix) so the gun follows the controller. Leaves m untouched while the
-// drive is off or a pose is unavailable.
-void DriveWeaponFromController(float m[16])
+// RIG ANCHOR (2026-09-26): the first-person rig is attached to the batch camera M, which is this eye's camera, so the
+// rig moved with each eye -- no stereo parallax, so double vision against the world. And head roll is added to the
+// world camera only (fov_scale_hook.cpp's ApplyHeadRoll, after this camera is built), so the rig stayed fixed to the
+// screen and rolled with the head. Drawn with M' and seen from M, a camera-attached point L ends up at L * M * M'^-1 in
+// the view; the world is seen through Rq * M (Rq = that roll) from an eye e along the view's right of the head centre,
+// so the rig should be at L * Rq^-1 * T(-e), giving M' = T(e) * Rq * M. The weapon drive builds the same head-centre
+// correction into its controller frame instead (ControllerFrame subtracts the eye offset).
+void AnchorRigToHead(float m[16], bool addRoll)
+{
+    Rigid shiftAndRoll{};
+    for (int i = 0; i < 3; ++i)
+        shiftAndRoll.R[i][i] = 1.0f;
+    float roll = addRoll ? GetAppliedHeadRoll() : 0.0f;
+    if (roll != 0.0f)
+    {
+        // Same rotation ApplyHeadRoll builds: rows = the local axes turned by a quaternion about local Z.
+        Quat q{0.0f, 0.0f, sinf(roll * 0.5f), cosf(roll * 0.5f)};
+        for (int i = 0; i < 3; ++i)
+        {
+            Vec3 axis{};
+            axis.x = i == 0 ? 1.0f : 0.0f;
+            axis.y = i == 1 ? 1.0f : 0.0f;
+            axis.z = i == 2 ? 1.0f : 0.0f;
+            Vec3 r = QuatRotateVector(q, axis);
+            shiftAndRoll.R[i][0] = r.x;
+            shiftAndRoll.R[i][1] = r.y;
+            shiftAndRoll.R[i][2] = r.z;
+        }
+    }
+    shiftAndRoll.t[0] = GetActiveEyeOffsetAlongRow0(); // T(e) then Rq: the shift is along the unrolled right
+    ToMatrix(Compose(shiftAndRoll, FromMatrix(m)), m);
+}
+
+// Rewrites m (a weapon batch's local camera matrix) so the gun follows the controller. Returns false, leaving m
+// untouched, while the drive is off or a pose is unavailable.
+bool DriveWeaponFromController(float m[16])
 {
     if (!g_weaponDriveOn.load())
-        return;
+        return false;
     Rigid c{};
     if (!ControllerFrame(m, &c))
-        return;
+        return false;
     Rigid cam = FromMatrix(m);
 
     if (g_weaponGripLogRequested.exchange(false))
@@ -206,6 +240,7 @@ void DriveWeaponFromController(float m[16])
     }
 
     ToMatrix(Compose(Compose(Compose(cam, Inverse(c)), GripInCamera()), cam), m);
+    return true;
 }
 
 // DISABLED 2026-09-22 ("get rid of the camera test hook for now"): every hotkey this diagnostic used (top-row/numpad
@@ -271,15 +306,13 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
         patchThis = (sel == kSelectAll) || (t_seq == sel);
     if (roleMode != 0)
         sel = 1000 + roleMode; // for the once-per-change PATCHING log below
-    if (!patchThis)
-    {
-        g_original(thisPtr, matrix);
-        return;
-    }
-
     float m[16];
     memcpy(m, matrix, sizeof(m));
-    DriveWeaponFromController(m);
+    // Weapon batches follow the controller when the drive is on (parallax included). Everything else in the rig is
+    // anchored to the head centre: the body+hands batch without the head's roll, the weapon with the drive off with
+    // it (it's the view's gun then, and should roll with the view).
+    if (!patchThis || !DriveWeaponFromController(m))
+        AnchorRigToHead(m, count == 3);
 
     ++g_patched;
     int lastLogged = g_lastLoggedSelected.load();
@@ -321,19 +354,25 @@ bool ResolveBodyInstance(void* item, int* outIndex, void** outMesh)
     }
 }
 
+constexpr int kBodyInstanceArms = 1; // live-confirmed 2026-09-19: 0 = legs, 1 = arms, 2 = hands
+constexpr int kBodyInstanceHands = 2;
+
 void __cdecl HookedSubmit(void* item, void* drawState)
 {
     int hide = g_hideInstance.load();
     bool hideAll = g_hideBodyAll.load();
-    if ((hide >= 0 || hideAll) &&
+    // With the gun on the controller, the game's arms and hands are left reaching for where the gun used to be; they
+    // share the body batch's one view block with the legs, so they can't be moved on their own yet -- skipped instead.
+    bool hideArms = g_weaponDriveOn.load();
+    if ((hide >= 0 || hideAll || hideArms) &&
         reinterpret_cast<uintptr_t>(_ReturnAddress()) ==
             reinterpret_cast<uintptr_t>(Offset<void*>(OFFSET_DRAWITEMSUBMIT_CALLER_INSTANCELOOP)))
     {
         int idx = -1;
         void* mesh = nullptr;
-        if (ResolveBodyInstance(item, &idx, &mesh) && (hideAll || idx == hide))
+        if (ResolveBodyInstance(item, &idx, &mesh) && (hideAll || idx == hide || (hideArms && (idx == kBodyInstanceArms || idx == kBodyInstanceHands))))
         {
-            if (hideAll)
+            if (hideAll || idx != hide)
                 return;
             int last = g_lastLoggedHide.load();
             if (last != hide && g_lastLoggedHide.compare_exchange_strong(last, hide))
@@ -410,8 +449,8 @@ bool InstallCameraMatrixTestHook()
     }
 
     MOHW_LOG(kLogFile,
-               "Camera matrix hook installed @ %p -- viewmodel caller ret=%p. Numpad . = calibrate the weapon to the right "
-               "controller (hold it where the gun sits) / turn the drive off",
+               "Camera matrix hook installed @ %p -- viewmodel caller ret=%p. Numpad . = weapon drive on (gun snapped to the "
+               "right controller, arms hidden) / off",
                g_hookAddress, Offset<void*>(OFFSET_CAMERAMATRIX_CALLER_VIEWMODEL));
     return true;
 }

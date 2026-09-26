@@ -433,19 +433,28 @@ void LogRollIfDue(bool rightEye, float rollAngle, const Vec3& left, const Vec3& 
                   up.z, forward.x, forward.y, forward.z);
 }
 
+std::atomic<float> g_appliedHeadRoll{0.0f}; // see GetAppliedHeadRoll
+
 bool ApplyHeadRoll(void* transformPtr)
 {
     if (!GetHeadRollEnabled())
+    {
+        g_appliedHeadRoll.store(0.0f, std::memory_order_relaxed);
         return false;
+    }
 
     mohwvr::ipc::HeadPoseBlock pose{};
     if (!GetHeadPose(&pose))
+    {
+        g_appliedHeadRoll.store(0.0f, std::memory_order_relaxed);
         return false;
+    }
 
     Quat current{pose.orientationX, pose.orientationY, pose.orientationZ, pose.orientationW};
     float rollAngle = ExtractRoll(current);
     if (GetHeadRollInvert())
         rollAngle = -rollAngle;
+    g_appliedHeadRoll.store(rollAngle, std::memory_order_relaxed);
 
     float raw[16]{};
     if (!SehSafeReadFloats(raw, transformPtr, 16))
@@ -762,6 +771,11 @@ float GetRenderedHeadYawOffset()
     if (g_haveRenderedHeadYawOffset.load(std::memory_order_relaxed))
         return g_renderedHeadYawOffset.load(std::memory_order_relaxed);
     return GetHeadYawOffset();
+}
+
+float GetAppliedHeadRoll()
+{
+    return g_appliedHeadRoll.load(std::memory_order_relaxed);
 }
 
 } // namespace mohw

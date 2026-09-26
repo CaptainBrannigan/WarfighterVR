@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdint>
+#include <cstdio>
 #include <atomic>
 
 namespace mohw {
@@ -188,11 +189,77 @@ void GuardStoredHeading(void* aimingController)
     if (!SehSafeReadFloat(&stored, storedYaw) || !std::isfinite(stored))
         return;
 
+    // DIAGNOSTIC (2026-09-26): swapping weapons breaks this guard. Logs every change of controller or heading source,
+    // with the gap since the previous update, to see what a swap actually changes (a second controller updating
+    // alongside the first would show as the pair alternating every tick).
+    static void* lastLoggedController = nullptr;
+    static uint32_t lastLoggedSource = 0;
+    static int changeLines = 0;
+    if ((aimingController != lastLoggedController || source != lastLoggedSource) && changeLines < 200)
+    {
+        ++changeLines;
+        MOHW_LOG(kLogFile,
+                  "GUARD SOURCE: controller %p -> %p, heading source %08X -> %08X, continuous=%d stored=%.2f deg "
+                  "gameYaw=%.2f deg",
+                  lastLoggedController, aimingController, lastLoggedSource, source, continuous ? 1 : 0,
+                  stored / kDegToRad, g_baselineYaw.load(std::memory_order_relaxed) / kDegToRad);
+        lastLoggedController = aimingController;
+        lastLoggedSource = source;
+    }
+
     float gameYaw = g_baselineYaw.load(std::memory_order_relaxed);
+    float lastWritten = g_lastWrittenYaw.load(std::memory_order_relaxed);
+    auto isCopyOfOurs = [&](float v) { return fabsf(WrapAngleSigned(v - lastWritten)) < 0.5f * kDegToRad; };
+
+    // The yaw field itself ([this]+0xC) still holds the yaw ApplyHeadAim wrote, head offset included. Some updates
+    // (live-traced 2026-09-26: seen while firing, and on a swapped-in weapon's new controller) take that field as their
+    // base instead of the stored heading, and ApplyHeadAim then added the offset again on top: the view spun by the
+    // head offset every tick. Hand the update the game's own yaw instead, so the offset is only ever applied once,
+    // after it. A new controller's field is only reset when it's a copy of our yaw -- a respawn's new yaw is kept.
+    float* fieldYaw = reinterpret_cast<float*>(base + kYawByteOffset);
+    float field = 0.0f;
+    if (SehSafeReadFloat(&field, fieldYaw) && std::isfinite(field) && (continuous || isCopyOfOurs(field)))
+        SehSafeWriteFloat(fieldYaw, gameYaw);
+
+    // PENDING HEADING (2026-09-26, decompiled FUN_009D7690 -- the heading object's own per-tick update, called inside
+    // the AimingController update just before the heading is copied to the yaw): when FUN_008533D0() is true and
+    // [src+0x44] > 0 it snaps the heading to a pending value, [src+0xC/+0x10] = [src+0x3C/+0x40], then clears +0x44.
+    // The fire pull writes our yaw there too, so the snap put back exactly what the revert below had just undone
+    // (live log: every "reverted N deg" was followed by an N-degree turn inside that same update). It's the game's
+    // normal per-tick path, written every tick (timer ~ one tick), and carries the stick turn: live log, pending is
+    // always the stored heading as it was when written (sometimes the game's own yaw, sometimes a copy of ours) plus
+    // the stick's turn for that tick (a steady ~2.2 deg/tick at 0.85 stick, 0 with the stick idle). So only
+    // pending - stored is kept, on top of the game's own yaw. Measuring against the yaw we last wrote instead turned
+    // the head offset into a fake turn on the ticks the stored heading wasn't a copy of ours. Its pitch is left at the
+    // stored pitch, since head pitch is applied absolutely after the update anyway.
+    float* pendingYaw = reinterpret_cast<float*>(static_cast<uintptr_t>(source) + 0x3C);
+    float pending = 0.0f;
+    if (SehSafeReadFloat(&pending, pendingYaw) && std::isfinite(pending) &&
+        fabsf(WrapAngleSigned(pending - gameYaw)) > 1e-4f && (continuous || isCopyOfOurs(pending)))
+    {
+        float turn = WrapAngleSigned(pending - stored);
+        float fixedPending = WrapAngleUnsigned(gameYaw + turn);
+        float storedPitch = 0.0f, timer = 0.0f;
+        SehSafeReadFloat(&timer, reinterpret_cast<float*>(static_cast<uintptr_t>(source) + 0x44));
+        SehSafeWriteFloat(pendingYaw, fixedPending);
+        if (SehSafeReadFloat(&storedPitch, reinterpret_cast<float*>(static_cast<uintptr_t>(source) + 0x10)))
+            SehSafeWriteFloat(reinterpret_cast<float*>(static_cast<uintptr_t>(source) + 0x40), storedPitch);
+        static int pendingLines = 0;
+        if (pendingLines < 300)
+        {
+            ++pendingLines;
+            MOHW_LOG(kLogFile,
+                      "PENDING HEADING: pending %.2f deg, gameYaw %.2f, lastWritten %.2f, stored %.2f, timer %.4f -> kept "
+                      "turn %.2f deg (pending now %.2f)",
+                      pending / kDegToRad, gameYaw / kDegToRad, lastWritten / kDegToRad, stored / kDegToRad, timer,
+                      turn / kDegToRad, fixedPending / kDegToRad);
+        }
+    }
+
     float drift = WrapAngleSigned(stored - gameYaw);
     if (fabsf(drift) <= 1e-4f)
         return;
-    if (!continuous)
+    if (!continuous && !isCopyOfOurs(stored))
     {
         MOHW_LOG(kLogFile, "stored heading moved %.1f deg across a gap or new AimingController -- accepted as the game's",
                   drift / kDegToRad);
@@ -202,11 +269,75 @@ void GuardStoredHeading(void* aimingController)
         return;
 
     static unsigned long long nextLogMs = 0;
-    if (now >= nextLogMs)
+    if (!continuous || now >= nextLogMs)
     {
         nextLogMs = now + 1000;
-        MOHW_LOG(kLogFile, "reverted stored heading change of %.2f deg", drift / kDegToRad);
+        MOHW_LOG(kLogFile, "reverted stored heading change of %.2f deg%s", drift / kDegToRad,
+                  continuous ? "" : " (new controller or gap, but it was a copy of our yaw)");
     }
+}
+
+// DIAGNOSTIC (2026-09-26, weapon-swap guard leak): reads the stored heading the update is about to restart from.
+bool ReadStoredHeading(void* aimingController, float* out)
+{
+    uint32_t source = 0;
+    unsigned char* base = reinterpret_cast<unsigned char*>(aimingController);
+    if (!SehSafeReadFloat(reinterpret_cast<float*>(&source), base + 0x8) || source == 0)
+        return false;
+    return SehSafeReadFloat(out, reinterpret_cast<float*>(static_cast<uintptr_t>(source) + 0xC)) && std::isfinite(*out);
+}
+
+// DIAGNOSTIC (2026-09-26): after a weapon swap the fire pull still reaches the game's yaw although the guard keeps
+// reverting the stored heading. Logs every update that turns the yaw away from the heading it restarted from, with
+// every non-zero float-looking arg and the stick yaw axis, to find which input carries it (the mouse has to be left
+// alone while testing, since it legitimately turns through here too).
+void LogYawChangeInsideUpdate(void* aimingController, float storedBefore, float yawBefore, const uint32_t* argDwords,
+                              const float* deviceAxesBefore)
+{
+    static int lines = 0;
+    if (lines >= 400)
+        return;
+    float yawAfter = 0.0f;
+    if (!SehSafeReadFloat(&yawAfter, reinterpret_cast<unsigned char*>(aimingController) + kYawByteOffset))
+        return;
+    float change = WrapAngleSigned(yawAfter - storedBefore);
+    if (fabsf(change) < 0.05f * kDegToRad)
+        return;
+    ++lines;
+
+    char args[1024];
+    int used = 0;
+    args[0] = '\0';
+    for (int i = 1; i < 37 && used < static_cast<int>(sizeof(args)) - 32; ++i)
+    {
+        float v = 0.0f;
+        memcpy(&v, &argDwords[i], sizeof(v));
+        if (!std::isfinite(v) || fabsf(v) < 1e-6f || fabsf(v) > 1e4f)
+            continue;
+        used += snprintf(args + used, sizeof(args) - used, " %d:%.4f", i, v);
+    }
+    float stickYaw = 0.0f;
+    auto* device = reinterpret_cast<unsigned char*>(static_cast<uintptr_t>(argDwords[kArgInputDevice]));
+    if (device)
+        SehSafeReadFloat(&stickYaw, device + 4 * 4);
+    // The update's final yaw is stored heading + [this+0x1C] - dword 19 (tail at 0x009DE86E..0x009DE8F1), and
+    // [this+0x1C] comes from FUN_009D9670 fed by FUN_008052A0 on the input device -- so the device's axes (as they
+    // were going in) and the controller's 0x14..0x30 block (as it came out) show where the turn comes from.
+    char axes[256];
+    int axesUsed = 0;
+    axes[0] = '\0';
+    for (int i = 0; i < 12 && device; ++i)
+        axesUsed += snprintf(axes + axesUsed, sizeof(axes) - axesUsed, " %.3f", deviceAxesBefore[i]);
+    float block[8] = {};
+    unsigned char* base = reinterpret_cast<unsigned char*>(aimingController);
+    for (int i = 0; i < 8; ++i)
+        SehSafeReadFloat(&block[i], base + 0x14 + 4 * i);
+    MOHW_LOG(kLogFile,
+              "YAW CHANGED IN UPDATE: controller %p %.2f deg (stored %.2f, field before %.2f, after %.2f) stickYaw=%.3f "
+              "args:%s | device axes:%s | this+0x14..0x30: %.4f %.4f [0x1C]=%.4f(%.2f deg) %.4f %.4f %.4f %.4f %.4f",
+              aimingController, change / kDegToRad, storedBefore / kDegToRad, yawBefore / kDegToRad,
+              yawAfter / kDegToRad, stickYaw, args, axes, block[0], block[1], block[2], block[2] / kDegToRad,
+              block[3], block[4], block[5], block[6], block[7]);
 }
 
 void ApplyHeadAim(void* aimingController)
@@ -360,8 +491,20 @@ struct ThisCallTrampoline
         }
         float savedStickPitch = 0.0f;
         float* stickPitch = headAimOn ? SuppressPitchInput(args.dwords, &savedStickPitch) : nullptr;
+        float storedBefore = 0.0f, yawBefore = 0.0f;
+        bool haveBefore = headAimOn && ReadStoredHeading(self, &storedBefore) &&
+                          SehSafeReadFloat(&yawBefore, reinterpret_cast<unsigned char*>(self) + kYawByteOffset);
+        float deviceAxesBefore[12] = {};
+        if (haveBefore)
+        {
+            auto* device = reinterpret_cast<unsigned char*>(static_cast<uintptr_t>(args.dwords[kArgInputDevice]));
+            for (int i = 0; i < 12 && device; ++i)
+                SehSafeReadFloat(&deviceAxesBefore[i], device + 4 * i);
+        }
         g_original(self, args);
         RestoreStickPitch(stickPitch, savedStickPitch);
+        if (haveBefore)
+            LogYawChangeInsideUpdate(self, storedBefore, yawBefore, args.dwords, deviceAxesBefore);
 
         long long n = ++g_updateCalls;
         if (n == 1 || n % 300 == 0)
