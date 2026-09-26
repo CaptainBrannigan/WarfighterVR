@@ -5,31 +5,22 @@
 #include "../sdk/mohw_offsets.h"
 #include "../sdk/mohw_common.h"
 #include "../sdk/vr_math.h"
+#include "alternating_eye.h"
 #include "companion_bridge.h"
+#include "head_position.h"
+#include "../sdk/settings.h"
 
 #include <windows.h>
 #include <intrin.h>
 #include <cstring>
 #include <cstdint>
 #include <atomic>
+#include <mutex>
 
 namespace mohw {
 namespace {
 
 constexpr const char* kLogFile = "mohwvr_cameramatrix.log";
-constexpr float kYawDegrees = 0.0f; // yaw test retired -- now a translation test (offsets below)
-
-// Translation test (2026-09-19): objects move by right*row0 + up*row1 + fwd*(-row2)
-// of the camera matrix passed to the setter; the camera position moves the opposite way
-// (view = inverse of camera). Units assumed metres. The hotkeys that stepped these are
-// retired (see PollHotkeys); defaults are 0 so the weapon sits where the game puts it --
-// the 0.5/0.5 test offset used to verify this hook was still being applied (2026-09-26).
-constexpr float kDefaultRight = 0.0f;
-constexpr float kDefaultUp = 0.0f;
-constexpr float kDefaultFwd = 0.0f;
-std::atomic<float> g_offRight{kDefaultRight};
-std::atomic<float> g_offUp{kDefaultUp};
-std::atomic<float> g_offFwd{kDefaultFwd};
 constexpr int kGroupSize = 12;      // first-person group: 12 batches per view (cnt4, 9 singles, cnt3)
 constexpr int kSelectAll = -1;
 
@@ -53,6 +44,12 @@ thread_local uintptr_t t_lastBatch = 0;
 thread_local int t_seq = -1;
 thread_local uint32_t t_lastCount = 0;
 
+// The viewmodel camera FUN_008B2AB0 just set a matrix on, for ConsumeViewmodelCamera: the builder then runs
+// UpdateMatrices on that same (stack-local) camera on this thread. The fov field is recorded too, so a different
+// camera that later happens to reuse the stack address can't pick up a leftover.
+thread_local const void* t_pendingViewmodelCamera = nullptr;
+thread_local uint32_t t_pendingViewmodelFovBits = 0;
+
 // 0 = use the index selector; 1 = weapon batches only (count != 3);
 // 2 = body+hands batch only (count == 3). Confirmed live 2026-09-19: the
 // count==3 batch is body+hands for both rifle and pistol groups.
@@ -68,306 +65,155 @@ using DrawItemSubmitFn = void(__cdecl*)(void* item, void* drawState);
 DrawItemSubmitFn g_originalSubmit = nullptr;
 void* g_submitAddress = nullptr;
 
-// ---- Controller drive (v2, 2026-09-20) ------------------------------------------
-// v1 expressed the controller in the head's rotating frame, so head look moved the
-// weapon. v2 uses the ABSOLUTE controller pose in XR space and cancels the game
-// camera's own rotation since calibration, so the weapon is independent of head look.
-//   Calibrate (numpad 0, hold the controller where the gun sits): captures the head
-//   and controller poses (XR) and the camera basis B0 of the first patched call.
-//   Alignment A (rows = world images of the XR basis vectors) = (S o (conj(hq0) e_i)) * B0.
-//   Per call: relXR = ctrlP - headP (XR, unrotated); Rc_w = A^T Rx A (Rx = row-form of
-//   ctrlQ*conj(c0)); Rh_w = B0^T B(t) (camera rotation since cal); Rr = Rh_w^T Rc_w;
-//   pivot = pos + posHead_cal*B(t) (weapon's current camera-attached rest position);
-//   P_des = pos + relXR*A; d = P_des - pivot.
-//   T(p) = (p-pivot)*Rr + pivot + d  =>  B' = B*Rr^T, pos' = pivot - (pivot+d-pos)*Rr^T.
-//   At calibration Rr = I and d = 0 (weapon unchanged), matching the confirmed live
-//   translation test when only d is nonzero. S = per-axis sign flips (numpad 7/9/'.'),
-//   XR head-local (x right, y up, z back) assumed to match camera rows (right/up/back).
-std::atomic<bool> g_controllerMode{false};
-std::atomic<bool> g_calRequested{false};
-std::atomic<bool> g_haveCal{false};
-std::atomic<int> g_signX{1};
-std::atomic<int> g_signY{1};
-std::atomic<int> g_signZ{1};
-
-struct Calib
+// ---- Controller weapon drive (v3, 2026-09-26) ---------------------------------------------------------------
+// Draws the weapon batches (count != 3) as if the first-person rig were rigidly held by the right controller.
+// Numpad . toggles it; the gun snaps straight onto the controller at a fixed grip point (WeaponGripRight/Up/Back in
+// the ini), wherever the hand happens to be when the key is pressed.
+//
+// M (the matrix this hook sees) is the local CAMERA the batch is drawn from, not the gun (the translation test showed
+// moving it by d moves the gun by -d). The gun itself is camera-attached, G = L * M. Drawn with camera M' and seen
+// from the real camera M, the gun appears at G * M'^-1 * M. The wanted pose is the gun's rest pose carried by the
+// controller, with the controller at the grip J (its pose relative to the camera when the gun is at rest). Solving:
+// M' = M * C^-1 * J * M. J's rotation is identity (controller pointing along the view = gun pointing along the view)
+// and its translation is the grip point, so the gun lands on the hand instead of keeping the hand's offset from it.
+//
+// C = the controller's pose in the same batch-origin-relative space as M: axes = its tracking-space axes through
+// TrackingDirectionToGameWorld (the proven head-position mapping); position = the head-centre camera (M's position
+// minus this eye's IPD offset, see GetActiveEyeOffsetAlongRow0) + TrackingOffsetToGameWorld(controller - head).
+// Row-vector convention throughout: world = local * R + t, and "A * B" means apply A, then B.
+// Replaces v2 (2026-09-20), which derived its own XR->game alignment at calibration and auto-guessed axis signs.
+struct Rigid
 {
-    Quat hq0;
-    Quat c0;
-    Vec3 relXR0;
-    float B0[3][3];
+    float R[3][3]; // rows = axes
+    float t[3];
 };
-Calib g_cal{};
 
-bool ReadPoses(Quat* hq, Vec3* headP, Quat* cq, Vec3* ctrlP)
-{
-    mohwvr::ipc::HeadPoseBlock hp{};
-    mohwvr::ipc::ControllerPoseBlock cp{};
-    if (!GetHeadPose(&hp) || !GetRightControllerPose(&cp))
-        return false;
-    *hq = Quat{hp.orientationX, hp.orientationY, hp.orientationZ, hp.orientationW};
-    *headP = Vec3{hp.positionX, hp.positionY, hp.positionZ};
-    *cq = Quat{cp.orientationX, cp.orientationY, cp.orientationZ, cp.orientationW};
-    *ctrlP = Vec3{cp.positionX, cp.positionY, cp.positionZ};
-    return true;
-}
+std::atomic<bool> g_weaponDriveOn{false};
+std::atomic<bool> g_weaponGripLogRequested{false}; // log the hand's pose in camera space once, on the next weapon draw
 
-// Row-vector 3x3 rotation matrix (v * Rl) equivalent to the quaternion.
-void QuatToRowMatrix(Quat q, float Rl[3][3])
+// a then b.
+Rigid Compose(const Rigid& a, const Rigid& b)
 {
-    float n = sqrtf(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-    if (n < 1e-6f)
-        q = Quat{0, 0, 0, 1};
-    else
-        q = Quat{q.x / n, q.y / n, q.z / n, q.w / n};
-    float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
-    float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
-    float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
-    float Rc[3][3] = {{1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy)},
-                      {2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx)},
-                      {2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)}};
+    Rigid out{};
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j)
-            Rl[i][j] = Rc[j][i];
-}
-
-void RowMulVec(const float v[3], const float M[3][3], float out[3])
-{
+            out.R[i][j] = a.R[i][0] * b.R[0][j] + a.R[i][1] * b.R[1][j] + a.R[i][2] * b.R[2][j];
     for (int j = 0; j < 3; ++j)
-        out[j] = v[0] * M[0][j] + v[1] * M[1][j] + v[2] * M[2][j];
+        out.t[j] = a.t[0] * b.R[0][j] + a.t[1] * b.R[1][j] + a.t[2] * b.R[2][j] + b.t[j];
+    return out;
 }
 
-void MatMul3(const float X[3][3], const float Y[3][3], float out[3][3])
+Rigid Inverse(const Rigid& a)
 {
+    Rigid out{};
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j)
-            out[i][j] = X[i][0] * Y[0][j] + X[i][1] * Y[1][j] + X[i][2] * Y[2][j];
+            out.R[i][j] = a.R[j][i];
+    for (int j = 0; j < 3; ++j)
+        out.t[j] = -(a.t[0] * out.R[0][j] + a.t[1] * out.R[1][j] + a.t[2] * out.R[2][j]);
+    return out;
 }
 
-void Transpose3(const float X[3][3], float out[3][3])
+Rigid FromMatrix(const float m[16])
 {
+    Rigid out{};
     for (int i = 0; i < 3; ++i)
+    {
         for (int j = 0; j < 3; ++j)
-            out[i][j] = X[j][i];
+            out.R[i][j] = m[i * 4 + j];
+        out.t[i] = m[12 + i];
+    }
+    return out;
 }
 
-std::atomic<bool> g_autoSigns{true};
-
-// Angle (degrees) between the camera rotation the game actually applied since
-// calibration (Rh_w = B0^T B) and the rotation predicted from the real head's rotation
-// (q_h = hq * conj(hq0)) under the given axis-sign mapping S. ~0 when S is right.
-float HeadConsistencyErrorDeg(const float S[3], const Quat& hq0, const Quat& hq, const float B0[3][3], const float B[3][3])
+void ToMatrix(const Rigid& a, float m[16])
 {
-    float A[3][3];
-    Quat hqInv0 = QuatConjugate(hq0);
     for (int i = 0; i < 3; ++i)
     {
-        Vec3 e{i == 0 ? 1.0f : 0.0f, i == 1 ? 1.0f : 0.0f, i == 2 ? 1.0f : 0.0f};
-        Vec3 h = QuatRotateVector(hqInv0, e);
-        float hl[3] = {S[0] * h.x, S[1] * h.y, S[2] * h.z};
-        for (int k = 0; k < 3; ++k)
-            A[i][k] = hl[0] * B0[0][k] + hl[1] * B0[1][k] + hl[2] * B0[2][k];
+        for (int j = 0; j < 3; ++j)
+            m[i * 4 + j] = a.R[i][j];
+        m[12 + i] = a.t[i];
     }
-    float AT[3][3], Rx[3][3], T1[3][3], Rpred[3][3], B0T[3][3], Ract[3][3], RpredT[3][3], E[3][3];
-    Transpose3(A, AT);
-    QuatToRowMatrix(QuatMultiply(hq, QuatConjugate(hq0)), Rx);
-    MatMul3(AT, Rx, T1);
-    MatMul3(T1, A, Rpred);
-    Transpose3(B0, B0T);
-    MatMul3(B0T, B, Ract);
-    Transpose3(Rpred, RpredT);
-    MatMul3(RpredT, Ract, E);
-    float c = (E[0][0] + E[1][1] + E[2][2] - 1.0f) * 0.5f;
-    return acosf(fmaxf(-1.0f, fminf(1.0f, c))) * (180.0f / kPi);
 }
 
-bool ApplyControllerDrive(float m[16], float manualRight, float manualUp, float manualFwd, const unsigned char* batch,
-                          uint32_t count)
+bool ControllerFrame(const float m[16], Rigid* out)
 {
-    float B[3][3] = {{m[0], m[1], m[2]}, {m[4], m[5], m[6]}, {m[8], m[9], m[10]}};
-
-    // Rigid-attachment check: does the weapon's offset/orientation RELATIVE TO THE CAMERA
-    // stay constant as the head turns? (Assumption the head-cancel math relies on.)
-    if (batch && count == 1)
-    {
-        const float* bt = reinterpret_cast<const float*>(batch + 0x40);
-        if (bt[0] != 0.0f || bt[1] != 0.0f || bt[2] != 0.0f)
-        {
-            static std::atomic<DWORD> lastRigid{0};
-            DWORD tk = GetTickCount();
-            DWORD pv = lastRigid.load();
-            if (tk - pv > 500 && lastRigid.compare_exchange_strong(pv, tk))
-            {
-                const float* bm = reinterpret_cast<const float*>(batch + 0x10);
-                float O[3][3] = {{bm[0], bm[1], bm[2]}, {bm[4], bm[5], bm[6]}, {bm[8], bm[9], bm[10]}};
-                float BTm[3][3], Q[3][3];
-                Transpose3(B, BTm);
-                MatMul3(BTm, O, Q);
-                float qang = acosf(fmaxf(-1.0f, fminf(1.0f, (Q[0][0] + Q[1][1] + Q[2][2] - 1.0f) * 0.5f))) * (180.0f / kPi);
-                float dv[3] = {bt[0] - m[12], bt[1] - m[13], bt[2] - m[14]};
-                float loc[3];
-                for (int i = 0; i < 3; ++i)
-                    loc[i] = dv[0] * B[i][0] + dv[1] * B[i][1] + dv[2] * B[i][2];
-                float camRot = -1.0f;
-                if (g_haveCal.load())
-                {
-                    float B0T[3][3], Rh[3][3];
-                    Transpose3(g_cal.B0, B0T);
-                    MatMul3(B0T, B, Rh);
-                    camRot = acosf(fmaxf(-1.0f, fminf(1.0f, (Rh[0][0] + Rh[1][1] + Rh[2][2] - 1.0f) * 0.5f))) * (180.0f / kPi);
-                }
-                MOHW_LOG(kLogFile,
-                           "RIGID CHECK (count==1 weapon part): camRotSinceCal=%.1f deg | offset in camera-local (right,up,back)=(%.3f,%.3f,%.3f) | batch-rotation-vs-camera=%.1f deg  (both should stay constant if the weapon is rigidly camera-attached)",
-                           camRot, loc[0], loc[1], loc[2], qang);
-            }
-        }
-    }
-
-    Quat hq{}, cq{};
-    Vec3 headP{}, ctrlP{};
-    if (!ReadPoses(&hq, &headP, &cq, &ctrlP))
-        return false;
-    Vec3 relXR{ctrlP.x - headP.x, ctrlP.y - headP.y, ctrlP.z - headP.z};
-
-    if (g_calRequested.exchange(false))
-    {
-        g_cal.hq0 = hq;
-        g_cal.c0 = cq;
-        g_cal.relXR0 = relXR;
-        memcpy(g_cal.B0, B, sizeof(B));
-        g_haveCal = true;
-        MOHW_LOG(kLogFile,
-                   "CALIBRATED: relXR0=(%.3f,%.3f,%.3f) c0=(%.3f,%.3f,%.3f,%.3f) hq0=(%.3f,%.3f,%.3f,%.3f) camB0 row0=(%.3f,%.3f,%.3f) row1=(%.3f,%.3f,%.3f) row2=(%.3f,%.3f,%.3f)",
-                   relXR.x, relXR.y, relXR.z, cq.x, cq.y, cq.z, cq.w, hq.x, hq.y, hq.z, hq.w, B[0][0], B[0][1], B[0][2],
-                   B[1][0], B[1][1], B[1][2], B[2][0], B[2][1], B[2][2]);
-    }
-    if (!g_haveCal.load())
+    mohwvr::ipc::ControllerPoseBlock controller{};
+    mohwvr::ipc::HeadPoseBlock head{};
+    if (!GetRightControllerPose(&controller) || !GetHeadPose(&head))
         return false;
 
-    float S[3] = {static_cast<float>(g_signX.load()), static_cast<float>(g_signY.load()), static_cast<float>(g_signZ.load())};
-    const Calib cal = g_cal;
-
-    // A rows = world image of each XR basis vector e_i, via head-local coords at calibration.
-    float A[3][3];
-    Quat hqInv0 = QuatConjugate(cal.hq0);
+    Quat q{controller.orientationX, controller.orientationY, controller.orientationZ, controller.orientationW};
     for (int i = 0; i < 3; ++i)
     {
-        Vec3 e{i == 0 ? 1.0f : 0.0f, i == 1 ? 1.0f : 0.0f, i == 2 ? 1.0f : 0.0f};
-        Vec3 h = QuatRotateVector(hqInv0, e);
-        float hl[3] = {S[0] * h.x, S[1] * h.y, S[2] * h.z};
-        for (int k = 0; k < 3; ++k)
-            A[i][k] = hl[0] * cal.B0[0][k] + hl[1] * cal.B0[1][k] + hl[2] * cal.B0[2][k];
+        Vec3 e{};
+        e.x = i == 0 ? 1.0f : 0.0f;
+        e.y = i == 1 ? 1.0f : 0.0f;
+        e.z = i == 2 ? 1.0f : 0.0f;
+        Vec3 axis = QuatRotateVector(q, e);
+        if (!TrackingDirectionToGameWorld(axis.x, axis.y, axis.z, out->R[i]))
+            return false;
     }
-    float AT[3][3];
-    Transpose3(A, AT);
 
-    // Controller rotation delta (XR frame) -> row-form -> world.
-    Quat qd = QuatMultiply(cq, QuatConjugate(cal.c0));
-    float Rx[3][3], T1[3][3], Rc_w[3][3];
-    QuatToRowMatrix(qd, Rx);
-    MatMul3(AT, Rx, T1);
-    MatMul3(T1, A, Rc_w);
-
-    // Camera rotation since calibration, world frame: Rh_w = B0^T * B(t).
-    float B0T[3][3], Rh_w[3][3], Rh_wT[3][3], Rr[3][3], RrT[3][3];
-    Transpose3(cal.B0, B0T);
-    MatMul3(B0T, B, Rh_w);
-    Transpose3(Rh_w, Rh_wT);
-    MatMul3(Rh_wT, Rc_w, Rr);
-    Transpose3(Rr, RrT);
-
-    // Weapon's camera-attached rest position (fixed head-local offset from calibration).
-    Vec3 hl0 = QuatRotateVector(hqInv0, cal.relXR0);
-    float posHeadCal[3] = {S[0] * hl0.x, S[1] * hl0.y, S[2] * hl0.z};
-    float pos[3] = {m[12], m[13], m[14]};
-    float pivot[3], Pdes[3], rel[3] = {relXR.x, relXR.y, relXR.z};
-    float relW[3];
-    RowMulVec(rel, A, relW);
+    float offset[3];
+    if (!TrackingOffsetToGameWorld(controller.positionX - head.positionX, controller.positionY - head.positionY,
+                                   controller.positionZ - head.positionZ, offset))
+        return false;
+    float eyeOffset = GetActiveEyeOffsetAlongRow0();
     for (int k = 0; k < 3; ++k)
-    {
-        pivot[k] = pos[k] + posHeadCal[0] * B[0][k] + posHeadCal[1] * B[1][k] + posHeadCal[2] * B[2][k];
-        Pdes[k] = pos[k] + relW[k];
-        // Manual fine-tune (camera-local: right/up/forward), added to the desired position.
-        Pdes[k] += manualRight * B[0][k] + manualUp * B[1][k] - manualFwd * B[2][k];
-    }
-    float v[3], vr[3];
-    for (int k = 0; k < 3; ++k)
-        v[k] = Pdes[k] - pos[k];
-    RowMulVec(v, RrT, vr);
-    for (int k = 0; k < 3; ++k)
-        m[12 + k] = pivot[k] - vr[k];
-    for (int i = 0; i < 3; ++i)
-    {
-        float nb[3];
-        RowMulVec(B[i], RrT, nb);
-        m[i * 4 + 0] = nb[0];
-        m[i * 4 + 1] = nb[1];
-        m[i * 4 + 2] = nb[2];
-    }
-
-    static std::atomic<DWORD> lastLog{0};
-    DWORD tick = GetTickCount();
-    DWORD prevLog = lastLog.load();
-    if (tick - prevLog > 1000 && lastLog.compare_exchange_strong(prevLog, tick))
-    {
-        float angleDeg = 2.0f * acosf(fminf(1.0f, fabsf(qd.w))) * (180.0f / kPi);
-        float camRotDeg = acosf(fmaxf(-1.0f, fminf(1.0f, (Rh_w[0][0] + Rh_w[1][1] + Rh_w[2][2] - 1.0f) * 0.5f))) * (180.0f / kPi);
-        Quat qh = QuatMultiply(hq, QuatConjugate(cal.hq0));
-        float headDeg = 2.0f * acosf(fminf(1.0f, fabsf(qh.w))) * (180.0f / kPi);
-
-        // Try all 8 sign combos; report the error for each and the best.
-        float bestErr = 1e9f;
-        int bestMask = 0;
-        float errV[8];
-        char errs[160];
-        int len = 0;
-        for (int mask = 0; mask < 8; ++mask)
-        {
-            float Sm[3] = {(mask & 1) ? -1.0f : 1.0f, (mask & 2) ? -1.0f : 1.0f, (mask & 4) ? -1.0f : 1.0f};
-            float e = HeadConsistencyErrorDeg(Sm, cal.hq0, hq, cal.B0, B);
-            errV[mask] = e;
-            if (e < bestErr)
-            {
-                bestErr = e;
-                bestMask = mask;
-            }
-            len += snprintf(errs + len, sizeof(errs) - len, "%s%.0f", mask ? "," : "", e);
-        }
-        MOHW_LOG(kLogFile,
-                   "CTRL drive v2: ctrlRot=%.1f camRot=%.1f headRot=%.1f deg | consistency err by sign mask [+++,-++,+-+,--+,++-,-+-,+--,---] = %s | best=%d (err %.1f) current signs=(%d,%d,%d) auto=%d",
-                   angleDeg, camRotDeg, headDeg, errs, bestMask, bestErr, g_signX.load(), g_signY.load(), g_signZ.load(),
-                   g_autoSigns.load() ? 1 : 0);
-
-        // Only trust the fit when the head has rotated enough to be informative.
-        int curMask = (g_signX.load() < 0 ? 1 : 0) | (g_signY.load() < 0 ? 2 : 0) | (g_signZ.load() < 0 ? 4 : 0);
-        // Require a clear win over the CURRENT signs: pure-yaw head motion ties a mapping with its mirror
-        // (observed 2026-09-20: +++ and -++ both scored 1 deg and it flipped X), so ties must not switch.
-        if (g_autoSigns.load() && headDeg > 15.0f && bestErr < 6.0f && errV[curMask] - bestErr > 3.0f)
-        {
-            int nx = (bestMask & 1) ? -1 : 1, ny = (bestMask & 2) ? -1 : 1, nz = (bestMask & 4) ? -1 : 1;
-            if (nx != g_signX.load() || ny != g_signY.load() || nz != g_signZ.load())
-            {
-                g_signX = nx;
-                g_signY = ny;
-                g_signZ = nz;
-                MOHW_LOG(kLogFile, "AUTO SIGNS -> X=%d Y=%d Z=%d (head rotated %.1f deg, consistency err %.1f deg)", nx, ny, nz, headDeg, bestErr);
-            }
-        }
-    }
+        out->t[k] = m[12 + k] - m[k] * eyeOffset + offset[k];
     return true;
 }
+
+Rigid GripInCamera()
+{
+    // Rotation = roll (about back), then pitch (about right), then yaw (about up), all in the gun's rest view.
+    float deg[3];
+    GetWeaponGripRotationDeg(deg);
+    const float kRad = 3.14159265f / 180.0f;
+    float cp = cosf(deg[0] * kRad), sp = sinf(deg[0] * kRad);
+    float cy = cosf(deg[1] * kRad), sy = sinf(deg[1] * kRad);
+    float cr = cosf(deg[2] * kRad), sr = sinf(deg[2] * kRad);
+    Rigid roll{{{cr, sr, 0}, {-sr, cr, 0}, {0, 0, 1}}, {0, 0, 0}};
+    Rigid pitch{{{1, 0, 0}, {0, cp, sp}, {0, -sp, cp}}, {0, 0, 0}};
+    Rigid yaw{{{cy, 0, -sy}, {0, 1, 0}, {sy, 0, cy}}, {0, 0, 0}};
+    Rigid j = Compose(Compose(roll, pitch), yaw);
+    GetWeaponGripOffset(j.t);
+    return j;
+}
+
+// Rewrites m (a weapon batch's local camera matrix) so the gun follows the controller. Leaves m untouched while the
+// drive is off or a pose is unavailable.
+void DriveWeaponFromController(float m[16])
+{
+    if (!g_weaponDriveOn.load())
+        return;
+    Rigid c{};
+    if (!ControllerFrame(m, &c))
+        return;
+    Rigid cam = FromMatrix(m);
+
+    if (g_weaponGripLogRequested.exchange(false))
+    {
+        // Where the hand really is relative to the gun's rest view: for tuning the grip point, and a check on the
+        // identity-rotation assumption (R rows should be near the unit axes with the controller pointing straight ahead).
+        Rigid h = Compose(c, Inverse(cam));
+        MOHW_LOG(kLogFile,
+                 "WEAPON DRIVE hand in camera space: t=(%.3f, %.3f, %.3f) R=[(%.2f %.2f %.2f) (%.2f %.2f %.2f) "
+                 "(%.2f %.2f %.2f)]",
+                 h.t[0], h.t[1], h.t[2], h.R[0][0], h.R[0][1], h.R[0][2], h.R[1][0], h.R[1][1], h.R[1][2], h.R[2][0],
+                 h.R[2][1], h.R[2][2]);
+    }
+
+    ToMatrix(Compose(Compose(Compose(cam, Inverse(c)), GripInCamera()), cam), m);
+}
+
 // DISABLED 2026-09-22 ("get rid of the camera test hook for now"): every hotkey this diagnostic used (top-row/numpad
 // +/-, VK_DIVIDE role toggle, Numpad 1-9/0 offset+calibration controls, VK_OEM_5 '\' body-visibility toggle,
 // VK_OEM_4/6 '[' ']' instance hide, VK_MULTIPLY dump) is now a no-op, freeing every one of those physical keys for
-// other features -- most recently '\', wanted for draw_trace_diag.cpp's UI hide toggle. The controls below (per-batch
-// translation offset, body/instance hide, weapon-batch role filter) are real, working functionality for tuning the
-// first-person viewmodel's position -- worth resurrecting as proper controls in the mod's own settings menu once one
-// exists, rather than raw always-on hotkeys that collide with everything else. NOTE: this function is still called
-// every frame from HookImpl (needed for camera_matrix_test_hook.h's IsPlayerSkeletonLoaded, and to leave the
-// existing default offset/selector values -- e.g. g_offRight/g_offUp's 0.5/0.5 default, g_selected's 0 -- exactly as
-// they already were, since it's untested whether anything currently visible depends on them). Only the interactive
-// hotkey polling was removed. The g_offRight/g_offUp test offset has since been zeroed (2026-09-26), so matched
-// weapon batches now pass through unchanged.
+// other features. The body/instance hide and role filter below are real, working functionality worth resurrecting
+// as proper settings-menu controls once one exists. The weapon drive's own key is polled once per frame from
+// present_hook.cpp instead (CheckWeaponDriveHotkey).
 void PollHotkeys()
 {
 }
@@ -383,6 +229,8 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
 
     g_lastViewmodelMatrixTick.store(GetTickCount(), std::memory_order_relaxed);
     PollHotkeys();
+    t_pendingViewmodelCamera = thisPtr;
+    memcpy(&t_pendingViewmodelFovBits, static_cast<const unsigned char*>(thisPtr) + 0x48, sizeof(uint32_t));
 
     const unsigned char* b = reinterpret_cast<const unsigned char*>(batch);
     uint32_t count = *reinterpret_cast<const uint32_t*>(b + 0x7C);
@@ -431,27 +279,7 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
 
     float m[16];
     memcpy(m, matrix, sizeof(m));
-    if (kYawDegrees != 0.0f)
-    {
-        for (int row = 0; row < 3; ++row)
-        {
-            Vec3 axis{m[row * 4 + 0], m[row * 4 + 1], m[row * 4 + 2]};
-            Vec3 rotated = Vec3RotateYawRight(axis, kYawDegrees);
-            m[row * 4 + 0] = rotated.x;
-            m[row * 4 + 1] = rotated.y;
-            m[row * 4 + 2] = rotated.z;
-        }
-    }
-
-    float right = g_offRight.load();
-    float up = g_offUp.load();
-    float fwd = g_offFwd.load();
-    bool driven = g_controllerMode.load() && ApplyControllerDrive(m, right, up, fwd, b, count);
-    if (!driven)
-    {
-        for (int k = 0; k < 3; ++k)
-            m[12 + k] -= right * m[0 * 4 + k] + up * m[1 * 4 + k] + fwd * (-m[2 * 4 + k]);
-    }
+    DriveWeaponFromController(m);
 
     ++g_patched;
     int lastLogged = g_lastLoggedSelected.load();
@@ -582,9 +410,9 @@ bool InstallCameraMatrixTestHook()
     }
 
     MOHW_LOG(kLogFile,
-               "Camera matrix test hook installed @ %p -- ret=%p yawed %.0f deg. '+'/'-' (main row or numpad) steps the "
-               "selector: -1 = all 12 batches, 0..11 = one batch by group index (0=count4 batch, 1-9=singles, 11=count3)",
-               g_hookAddress, Offset<void*>(OFFSET_CAMERAMATRIX_CALLER_VIEWMODEL), kYawDegrees);
+               "Camera matrix hook installed @ %p -- viewmodel caller ret=%p. Numpad . = calibrate the weapon to the right "
+               "controller (hold it where the gun sits) / turn the drive off",
+               g_hookAddress, Offset<void*>(OFFSET_CAMERAMATRIX_CALLER_VIEWMODEL));
     return true;
 }
 
@@ -602,6 +430,39 @@ void RemoveCameraMatrixTestHook()
         MH_RemoveHook(g_hookAddress);
         g_hookAddress = nullptr;
     }
+}
+
+void CheckWeaponDriveHotkey()
+{
+    static bool wasDown = false;
+    bool down = (GetAsyncKeyState(VK_DECIMAL) & 0x8000) != 0;
+    if (down && !wasDown)
+    {
+        if (g_weaponDriveOn.exchange(false))
+        {
+            MOHW_LOG(kLogFile, "Numpad . -- weapon drive OFF (weapon back where the game puts it)");
+        }
+        else
+        {
+            float grip[3];
+            GetWeaponGripOffset(grip);
+            g_weaponGripLogRequested = true;
+            g_weaponDriveOn = true;
+            MOHW_LOG(kLogFile, "Numpad . -- weapon drive ON, gun snapped to the controller at grip (%.3f, %.3f, %.3f)",
+                     grip[0], grip[1], grip[2]);
+        }
+    }
+    wasDown = down;
+}
+
+bool ConsumeViewmodelCamera(const void* camera)
+{
+    if (camera == nullptr || camera != t_pendingViewmodelCamera)
+        return false;
+    t_pendingViewmodelCamera = nullptr;
+    uint32_t fovBits;
+    memcpy(&fovBits, static_cast<const unsigned char*>(camera) + 0x48, sizeof(fovBits));
+    return fovBits == t_pendingViewmodelFovBits;
 }
 
 bool IsPlayerSkeletonLoaded()

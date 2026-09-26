@@ -172,4 +172,10 @@ void SetPlayerBoneDistanceThreshold(float value);
 // still sets the fastest possible turn.
 float GetVrTurnSpeed();
 
+// Where the right controller sits on the gun for the weapon drive (hooks/camera_matrix_test_hook.cpp), in the gun's
+// rest view: out = {right, up, back} in meters (forward is negative back). Ini-only (WeaponGripRight/Up/Back).
+void GetWeaponGripOffset(float out[3]);
+// The gun's rotation relative to the controller: out = {pitch, yaw, roll} in degrees. Ini-only (WeaponGripPitch/Yaw/Roll).
+void GetWeaponGripRotationDeg(float out[3]);
+
 } // namespace mohw

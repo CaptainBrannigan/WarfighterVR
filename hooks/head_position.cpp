@@ -138,7 +138,9 @@ void ApplyHeadPosition(void* transformPtr)
                   dx, dy, dz, ox, oy, oz, GetHeadPositionScale(), cam[12], cam[13], cam[14]);
 }
 
-bool TrackingOffsetToGameWorld(float dx, float dy, float dz, float out[3])
+namespace {
+
+bool TrackingToGameWorld(float dx, float dy, float dz, float scale, float out[3])
 {
     float zeroYaw = 0, zeroPitch = 0, baseYaw = 0, basePitch = 0;
     if (!GetHeadAimInvertYaw() || !GetHeadAimMapping(&zeroYaw, &zeroPitch, &baseYaw, &basePitch))
@@ -149,7 +151,6 @@ bool TrackingOffsetToGameWorld(float dx, float dy, float dz, float out[3])
     // x' = x cos + z sin, z' = -x sin + z cos.
     float theta = -(zeroYaw + baseYaw);
     float c = cosf(theta), s = sinf(theta);
-    float scale = GetHeadPositionScale();
     out[0] = (dx * c + dz * s) * scale;
     out[1] = dy * scale;
     out[2] = (-dx * s + dz * c) * scale;
@@ -159,6 +160,18 @@ bool TrackingOffsetToGameWorld(float dx, float dy, float dz, float out[3])
         out[2] = -out[2];
     }
     return std::isfinite(out[0]) && std::isfinite(out[1]) && std::isfinite(out[2]);
+}
+
+} // namespace
+
+bool TrackingOffsetToGameWorld(float dx, float dy, float dz, float out[3])
+{
+    return TrackingToGameWorld(dx, dy, dz, GetHeadPositionScale(), out);
+}
+
+bool TrackingDirectionToGameWorld(float dx, float dy, float dz, float out[3])
+{
+    return TrackingToGameWorld(dx, dy, dz, 1.0f, out);
 }
 
 bool GetLastAppliedHeadPosition(float out[3])

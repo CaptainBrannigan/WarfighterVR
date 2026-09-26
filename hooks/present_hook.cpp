@@ -7,6 +7,7 @@
 #include "aiming_controller_hook.h"
 #include "fov_scale_hook.h"
 #include "alternating_eye.h"
+#include "camera_matrix_test_hook.h"
 #include "constantbuffer_hook.h"
 #include "controller_trigger_hook.h"
 
@@ -232,6 +233,8 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
     CheckLogMarkerHotkey();
     // NUMPAD5: arms an every-call burst capture of GetHeadPose staleness -- see companion_bridge.h.
     CheckHeadPoseStalenessBurstHotkey();
+    // Numpad .: weapon-to-controller calibrate / off -- see camera_matrix_test_hook.h.
+    CheckWeaponDriveHotkey();
 
     // POLLING TABLE RE-ENABLED (2026-09-25): needed live so the user can toggle head-aim (F12) at will to test
     // mouse-driven rotation with smoothing left on, decoupled from HMD/head-tracking entirely.

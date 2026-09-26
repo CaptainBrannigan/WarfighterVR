@@ -75,6 +75,14 @@ void AdvanceEyeToNextFrame()
     g_rightEyeActive.store(!g_rightEyeActive.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
+float GetActiveEyeOffsetAlongRow0()
+{
+    // kBaseIpdMeters (average human IPD) times the user-tunable GetIpdScale() (F7/F8, sdk/settings.h).
+    constexpr float kBaseIpdMeters = 0.064f;
+    float eyeSign = IsRightEyeActive() ? 1.0f : -1.0f;
+    return eyeSign * kBaseIpdMeters * GetIpdScale() * 0.5f;
+}
+
 bool ApplyEyeOffset(void* transformPtr)
 {
     float raw[16]{};
@@ -104,13 +112,7 @@ bool ApplyEyeOffset(void* transformPtr)
     // transform IS the source the engine builds that view matrix from), so it points the same real-world
     // direction either way.
     bool rightEye = IsRightEyeActive();
-    float eyeSign = rightEye ? 1.0f : -1.0f;
-
-    // kBaseIpdMeters (average human IPD) times the user-tunable GetIpdScale() (F7/F8, sdk/settings.h).
-    constexpr float kBaseIpdMeters = 0.064f;
-    float ipdMeters = kBaseIpdMeters * GetIpdScale();
-
-    Vec3 newTrans = VecAdd(trans, VecScale(left, eyeSign * ipdMeters * 0.5f));
+    Vec3 newTrans = VecAdd(trans, VecScale(left, GetActiveEyeOffsetAlongRow0()));
 
     LogOffsetIfDue(rightEye, trans, newTrans);
 

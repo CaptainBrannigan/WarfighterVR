@@ -20,4 +20,7 @@ bool GetLastAppliedHeadPosition(float out[3]);
 // or if HeadAimInvertYaw is off (that mapping is a mirror and has no rigid world equivalent).
 bool TrackingOffsetToGameWorld(float dx, float dy, float dz, float out[3]);
 
+// Same rotation for a direction or axis (no HeadPositionScale), e.g. a controller's basis vectors.
+bool TrackingDirectionToGameWorld(float dx, float dy, float dz, float out[3]);
+
 } // namespace mohw

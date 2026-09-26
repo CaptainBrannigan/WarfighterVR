@@ -1,18 +1,23 @@
 #pragma once
-// Diagnostic test (2026-09-19): hooks FUN_006FC2A0 (the camera-class matrix
-// setter, __thiscall, one 4x4 float* arg, RET 4) and, ONLY when called from
-// FUN_0099C2A0's call site (return address 0x0099C473), yaws the incoming
-// matrix's three basis rows by kYawDegrees before the original copies it into
-// the camera object. Found via Cheat Engine: this is the write that fills the
-// camera at (that session's) 02AE2890, and freezing that object left the
-// arms+gun moving with the body -- so this test shows what does and doesn't
-// follow the game-side camera rotation. Translation row is left untouched.
-// Always-on once installed, no settings.ini toggle.
+// Hooks FUN_006FC2A0 (the camera-class matrix setter, __thiscall, one 4x4 float* arg, RET 4) and acts only when it's
+// called from FUN_008B2AB0's first-person viewmodel batch build (OFFSET_CAMERAMATRIX_CALLER_VIEWMODEL): the local
+// camera each first-person batch is drawn from. Weapon batches (count != 3) can be redrawn as if held by the right
+// controller (the weapon drive, see the .cpp's v3 comment); body+hands batches pass through. Also hooks FUN_00723800
+// for the per-instance body hide test (legs/arms/hands), currently inert.
 
 namespace mohw {
 
 bool InstallCameraMatrixTestHook();
 void RemoveCameraMatrixTestHook();
+
+// Numpad . once per frame (present_hook.cpp): toggles the weapon drive. Turning it on snaps the gun onto the controller
+// at the ini's grip point (WeaponGripRight/Up/Back) and logs where the hand actually is, for tuning that point.
+void CheckWeaponDriveHotkey();
+
+// For projection_aspect_hook.cpp's UpdateMatrices hook: true (once) if `camera` is the first-person viewmodel camera
+// this thread just set a batch matrix on, so the viewmodel can be given the same per-eye true frustum as the world
+// (its own 55 degree symmetric projection doesn't match the headset, which is what doubles and head-locks the gun).
+bool ConsumeViewmodelCamera(const void* camera);
 
 // "Player skeleton loaded" signal (2026-09-22, for draw_trace_diag.cpp's UI element separation): true if the
 // viewmodel batch matrix setter (this file's own HookImpl, gated on OFFSET_CAMERAMATRIX_CALLER_VIEWMODEL's call

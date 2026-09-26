@@ -1,4 +1,5 @@
 #include "projection_aspect_hook.h"
+#include "camera_matrix_test_hook.h"
 
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/mohw_offsets.h"
@@ -286,6 +287,25 @@ bool WriteFrustumProjection(float* self)
     }
 }
 
+// The first-person viewmodel camera (see ConsumeViewmodelCamera): it sits at the batch origin rather than near the
+// player and carries its own 55 degree fov, so ReadFrustumFovMatch never picks it up. Gives it the world's fov and
+// this eye's frustum so the gun is projected like everything else. SEH-guarded, same reasoning as the write above.
+bool WriteViewmodelFrustumProjection(float* self)
+{
+    __try
+    {
+        if (*reinterpret_cast<int*>(self + 0x10) != 0) // perspective only
+            return false;
+        uint32_t fovBits = g_frustumFovBits.load(std::memory_order_relaxed);
+        memcpy(&self[0x12], &fovBits, sizeof(fovBits)); // +0x48 fov
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+    return WriteFrustumProjection(self);
+}
+
 // SEH-guarded, no C++ objects in scope -- same C2712 reason as TryApplyFrustumMatch above.
 bool TryApplyInnerEdgeTrim(float* self, float trim)
 {
@@ -323,6 +343,19 @@ void __fastcall Hooked_UpdateMatrices(float* self, void* edx)
     {
         RecordCameraSignature(self);
         MaybeLogCameraSignatures();
+    }
+    if (g_frustumActive.load(std::memory_order_relaxed) && self && ConsumeViewmodelCamera(self))
+    {
+        static std::atomic<long long> viewmodelWrites{0};
+        if (WriteViewmodelFrustumProjection(self))
+        {
+            long long n = ++viewmodelWrites;
+            if (n == 1 || n % 5000 == 0)
+                MOHW_LOG(kLogFile, "VIEWMODEL TRUE FRUSTUM: camera %p given aspect %.4f offset (%.4f, %.4f) (count=%lld)",
+                          static_cast<void*>(self), g_frustumAspect.load(), g_frustumOffX.load(), g_frustumOffY.load(), n);
+        }
+        g_original(self, edx);
+        return;
     }
     if (g_frustumActive.load(std::memory_order_relaxed) && self)
     {

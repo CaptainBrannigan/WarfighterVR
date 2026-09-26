@@ -52,6 +52,14 @@ constexpr float kDefaultBoneHideRange2End = 5.0f;
 // is a starting point to dial in live, not a solved value.
 constexpr float kDefaultPlayerBoneDistanceThreshold = 6.2f;
 constexpr float kDefaultVrTurnSpeed = 1.0f; // hooks/xinput_hook.cpp
+// Weapon drive grip point (hooks/camera_matrix_test_hook.cpp): where the controller sits on the gun, in the gun's
+// rest view (right, up, back; meters). Default = the average of three live "hold it where the gun sits" captures.
+constexpr float kDefaultWeaponGripRight = 0.13f;
+constexpr float kDefaultWeaponGripUp = -0.20f;
+constexpr float kDefaultWeaponGripBack = -0.51f;
+constexpr float kDefaultWeaponGripPitchDeg = 0.0f; // gun rotation relative to the controller, degrees
+constexpr float kDefaultWeaponGripYawDeg = 0.0f;
+constexpr float kDefaultWeaponGripRollDeg = 0.0f;
 
 std::atomic<float> g_fovScale{kDefaultFovScale};
 std::atomic<float> g_ipdScale{kDefaultIpdScale};
@@ -75,6 +83,12 @@ std::atomic<float> g_boneHideRange2Start{kDefaultBoneHideRange2Start};
 std::atomic<float> g_boneHideRange2End{kDefaultBoneHideRange2End};
 std::atomic<float> g_playerBoneDistanceThreshold{kDefaultPlayerBoneDistanceThreshold};
 std::atomic<float> g_vrTurnSpeed{kDefaultVrTurnSpeed};
+std::atomic<float> g_weaponGripRight{kDefaultWeaponGripRight};
+std::atomic<float> g_weaponGripUp{kDefaultWeaponGripUp};
+std::atomic<float> g_weaponGripBack{kDefaultWeaponGripBack};
+std::atomic<float> g_weaponGripPitchDeg{kDefaultWeaponGripPitchDeg};
+std::atomic<float> g_weaponGripYawDeg{kDefaultWeaponGripYawDeg};
+std::atomic<float> g_weaponGripRollDeg{kDefaultWeaponGripRollDeg};
 // Guards the settings FILE's read-modify-write access -- unrelated to the
 // atomics above, which are already independently safe for concurrent
 // get/set from the render/hotkey-poll threads.
@@ -124,6 +138,12 @@ void WriteSettingsFileLocked()
     fprintf(f, "BoneHideRange2End=%.4f\n", g_boneHideRange2End.load(std::memory_order_relaxed));
     fprintf(f, "PlayerBoneDistanceThreshold=%.4f\n", g_playerBoneDistanceThreshold.load(std::memory_order_relaxed));
     fprintf(f, "VrTurnSpeed=%.4f\n", g_vrTurnSpeed.load(std::memory_order_relaxed));
+    fprintf(f, "WeaponGripRight=%.4f\n", g_weaponGripRight.load(std::memory_order_relaxed));
+    fprintf(f, "WeaponGripUp=%.4f\n", g_weaponGripUp.load(std::memory_order_relaxed));
+    fprintf(f, "WeaponGripBack=%.4f\n", g_weaponGripBack.load(std::memory_order_relaxed));
+    fprintf(f, "WeaponGripPitch=%.4f\n", g_weaponGripPitchDeg.load(std::memory_order_relaxed));
+    fprintf(f, "WeaponGripYaw=%.4f\n", g_weaponGripYawDeg.load(std::memory_order_relaxed));
+    fprintf(f, "WeaponGripRoll=%.4f\n", g_weaponGripRollDeg.load(std::memory_order_relaxed));
     fclose(f);
 }
 
@@ -227,6 +247,18 @@ void LoadSettings()
             g_playerBoneDistanceThreshold.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "VrTurnSpeed", &value))
             g_vrTurnSpeed.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "WeaponGripRight", &value))
+            g_weaponGripRight.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "WeaponGripUp", &value))
+            g_weaponGripUp.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "WeaponGripPitch", &value))
+            g_weaponGripPitchDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "WeaponGripYaw", &value))
+            g_weaponGripYawDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "WeaponGripRoll", &value))
+            g_weaponGripRollDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "WeaponGripBack", &value))
+            g_weaponGripBack.store(value, std::memory_order_relaxed);
     }
     fclose(f);
 
@@ -496,6 +528,20 @@ void SetPlayerBoneDistanceThreshold(float value)
 float GetVrTurnSpeed()
 {
     return g_vrTurnSpeed.load(std::memory_order_relaxed);
+}
+
+void GetWeaponGripOffset(float out[3])
+{
+    out[0] = g_weaponGripRight.load(std::memory_order_relaxed);
+    out[1] = g_weaponGripUp.load(std::memory_order_relaxed);
+    out[2] = g_weaponGripBack.load(std::memory_order_relaxed);
+}
+
+void GetWeaponGripRotationDeg(float out[3])
+{
+    out[0] = g_weaponGripPitchDeg.load(std::memory_order_relaxed);
+    out[1] = g_weaponGripYawDeg.load(std::memory_order_relaxed);
+    out[2] = g_weaponGripRollDeg.load(std::memory_order_relaxed);
 }
 
 } // namespace mohw
