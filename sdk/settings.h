@@ -172,6 +172,16 @@ void SetPlayerBoneDistanceThreshold(float value);
 // still sets the fastest possible turn.
 float GetVrTurnSpeed();
 
+// Outer deadzone for both VR sticks (hooks/xinput_hook.cpp): deflection at or past this counts as full, since VR sticks
+// often fall short of 1.0 in some directions (Touch right stick: 0.92 right vs 0.99 left). Ini-only
+// (VrStickFullDeflection, default 0.9; 1.0 = off).
+float GetVrStickFullDeflection();
+
+// Two-handed aim (openvr_direct/vr_input.cpp): pressing the off-hand grip engages it when the left hand is within
+// TwoHandGrabRadius of the line running forward from the right hand, 5 cm to TwoHandReach along it. Meters, ini-only.
+float GetTwoHandGrabRadius();
+float GetTwoHandReach();
+
 // Where the right controller sits on the gun for the weapon drive (hooks/camera_matrix_test_hook.cpp), in the gun's
 // rest view: out = {right, up, back} in meters (forward is negative back). Ini-only (WeaponGripRight/Up/Back).
 void GetWeaponGripOffset(float out[3]);

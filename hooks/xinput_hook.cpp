@@ -56,12 +56,20 @@ DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
         return result;
 
     XINPUT_GAMEPAD& pad = state->Gamepad;
-    if (moveX * moveX + moveY * moveY > kVrStickActiveThreshold * kVrStickActiveThreshold)
+    // Outer deadzone: VR sticks often don't reach 1.0 in every direction (live: Touch right stick peaked at 0.92
+    // right vs 0.99 left, so turning right was slower). Deflection past VrStickFullDeflection counts as full, the
+    // move stick scaled by its length so its direction is kept.
+    float fullAt = GetVrStickFullDeflection();
+    if (fullAt < 0.5f || fullAt > 1.0f)
+        fullAt = 1.0f;
+    float moveLen = sqrtf(moveX * moveX + moveY * moveY);
+    if (moveLen > kVrStickActiveThreshold)
     {
-        pad.sThumbLX = ToThumb(moveX);
-        pad.sThumbLY = ToThumb(moveY);
+        float scale = moveLen / fullAt > 1.0f ? 1.0f / moveLen : 1.0f / fullAt;
+        pad.sThumbLX = ToThumb(moveX * scale);
+        pad.sThumbLY = ToThumb(moveY * scale);
     }
-    float turn = turnX * GetVrTurnSpeed();
+    float turn = turnX / fullAt * GetVrTurnSpeed();
     if (fabsf(turnX) > kVrStickActiveThreshold)
     {
         pad.sThumbRX = ToThumb(turn);

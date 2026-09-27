@@ -3,6 +3,7 @@
 #include "openvr_types.h"
 #include "../hooks/companion_bridge.h"
 #include "../sdk/logging.h"
+#include "../sdk/settings.h"
 
 #include <windows.h>
 #include <atomic>
@@ -28,6 +29,7 @@ constexpr const char* kActionManifestJson = R"({
     { "name": "/actions/main/in/RightHandAim", "type": "pose" },
     { "name": "/actions/main/in/LeftHandAim", "type": "pose" },
     { "name": "/actions/main/in/Fire", "type": "boolean" },
+    { "name": "/actions/main/in/TwoHandGrip", "type": "boolean" },
     { "name": "/actions/main/in/Move", "type": "vector2" },
     { "name": "/actions/main/in/Turn", "type": "vector2" }
   ],
@@ -41,6 +43,7 @@ constexpr const char* kActionManifestJson = R"({
       "/actions/main/in/RightHandAim": "Right hand aim",
       "/actions/main/in/LeftHandAim": "Left hand aim",
       "/actions/main/in/Fire": "Fire",
+      "/actions/main/in/TwoHandGrip": "Two-handed grip - off hand",
       "/actions/main/in/Move": "Move",
       "/actions/main/in/Turn": "Turn"
     }
@@ -63,6 +66,11 @@ constexpr const char* kTouchBindingsJson = R"({
           "path": "/user/hand/right/input/trigger",
           "mode": "trigger",
           "inputs": { "click": { "output": "/actions/main/in/Fire" } }
+        },
+        {
+          "path": "/user/hand/left/input/grip",
+          "mode": "button",
+          "inputs": { "click": { "output": "/actions/main/in/TwoHandGrip" } }
         },
         {
           "path": "/user/hand/left/input/joystick",
@@ -151,6 +159,7 @@ uint64_t g_mainSet = 0;
 uint64_t g_rightAimAction = 0;
 uint64_t g_leftAimAction = 0;
 uint64_t g_fireAction = 0;
+uint64_t g_twoHandAction = 0;
 uint64_t g_moveAction = 0;
 uint64_t g_turnAction = 0;
 
@@ -180,17 +189,121 @@ bool GetNamedHandle(PFN_GetHandle fn, const char* name, uint64_t* out)
     return err == 0;
 }
 
-// Publishes one hand's pose, or marks it untracked. Returns whether it was tracked (for the periodic log).
-bool PublishHandPose(uint64_t action, bool rightHand, UINT64 frameCounter, Vec3* outForward)
+bool ReadHandPose(uint64_t action, PoseActionData* data)
 {
-    PoseActionData data{};
-    int err = g_getPose(g_input, action, g_trackingUniverse, &data, sizeof(data), 0);
+    *data = PoseActionData{};
+    int err = g_getPose(g_input, action, g_trackingUniverse, data, sizeof(*data), 0);
+    return err == 0 && data->active && data->pose.poseIsValid;
+}
+
+Vec3 PoseColumn(const PoseActionData& data, int col)
+{
+    Vec3 v{};
+    v.x = data.pose.deviceToAbsoluteTracking[0][col];
+    v.y = data.pose.deviceToAbsoluteTracking[1][col];
+    v.z = data.pose.deviceToAbsoluteTracking[2][col];
+    return v;
+}
+
+Vec3 Cross(const Vec3& a, const Vec3& b)
+{
+    Vec3 out{};
+    out.x = a.y * b.z - a.z * b.y;
+    out.y = a.z * b.x - a.x * b.z;
+    out.z = a.x * b.y - a.y * b.x;
+    return out;
+}
+
+bool Normalize(Vec3* v)
+{
+    float len = sqrtf(VecDot(*v, *v));
+    if (len < 1e-4f)
+        return false;
+    *v = VecScale(*v, 1.0f / len);
+    return true;
+}
+
+// TWO-HANDED AIM (2026-09-26): pressing the off-hand grip (TwoHandGrip) with the left hand near the rifle -- within
+// TwoHandGrabRadius of the line running forward from the right hand, between 5 cm and TwoHandReach along it -- aims
+// along the right-to-left-hand vector for as long as the grip is held. Done here, on the right hand's published
+// orientation, so the shot direction and the gun on the controller both follow without knowing about it. The right
+// hand's up axis is kept (made perpendicular to the new forward), so tilting the gun still rolls it.
+// Pose matrices: columns 0-2 = right/up/back (+Z is back, -Z forward), column 3 = position, tracking space.
+bool g_twoHanded = false; // submit thread only
+
+void UpdateTwoHanded(bool gripHeld, bool rightTracked, bool leftTracked, const PoseActionData& right,
+                     const PoseActionData& left)
+{
+    bool was = g_twoHanded;
+    if (!gripHeld || !rightTracked || !leftTracked)
+    {
+        g_twoHanded = false;
+    }
+    else if (!g_twoHanded)
+    {
+        Vec3 forward = VecScale(PoseColumn(right, 2), -1.0f);
+        Vec3 toLeft = VecSub(PoseColumn(left, 3), PoseColumn(right, 3));
+        float along = VecDot(toLeft, forward);
+        Vec3 perp = VecSub(toLeft, VecScale(forward, along));
+        float perpDist = sqrtf(VecDot(perp, perp));
+        float radius = GetTwoHandGrabRadius(), reach = GetTwoHandReach();
+        g_twoHanded = along >= 0.05f && along <= reach && perpDist <= radius;
+        static int missLines = 0;
+        if (!g_twoHanded && missLines < 20)
+        {
+            ++missLines;
+            MOHW_LOG(kLogFile,
+                      "two-handed grip pressed but left hand not on the rifle: %.2f m along the barrel (0.05..%.2f), "
+                      "%.2f m off it (max %.2f)",
+                      along, reach, perpDist, radius);
+        }
+    }
+    if (g_twoHanded != was)
+        MOHW_LOG(kLogFile, "two-handed aim %s", g_twoHanded ? "ON" : "off");
+}
+
+// The right hand's orientation aimed at the left hand, or false if the hands are too close to give a direction.
+bool TwoHandedOrientation(const PoseActionData& right, const PoseActionData& left, Quat* out)
+{
+    Vec3 forward = VecSub(PoseColumn(left, 3), PoseColumn(right, 3));
+    if (sqrtf(VecDot(forward, forward)) < 0.08f || !Normalize(&forward))
+        return false;
+    Vec3 back = VecScale(forward, -1.0f);
+    Vec3 up = PoseColumn(right, 1);
+    up = VecSub(up, VecScale(forward, VecDot(up, forward)));
+    if (!Normalize(&up))
+    {
+        up = Vec3{};
+        up.y = 1.0f;
+        up = VecSub(up, VecScale(forward, VecDot(up, forward)));
+        if (!Normalize(&up))
+            return false;
+    }
+    Vec3 rightAxis = Cross(up, back);
+    if (!Normalize(&rightAxis))
+        return false;
+    up = Cross(back, rightAxis);
+    float m[3][4] = {};
+    const Vec3* cols[3] = {&rightAxis, &up, &back};
+    for (int c = 0; c < 3; ++c)
+    {
+        m[0][c] = cols[c]->x;
+        m[1][c] = cols[c]->y;
+        m[2][c] = cols[c]->z;
+    }
+    *out = MatrixToQuat(m);
+    return true;
+}
+
+// Publishes one hand's pose, or marks it untracked. orientationOverride replaces the pose's own orientation.
+void PublishHandPose(const PoseActionData& data, bool tracked, bool rightHand, UINT64 frameCounter,
+                     const Quat* orientationOverride, Vec3* outForward)
+{
     mohwvr::ipc::ControllerPoseBlock block{};
     block.frameCounter = frameCounter;
-    bool tracked = err == 0 && data.active && data.pose.poseIsValid;
     if (tracked)
     {
-        Quat q = MatrixToQuat(data.pose.deviceToAbsoluteTracking);
+        Quat q = orientationOverride ? *orientationOverride : MatrixToQuat(data.pose.deviceToAbsoluteTracking);
         block.ready = 1;
         block.orientationX = q.x;
         block.orientationY = q.y;
@@ -207,7 +320,6 @@ bool PublishHandPose(uint64_t action, bool rightHand, UINT64 frameCounter, Vec3*
         SetRightControllerPoseOverride(block);
     else
         SetLeftControllerPoseOverride(block);
-    return tracked;
 }
 
 } // namespace
@@ -246,6 +358,7 @@ bool InitVrInput(void* input, int trackingUniverse)
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/RightHandAim", &g_rightAimAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/LeftHandAim", &g_leftAimAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/Fire", &g_fireAction) && ok;
+    ok = GetNamedHandle(getActionHandle, "/actions/main/in/TwoHandGrip", &g_twoHandAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/Move", &g_moveAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/Turn", &g_turnAction) && ok;
     if (!ok)
@@ -276,9 +389,19 @@ void UpdateVrInput()
 
     static UINT64 frameCounter = 0;
     ++frameCounter;
+    PoseActionData rightPose{}, leftPose{};
+    bool rightTracked = ReadHandPose(g_rightAimAction, &rightPose);
+    bool leftTracked = ReadHandPose(g_leftAimAction, &leftPose);
+
+    DigitalActionData twoHand{};
+    int twoHandErr = g_getDigital(g_input, g_twoHandAction, &twoHand, sizeof(twoHand), 0);
+    UpdateTwoHanded(twoHandErr == 0 && twoHand.active && twoHand.state, rightTracked, leftTracked, rightPose, leftPose);
+    Quat twoHandedQ{};
+    bool useTwoHanded = g_twoHanded && TwoHandedOrientation(rightPose, leftPose, &twoHandedQ);
+
     Vec3 rightForward{}, leftForward{};
-    bool rightTracked = PublishHandPose(g_rightAimAction, true, frameCounter, &rightForward);
-    bool leftTracked = PublishHandPose(g_leftAimAction, false, frameCounter, &leftForward);
+    PublishHandPose(rightPose, rightTracked, true, frameCounter, useTwoHanded ? &twoHandedQ : nullptr, &rightForward);
+    PublishHandPose(leftPose, leftTracked, false, frameCounter, nullptr, &leftForward);
 
     DigitalActionData fire{};
     AnalogActionData move{}, turn{};
@@ -316,10 +439,11 @@ void UpdateVrInput()
     {
         nextLogMs = now + 1000;
         MOHW_LOG(kLogFile,
-                  "aim tracked R=%d L=%d | active fire=%d move=%d turn=%d | move=(%.2f,%.2f) turnX=%.2f | right "
-                  "forward=(%.3f,%.3f,%.3f) | errs fire=%d move=%d turn=%d",
-                  rightTracked, leftTracked, fire.active, move.active, turn.active, state.moveX, state.moveY,
-                  state.turnX, rightForward.x, rightForward.y, rightForward.z, fireErr, moveErr, turnErr);
+                  "aim tracked R=%d L=%d | active fire=%d move=%d turn=%d twoHand=%d | move=(%.2f,%.2f) turnX=%.2f | "
+                  "right forward=(%.3f,%.3f,%.3f)%s | errs fire=%d move=%d turn=%d twoHand=%d",
+                  rightTracked, leftTracked, fire.active, move.active, turn.active, twoHand.active, state.moveX,
+                  state.moveY, state.turnX, rightForward.x, rightForward.y, rightForward.z,
+                  useTwoHanded ? " (two-handed)" : "", fireErr, moveErr, turnErr, twoHandErr);
     }
 }
 

@@ -52,6 +52,11 @@ constexpr float kDefaultBoneHideRange2End = 5.0f;
 // is a starting point to dial in live, not a solved value.
 constexpr float kDefaultPlayerBoneDistanceThreshold = 6.2f;
 constexpr float kDefaultVrTurnSpeed = 1.0f; // hooks/xinput_hook.cpp
+constexpr float kDefaultVrStickFullDeflection = 0.9f; // hooks/xinput_hook.cpp outer deadzone
+// Two-handed aim (openvr_direct/vr_input.cpp): how close to the rifle's line the left hand must be, and how far along
+// it from the right hand, when the off-hand grip is pressed. Meters.
+constexpr float kDefaultTwoHandGrabRadius = 0.15f;
+constexpr float kDefaultTwoHandReach = 0.8f;
 // Weapon drive grip point (hooks/camera_matrix_test_hook.cpp): where the controller sits on the gun, in the gun's
 // rest view (right, up, back; meters). Default = the average of three live "hold it where the gun sits" captures.
 constexpr float kDefaultWeaponGripRight = 0.13f;
@@ -83,6 +88,9 @@ std::atomic<float> g_boneHideRange2Start{kDefaultBoneHideRange2Start};
 std::atomic<float> g_boneHideRange2End{kDefaultBoneHideRange2End};
 std::atomic<float> g_playerBoneDistanceThreshold{kDefaultPlayerBoneDistanceThreshold};
 std::atomic<float> g_vrTurnSpeed{kDefaultVrTurnSpeed};
+std::atomic<float> g_vrStickFullDeflection{kDefaultVrStickFullDeflection};
+std::atomic<float> g_twoHandGrabRadius{kDefaultTwoHandGrabRadius};
+std::atomic<float> g_twoHandReach{kDefaultTwoHandReach};
 std::atomic<float> g_weaponGripRight{kDefaultWeaponGripRight};
 std::atomic<float> g_weaponGripUp{kDefaultWeaponGripUp};
 std::atomic<float> g_weaponGripBack{kDefaultWeaponGripBack};
@@ -138,6 +146,9 @@ void WriteSettingsFileLocked()
     fprintf(f, "BoneHideRange2End=%.4f\n", g_boneHideRange2End.load(std::memory_order_relaxed));
     fprintf(f, "PlayerBoneDistanceThreshold=%.4f\n", g_playerBoneDistanceThreshold.load(std::memory_order_relaxed));
     fprintf(f, "VrTurnSpeed=%.4f\n", g_vrTurnSpeed.load(std::memory_order_relaxed));
+    fprintf(f, "VrStickFullDeflection=%.4f\n", g_vrStickFullDeflection.load(std::memory_order_relaxed));
+    fprintf(f, "TwoHandGrabRadius=%.4f\n", g_twoHandGrabRadius.load(std::memory_order_relaxed));
+    fprintf(f, "TwoHandReach=%.4f\n", g_twoHandReach.load(std::memory_order_relaxed));
     fprintf(f, "WeaponGripRight=%.4f\n", g_weaponGripRight.load(std::memory_order_relaxed));
     fprintf(f, "WeaponGripUp=%.4f\n", g_weaponGripUp.load(std::memory_order_relaxed));
     fprintf(f, "WeaponGripBack=%.4f\n", g_weaponGripBack.load(std::memory_order_relaxed));
@@ -245,6 +256,12 @@ void LoadSettings()
             g_boneHideRange2End.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "PlayerBoneDistanceThreshold", &value))
             g_playerBoneDistanceThreshold.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "TwoHandGrabRadius", &value))
+            g_twoHandGrabRadius.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "TwoHandReach", &value))
+            g_twoHandReach.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "VrStickFullDeflection", &value))
+            g_vrStickFullDeflection.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "VrTurnSpeed", &value))
             g_vrTurnSpeed.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "WeaponGripRight", &value))
@@ -532,6 +549,21 @@ void SetPlayerBoneDistanceThreshold(float value)
 float GetVrTurnSpeed()
 {
     return g_vrTurnSpeed.load(std::memory_order_relaxed);
+}
+
+float GetVrStickFullDeflection()
+{
+    return g_vrStickFullDeflection.load(std::memory_order_relaxed);
+}
+
+float GetTwoHandGrabRadius()
+{
+    return g_twoHandGrabRadius.load(std::memory_order_relaxed);
+}
+
+float GetTwoHandReach()
+{
+    return g_twoHandReach.load(std::memory_order_relaxed);
 }
 
 void GetWeaponGripOffset(float out[3])
