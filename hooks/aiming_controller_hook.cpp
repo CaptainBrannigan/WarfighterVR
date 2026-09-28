@@ -651,10 +651,7 @@ void CheckAimingControllerHotkeys()
     static bool recenterKeyWasDown = false;
     bool recenterKeyDown = (GetAsyncKeyState(kRecenterHotkey) & 0x8000) != 0;
     if (recenterKeyDown && !recenterKeyWasDown)
-    {
-        g_recenterRequested.store(true, std::memory_order_relaxed);
-        MOHW_LOG(kLogFile, "F3 pressed -- head-aim will recenter on the next applicable frame");
-    }
+        RequestRecenter("F3");
     recenterKeyWasDown = recenterKeyDown;
 
     static bool invertYawKeyWasDown = false;
@@ -690,6 +687,12 @@ bool GetLastAppliedYawPitch(float* outYaw, float* outPitch)
     *outYaw = g_lastWrittenYaw.load(std::memory_order_relaxed);
     *outPitch = g_lastWrittenPitch.load(std::memory_order_relaxed);
     return true;
+}
+
+void RequestRecenter(const char* source)
+{
+    g_recenterRequested.store(true, std::memory_order_relaxed);
+    MOHW_LOG(kLogFile, "%s -- head-aim will recenter on the next applicable frame", source ? source : "recenter");
 }
 
 bool GetHeadAimPositionOrigin(float out[3])

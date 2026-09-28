@@ -105,7 +105,8 @@ struct ThisCallTrampoline
         }
 
         Vec3 controllerDir;
-        if (!GetControllerAimDirection(direction, &controllerDir))
+        static ShotSpreadRemover spreadRemover; // its own: this raycast may carry a different spread than the hit-scan
+        if (!GetControllerAimDirection(direction, &controllerDir, &spreadRemover))
         {
             MOHW_LOG(kLogFile, "call #%d: no controller pose available, leaving unmodified", n);
             return g_originalRayCast(param1, ident, rayCastTest, start, end, hits, maxHitCount, materialFlags,

@@ -10,6 +10,7 @@
 #include "head_position.h"
 #include "../sdk/settings.h"
 #include "fov_scale_hook.h"
+#include "../openvr_direct/vr_hands.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -89,8 +90,9 @@ struct Rigid
     float t[3];
 };
 
-std::atomic<bool> g_weaponDriveOn{false};
-std::atomic<bool> g_weaponGripLogRequested{false}; // log the hand's pose in camera space once, on the next weapon draw
+// The drive itself is the WeaponDriveEnabled setting (default on, so it applies from the first weapon draw after a
+// character loads); Numpad . toggles and saves it.
+std::atomic<bool> g_weaponGripLogRequested{true}; // log the hand's pose in camera space once, on the next weapon draw
 
 // a then b.
 Rigid Compose(const Rigid& a, const Rigid& b)
@@ -171,6 +173,14 @@ Rigid GripInCamera()
     // Rotation = roll (about back), then pitch (about right), then yaw (about up), all in the gun's rest view.
     float deg[3];
     GetWeaponGripRotationDeg(deg);
+    // Weapon in the left hand (left-handed mode or a left-hand holster grab): the grip is mirrored across the view's
+    // vertical plane -- offset right negated, yaw and roll reversed.
+    bool mirrored = openvr_direct::IsWeaponHandLeft();
+    if (mirrored)
+    {
+        deg[1] = -deg[1];
+        deg[2] = -deg[2];
+    }
     const float kRad = 3.14159265f / 180.0f;
     float cp = cosf(deg[0] * kRad), sp = sinf(deg[0] * kRad);
     float cy = cosf(deg[1] * kRad), sy = sinf(deg[1] * kRad);
@@ -180,6 +190,8 @@ Rigid GripInCamera()
     Rigid yaw{{{cy, 0, -sy}, {0, 1, 0}, {sy, 0, cy}}, {0, 0, 0}};
     Rigid j = Compose(Compose(roll, pitch), yaw);
     GetWeaponGripOffset(j.t);
+    if (mirrored)
+        j.t[0] = -j.t[0];
     return j;
 }
 
@@ -220,7 +232,7 @@ void AnchorRigToHead(float m[16], bool addRoll)
 // untouched, while the drive is off or a pose is unavailable.
 bool DriveWeaponFromController(float m[16])
 {
-    if (!g_weaponDriveOn.load())
+    if (!GetWeaponDriveEnabled())
         return false;
     Rigid c{};
     if (!ControllerFrame(m, &c))
@@ -363,7 +375,7 @@ void __cdecl HookedSubmit(void* item, void* drawState)
     bool hideAll = g_hideBodyAll.load();
     // With the gun on the controller, the game's arms and hands are left reaching for where the gun used to be; they
     // share the body batch's one view block with the legs, so they can't be moved on their own yet -- skipped instead.
-    bool hideArms = g_weaponDriveOn.load();
+    bool hideArms = GetWeaponDriveEnabled();
     if ((hide >= 0 || hideAll || hideArms) &&
         reinterpret_cast<uintptr_t>(_ReturnAddress()) ==
             reinterpret_cast<uintptr_t>(Offset<void*>(OFFSET_DRAWITEMSUBMIT_CALLER_INSTANCELOOP)))
@@ -477,18 +489,19 @@ void CheckWeaponDriveHotkey()
     bool down = (GetAsyncKeyState(VK_DECIMAL) & 0x8000) != 0;
     if (down && !wasDown)
     {
-        if (g_weaponDriveOn.exchange(false))
-        {
-            MOHW_LOG(kLogFile, "Numpad . -- weapon drive OFF (weapon back where the game puts it)");
-        }
-        else
+        bool on = !GetWeaponDriveEnabled();
+        SetWeaponDriveEnabled(on); // saved, so it's how the next character load starts too
+        if (on)
         {
             float grip[3];
             GetWeaponGripOffset(grip);
             g_weaponGripLogRequested = true;
-            g_weaponDriveOn = true;
             MOHW_LOG(kLogFile, "Numpad . -- weapon drive ON, gun snapped to the controller at grip (%.3f, %.3f, %.3f)",
                      grip[0], grip[1], grip[2]);
+        }
+        else
+        {
+            MOHW_LOG(kLogFile, "Numpad . -- weapon drive OFF (weapon back where the game puts it)");
         }
     }
     wasDown = down;

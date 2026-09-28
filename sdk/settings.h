@@ -1,4 +1,7 @@
 #pragma once
+
+#include <string>
+#include <vector>
 // Lightweight persistent settings, player-adjustable via the existing debug
 // hotkeys (F5-F8 today) -- values now survive a relaunch instead of
 // resetting to compile-time defaults every session. Plain text key=value
@@ -183,11 +186,79 @@ float GetTwoHandGrabRadius();
 float GetTwoHandReach();
 
 // HUD placement (hooks/draw_trace_diag.cpp, true-frustum mode only): the game's full-screen HUD is drawn into HudScale
-// of each eye's real field of view (so it keeps to the corners), as one head-locked rectangle fused at HudDepth meters.
-// Ini-only for now (HudPlacementEnabled / HudScale / HudDepth).
+// of each eye's real field of view (so it keeps to the corners), as one head-locked rectangle whose two eye copies
+// are separated by HudIpdScale times the rendering IPD (see GetHudIpdScale). HudPlacementEnabled / HudScale.
 bool GetHudPlacementEnabled();
 float GetHudScale();
+// Size of the head-locked screen a whole-2D frame (pre-rendered movie, menu, loading screen) is drawn into, as a
+// fraction of the eye's view; same depth/IPD/offset rules as the HUD. MenuScreenScale, default 0.75.
+float GetMenuScreenScale();
+// Hides the game's screen-centre reticle (draws 2..7 of the frame's final backbuffer pass, gameplay only). Menus draw
+// into the same pass, so while it's on an in-game (pause) menu can lose the elements at those draw positions.
+// HideReticle, default on.
+bool GetHideReticle();
+// Moves the HUD rectangle off head-forward: degrees, + = right / up (HudOffsetX / HudOffsetY).
+void GetHudOffsetDeg(float* x, float* y);
+// The HUD's eye separation as a multiple of the rendering IPD (the eye offset the world is drawn with, IpdScale
+// included): 1 = the world's own IPD, 0 = at infinity. HudIpdScale, default 1.
+float GetHudIpdScale();
+// Distance the HUD is fused at, meters (HudDepth, default and minimum 0.1). Separation = eye offset * HudIpdScale /
+// HudDepth; HudIpdScale 0 puts the HUD at infinity.
 float GetHudDepth();
+
+// Whether the controller shot drops the game's random weapon spread (sdk/motion_controller_aim.h's ShotSpreadRemover).
+// Ini RemoveShotSpread, default on.
+bool GetRemoveShotSpread();
+
+// Fire / ADS go out as mouse clicks (left / right, hooks/controller_trigger_hook.cpp) instead of the virtual pad's RT /
+// LT (openvr_direct/vr_input.cpp). FireViaMouse, default off: the pad triggers also drive vehicles.
+bool GetFireViaMouse();
+
+// Hands (openvr_direct/vr_hands.cpp): LeftHanded = the default weapon hand; HolsterHoldToKeep = a weapon grabbed from
+// a holster only stays in that hand while its grip is held (default off: it stays until the next grab).
+bool GetLeftHanded();
+bool GetHolsterHoldToKeep();
+
+// The gun drawn on the weapon-hand controller (hooks/camera_matrix_test_hook.cpp's weapon drive; arms and hands are
+// hidden while it's on). WeaponDriveEnabled, default on, so it applies as soon as a character loads; Numpad . toggles
+// it and the setter saves.
+bool GetWeaponDriveEnabled();
+void SetWeaponDriveEnabled(bool value);
+// Holster zones: radius (meters) and a vertical offset added to every zone (meters, + = lower).
+float GetHolsterRadius();
+float GetHolsterDrop();
+// Holster zone -> game action: a GstKeyBinding.infantry concept name from Documents\MOHW\settings\PROF_SAVE_profile
+// (e.g. ConceptSelectInventoryItem2), empty = unassigned. Ini keys HolsterStomach / HolsterHip / HolsterChest /
+// HolsterLeftShoulder / HolsterRightShoulder.
+constexpr int kHolsterStomach = 0;
+constexpr int kHolsterHip = 1;
+constexpr int kHolsterChest = 2;
+constexpr int kHolsterLeftShoulder = 3;
+constexpr int kHolsterRightShoulder = 4;
+constexpr int kHolsterZoneCount = 5;
+std::string GetHolsterAction(int zone);
+// Zone centre as an offset from the head in the body frame, meters: out = {right, up, forward}. Stomach and hip are
+// mirrored pairs: out[0] is the distance to each side. Ini HolsterStomachPos=x,y,z etc.
+void GetHolsterOffset(int zone, float out[3]);
+
+// Sight dot (openvr_direct/vr_overlay.cpp): a dot on the weapon hand's aim ray at SightZeroDistance meters, so targets
+// at that distance line up with where the shot lands. SightDotSize in degrees.
+bool GetSightDotEnabled();
+float GetSightZeroDistance();
+float GetSightDotSizeDeg();
+
+// Optic dot (openvr_direct/vr_overlay.cpp): fixed to the weapon hand like a sight on the gun -- at the hand's position,
+// raised by the zero (height, + up), moved by windage (+ right) and forward by OpticDistance, meters, all in the hand's
+// own frame. Zeroed by eye against where shots land. Ini OpticHeight / OpticWindageOffset / OpticDistance.
+bool GetOpticDotEnabled();
+void GetOpticOffset(float* height, float* windage);
+float GetOpticDistance();
+// Dot colours: green when on, red when off (OpticDotGreen default off, RayDotGreen default on).
+bool GetOpticDotGreen();
+bool GetRayDotGreen();
+// Aim ray dot correction, degrees from the controller's forward (+ up / + right): the shot-spread remover
+// (sdk/motion_controller_aim.h) isn't always exact. RayDotElevation / RayDotWindage.
+void GetRayDotOffsetDeg(float* elevation, float* windage);
 
 // Menu table for the SteamVR dashboard tab (openvr_direct/vr_overlay.cpp): every setting a player can adjust, in
 // display order, grouped. AdjustMenuSetting flips a toggle (any nonzero steps) or moves a number by steps * step
@@ -197,14 +268,18 @@ struct MenuSettingInfo
     const char* group;
     const char* label;
     bool isToggle;
-    float value; // toggles: 0 or 1
+    bool isChoice; // a list setting (holster actions): text is the current choice, steps +/-1 cycle it
+    float value;   // toggles: 0 or 1
     float step;
     int decimals;
     const char* unit;
+    char text[64];
 };
 int GetMenuSettingCount();
 bool GetMenuSettingInfo(int index, MenuSettingInfo* out);
 void AdjustMenuSetting(int index, int steps);
+// The game actions a holster can be cycled through (keyboard-bound actions from the game's profile).
+void SetHolsterActionChoices(const std::vector<std::string>& actions);
 
 // Where the right controller sits on the gun for the weapon drive (hooks/camera_matrix_test_hook.cpp), in the gun's
 // rest view: out = {right, up, back} in meters (forward is negative back). Ini-only (WeaponGripRight/Up/Back).

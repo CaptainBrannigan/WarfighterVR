@@ -59,10 +59,56 @@ constexpr float kDefaultVrStickFullDeflection = 0.9f; // hooks/xinput_hook.cpp o
 constexpr float kDefaultTwoHandGrabRadius = 0.15f;
 constexpr float kDefaultTwoHandReach = 0.8f;
 // HUD placement (hooks/draw_trace_diag.cpp): the game's full-screen HUD squeezed into HudScale of each eye's real view,
-// fused at HudDepth meters.
+// separated by HudIpdScale times the rendering IPD (1 = the world's own IPD, at a 2 m reference; 0 = infinity).
 constexpr bool kDefaultHudPlacementEnabled = true;
+constexpr bool kDefaultHideReticle = true; // hooks/draw_trace_diag.cpp: the controller aims, the screen reticle doesn't
 constexpr float kDefaultHudScale = 0.75f;
-constexpr float kDefaultHudDepth = 2.0f;
+constexpr float kDefaultMenuScreenScale = 0.75f; // whole-2D frames: movies, menus, loading screens
+constexpr float kDefaultHudOffsetXDeg = 0.0f; // + = right
+constexpr float kDefaultHudOffsetYDeg = 0.0f; // + = up
+constexpr float kDefaultHudIpdScale = 1.0f; // x the rendering IPD; 0 = HUD at infinity
+constexpr float kDefaultHudDepth = 0.1f;    // meters
+// Shot spread removal (sdk/motion_controller_aim.h's ShotSpreadRemover).
+constexpr bool kDefaultRemoveShotSpread = true;
+// Fire / ADS as mouse clicks (hooks/controller_trigger_hook.cpp) instead of the virtual pad's RT / LT.
+constexpr bool kDefaultFireViaMouse = false;
+// Hands and holsters (openvr_direct/vr_hands.cpp) and the sight dot (openvr_direct/vr_overlay.cpp).
+constexpr bool kDefaultLeftHanded = false;
+constexpr bool kDefaultWeaponDriveEnabled = true; // hooks/camera_matrix_test_hook.cpp, Numpad .
+constexpr bool kDefaultHolsterHoldToKeep = false; // false = sticky: a grabbed weapon stays in that hand
+constexpr float kDefaultHolsterRadius = 0.15f;    // meters
+constexpr float kDefaultHolsterDrop = 0.0f;       // meters, + moves every zone down
+constexpr bool kDefaultSightDotEnabled = true;
+constexpr float kDefaultSightZeroDistance = 25.0f; // meters
+constexpr float kDefaultSightDotSizeDeg = 0.35f;
+// Optic dot: at the weapon hand, raised by OpticHeight (the zero) and moved by OpticWindageOffset / OpticDistance, meters
+// in the hand's own frame. Dot colours: red, or green when the ...Green toggle is on.
+constexpr bool kDefaultOpticDotEnabled = true;
+constexpr float kDefaultOpticHeight = 0.05f;  // + = dot up
+constexpr float kDefaultOpticWindage = 0.0f;  // + = dot right
+constexpr float kDefaultOpticDistance = 0.0f; // + = dot forward of the hand
+constexpr bool kDefaultOpticDotGreen = false;
+constexpr bool kDefaultRayDotGreen = true;
+// Aim ray dot angular correction, degrees from the controller's forward: the shot-spread remover isn't always exact.
+constexpr float kDefaultRayDotElevationDeg = 0.0f; // + = up
+constexpr float kDefaultRayDotWindageDeg = 0.0f;   // + = right
+// Holster zone -> game action (a GstKeyBinding.infantry concept name from the game's profile; empty = unassigned).
+const char* const kHolsterZoneKeys[kHolsterZoneCount] = {"HolsterStomach", "HolsterHip", "HolsterChest",
+                                                         "HolsterLeftShoulder", "HolsterRightShoulder"};
+// Holster zone centres, offsets from the head in the body frame, meters: {right, up, forward}. Stomach and hip are
+// mirrored pairs (X = distance to each side).
+const char* const kHolsterPosKeys[kHolsterZoneCount] = {"HolsterStomachPos", "HolsterHipPos", "HolsterChestPos",
+                                                        "HolsterLeftShoulderPos", "HolsterRightShoulderPos"};
+constexpr float kDefaultHolsterPos[kHolsterZoneCount][3] = {
+    {0.10f, -0.55f, 0.12f},  // stomach (each side)
+    {0.22f, -0.78f, 0.00f},  // hip (each side)
+    {0.00f, -0.33f, 0.14f},  // chest
+    {-0.20f, -0.10f, -0.10f}, // left shoulder
+    {0.20f, -0.10f, -0.10f},  // right shoulder
+};
+const char* const kDefaultHolsterActions[kHolsterZoneCount] = {"ConceptSelectInventoryItem1",
+                                                               "ConceptSelectInventoryItem2", "ConceptThrowGrenade",
+                                                               "ConceptMeleeAttack", "ConceptMeleeAttack"};
 // Weapon drive grip point (hooks/camera_matrix_test_hook.cpp): where the controller sits on the gun, in the gun's
 // rest view (right, up, back; meters). Default = the average of three live "hold it where the gun sits" captures.
 constexpr float kDefaultWeaponGripRight = 0.13f;
@@ -98,8 +144,42 @@ std::atomic<float> g_vrStickFullDeflection{kDefaultVrStickFullDeflection};
 std::atomic<float> g_twoHandGrabRadius{kDefaultTwoHandGrabRadius};
 std::atomic<float> g_twoHandReach{kDefaultTwoHandReach};
 std::atomic<bool> g_hudPlacementEnabled{kDefaultHudPlacementEnabled};
+std::atomic<bool> g_hideReticle{kDefaultHideReticle};
 std::atomic<float> g_hudScale{kDefaultHudScale};
+std::atomic<float> g_menuScreenScale{kDefaultMenuScreenScale};
+std::atomic<float> g_hudOffsetXDeg{kDefaultHudOffsetXDeg};
+std::atomic<float> g_hudOffsetYDeg{kDefaultHudOffsetYDeg};
+std::atomic<float> g_hudIpdScale{kDefaultHudIpdScale};
 std::atomic<float> g_hudDepth{kDefaultHudDepth};
+std::atomic<bool> g_removeShotSpread{kDefaultRemoveShotSpread};
+std::atomic<bool> g_fireViaMouse{kDefaultFireViaMouse};
+std::atomic<bool> g_leftHanded{kDefaultLeftHanded};
+std::atomic<bool> g_weaponDriveEnabled{kDefaultWeaponDriveEnabled};
+std::atomic<bool> g_holsterHoldToKeep{kDefaultHolsterHoldToKeep};
+std::atomic<float> g_holsterRadius{kDefaultHolsterRadius};
+std::atomic<float> g_holsterDrop{kDefaultHolsterDrop};
+std::atomic<bool> g_sightDotEnabled{kDefaultSightDotEnabled};
+std::atomic<float> g_sightZeroDistance{kDefaultSightZeroDistance};
+std::atomic<float> g_sightDotSizeDeg{kDefaultSightDotSizeDeg};
+std::atomic<bool> g_opticDotEnabled{kDefaultOpticDotEnabled};
+std::atomic<float> g_opticHeight{kDefaultOpticHeight};
+std::atomic<float> g_opticWindage{kDefaultOpticWindage};
+std::atomic<float> g_opticDistance{kDefaultOpticDistance};
+std::atomic<bool> g_opticDotGreen{kDefaultOpticDotGreen};
+std::atomic<bool> g_rayDotGreen{kDefaultRayDotGreen};
+std::atomic<float> g_rayDotElevationDeg{kDefaultRayDotElevationDeg};
+std::atomic<float> g_rayDotWindageDeg{kDefaultRayDotWindageDeg};
+std::atomic<float> g_holsterPos[kHolsterZoneCount][3] = {
+    {kDefaultHolsterPos[0][0], kDefaultHolsterPos[0][1], kDefaultHolsterPos[0][2]},
+    {kDefaultHolsterPos[1][0], kDefaultHolsterPos[1][1], kDefaultHolsterPos[1][2]},
+    {kDefaultHolsterPos[2][0], kDefaultHolsterPos[2][1], kDefaultHolsterPos[2][2]},
+    {kDefaultHolsterPos[3][0], kDefaultHolsterPos[3][1], kDefaultHolsterPos[3][2]},
+    {kDefaultHolsterPos[4][0], kDefaultHolsterPos[4][1], kDefaultHolsterPos[4][2]},
+};
+std::mutex g_holsterMutex;
+std::string g_holsterActions[kHolsterZoneCount] = {kDefaultHolsterActions[0], kDefaultHolsterActions[1],
+                                                   kDefaultHolsterActions[2], kDefaultHolsterActions[3],
+                                                   kDefaultHolsterActions[4]}; // guarded by g_holsterMutex
 std::atomic<float> g_weaponGripRight{kDefaultWeaponGripRight};
 std::atomic<float> g_weaponGripUp{kDefaultWeaponGripUp};
 std::atomic<float> g_weaponGripBack{kDefaultWeaponGripBack};
@@ -137,7 +217,6 @@ void WriteSettingsFileLocked()
     fprintf(f, ";   F1     = head-aim invert pitch toggle\n");
     fprintf(f, ";   (HeadAimClampPitch below has no hotkey yet -- edit the value in\n");
     fprintf(f, ";    this file directly and relaunch to change it)\n");
-    fprintf(f, "FovScale=%.4f\n", g_fovScale.load(std::memory_order_relaxed));
     fprintf(f, "IpdScale=%.4f\n", g_ipdScale.load(std::memory_order_relaxed));
     fprintf(f, "HeadAimEnabled=%d\n", g_headAimEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HeadAimSensitivity=%.4f\n", g_headAimSensitivity.load(std::memory_order_relaxed));
@@ -148,19 +227,47 @@ void WriteSettingsFileLocked()
     fprintf(f, "HeadRollInvert=%d\n", g_headRollInvert.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "RotationSmoothingEnabled=%d\n", g_rotationSmoothingEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "RotationSmoothingWindowMs=%.4f\n", g_rotationSmoothingWindowMs.load(std::memory_order_relaxed));
-    fprintf(f, "BoneHideEnabled=%d\n", g_boneHideEnabled.load(std::memory_order_relaxed) ? 1 : 0);
-    fprintf(f, "BoneHideRangeStart=%.4f\n", g_boneHideRangeStart.load(std::memory_order_relaxed));
-    fprintf(f, "BoneHideRangeEnd=%.4f\n", g_boneHideRangeEnd.load(std::memory_order_relaxed));
-    fprintf(f, "BoneHideRange2Start=%.4f\n", g_boneHideRange2Start.load(std::memory_order_relaxed));
-    fprintf(f, "BoneHideRange2End=%.4f\n", g_boneHideRange2End.load(std::memory_order_relaxed));
-    fprintf(f, "PlayerBoneDistanceThreshold=%.4f\n", g_playerBoneDistanceThreshold.load(std::memory_order_relaxed));
     fprintf(f, "VrTurnSpeed=%.4f\n", g_vrTurnSpeed.load(std::memory_order_relaxed));
     fprintf(f, "VrStickFullDeflection=%.4f\n", g_vrStickFullDeflection.load(std::memory_order_relaxed));
     fprintf(f, "TwoHandGrabRadius=%.4f\n", g_twoHandGrabRadius.load(std::memory_order_relaxed));
     fprintf(f, "TwoHandReach=%.4f\n", g_twoHandReach.load(std::memory_order_relaxed));
     fprintf(f, "HudPlacementEnabled=%d\n", g_hudPlacementEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "HideReticle=%d\n", g_hideReticle.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HudScale=%.4f\n", g_hudScale.load(std::memory_order_relaxed));
+    fprintf(f, "MenuScreenScale=%.4f\n", g_menuScreenScale.load(std::memory_order_relaxed));
+    fprintf(f, "HudIpdScale=%.4f\n", g_hudIpdScale.load(std::memory_order_relaxed));
     fprintf(f, "HudDepth=%.4f\n", g_hudDepth.load(std::memory_order_relaxed));
+    fprintf(f, "HudOffsetX=%.4f\n", g_hudOffsetXDeg.load(std::memory_order_relaxed));
+    fprintf(f, "HudOffsetY=%.4f\n", g_hudOffsetYDeg.load(std::memory_order_relaxed));
+    fprintf(f, "RemoveShotSpread=%d\n", g_removeShotSpread.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "FireViaMouse=%d\n", g_fireViaMouse.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "LeftHanded=%d\n", g_leftHanded.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "WeaponDriveEnabled=%d\n", g_weaponDriveEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "HolsterHoldToKeep=%d\n", g_holsterHoldToKeep.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "HolsterRadius=%.4f\n", g_holsterRadius.load(std::memory_order_relaxed));
+    fprintf(f, "HolsterDrop=%.4f\n", g_holsterDrop.load(std::memory_order_relaxed));
+    {
+        // Game action names (GstKeyBinding.infantry.<name> in Documents\MOHW\settings\PROF_SAVE_profile); empty =
+        // unassigned. The key is looked up from the game's own bindings at launch.
+        std::lock_guard<std::mutex> holsterLock(g_holsterMutex);
+        for (int i = 0; i < kHolsterZoneCount; ++i)
+            fprintf(f, "%s=%s\n", kHolsterZoneKeys[i], g_holsterActions[i].c_str());
+    }
+    // Zone centres: right,up,forward from the head, meters (stomach/hip X = each side).
+    for (int i = 0; i < kHolsterZoneCount; ++i)
+        fprintf(f, "%s=%.4f,%.4f,%.4f\n", kHolsterPosKeys[i], g_holsterPos[i][0].load(std::memory_order_relaxed),
+                g_holsterPos[i][1].load(std::memory_order_relaxed), g_holsterPos[i][2].load(std::memory_order_relaxed));
+    fprintf(f, "SightDotEnabled=%d\n", g_sightDotEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "SightZeroDistance=%.4f\n", g_sightZeroDistance.load(std::memory_order_relaxed));
+    fprintf(f, "SightDotSize=%.4f\n", g_sightDotSizeDeg.load(std::memory_order_relaxed));
+    fprintf(f, "OpticDotEnabled=%d\n", g_opticDotEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "OpticHeight=%.4f\n", g_opticHeight.load(std::memory_order_relaxed));
+    fprintf(f, "OpticWindageOffset=%.4f\n", g_opticWindage.load(std::memory_order_relaxed));
+    fprintf(f, "OpticDistance=%.4f\n", g_opticDistance.load(std::memory_order_relaxed));
+    fprintf(f, "OpticDotGreen=%d\n", g_opticDotGreen.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "RayDotGreen=%d\n", g_rayDotGreen.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "RayDotElevation=%.4f\n", g_rayDotElevationDeg.load(std::memory_order_relaxed));
+    fprintf(f, "RayDotWindage=%.4f\n", g_rayDotWindageDeg.load(std::memory_order_relaxed));
     fprintf(f, "WeaponGripRight=%.4f\n", g_weaponGripRight.load(std::memory_order_relaxed));
     fprintf(f, "WeaponGripUp=%.4f\n", g_weaponGripUp.load(std::memory_order_relaxed));
     fprintf(f, "WeaponGripBack=%.4f\n", g_weaponGripBack.load(std::memory_order_relaxed));
@@ -184,6 +291,17 @@ bool ParseFloatSetting(const std::string& line, const char* key, float* outValue
     if (line[keyLen] != '=')
         return false;
     *outValue = static_cast<float>(atof(line.c_str() + keyLen + 1));
+    return true;
+}
+
+bool ParseStringSetting(const std::string& line, const char* key, std::string* outValue)
+{
+    size_t keyLen = strlen(key);
+    if (line.size() < keyLen + 1 || line.compare(0, keyLen, key) != 0 || line[keyLen] != '=')
+        return false;
+    *outValue = line.substr(keyLen + 1);
+    while (!outValue->empty() && (outValue->back() == ' ' || outValue->back() == '\t'))
+        outValue->pop_back();
     return true;
 }
 
@@ -226,9 +344,7 @@ void LoadSettings()
 
         float value = 0.0f;
         bool boolValue = false;
-        if (ParseFloatSetting(line, "FovScale", &value))
-            g_fovScale.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "IpdScale", &value))
+        if (ParseFloatSetting(line, "IpdScale", &value))
             g_ipdScale.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "HeadAimEnabled", &boolValue))
             g_headAimEnabled.store(boolValue, std::memory_order_relaxed);
@@ -256,24 +372,81 @@ void LoadSettings()
             g_rotationSmoothingEnabled.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "RotationSmoothingWindowMs", &value))
             g_rotationSmoothingWindowMs.store(value, std::memory_order_relaxed);
-        else if (ParseBoolSetting(line, "BoneHideEnabled", &boolValue))
-            g_boneHideEnabled.store(boolValue, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "BoneHideRangeStart", &value))
-            g_boneHideRangeStart.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "BoneHideRangeEnd", &value))
-            g_boneHideRangeEnd.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "BoneHideRange2Start", &value))
-            g_boneHideRange2Start.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "BoneHideRange2End", &value))
-            g_boneHideRange2End.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "PlayerBoneDistanceThreshold", &value))
-            g_playerBoneDistanceThreshold.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "HudPlacementEnabled", &boolValue))
             g_hudPlacementEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "HideReticle", &boolValue))
+            g_hideReticle.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HudScale", &value))
             g_hudScale.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "MenuScreenScale", &value))
+            g_menuScreenScale.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "HudOffsetX", &value))
+            g_hudOffsetXDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "HudOffsetY", &value))
+            g_hudOffsetYDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "HudIpdScale", &value))
+            g_hudIpdScale.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HudDepth", &value))
             g_hudDepth.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "RemoveShotSpread", &boolValue))
+            g_removeShotSpread.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "FireViaMouse", &boolValue))
+            g_fireViaMouse.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "LeftHanded", &boolValue))
+            g_leftHanded.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "WeaponDriveEnabled", &boolValue))
+            g_weaponDriveEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "HolsterHoldToKeep", &boolValue))
+            g_holsterHoldToKeep.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "HolsterRadius", &value))
+            g_holsterRadius.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "HolsterDrop", &value))
+            g_holsterDrop.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "SightDotEnabled", &boolValue))
+            g_sightDotEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "SightZeroDistance", &value))
+            g_sightZeroDistance.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "SightDotSize", &value))
+            g_sightDotSizeDeg.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "OpticDotEnabled", &boolValue))
+            g_opticDotEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "OpticHeight", &value))
+            g_opticHeight.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "OpticWindageOffset", &value))
+            g_opticWindage.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "OpticDistance", &value))
+            g_opticDistance.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "OpticDotGreen", &boolValue))
+            g_opticDotGreen.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "RayDotGreen", &boolValue))
+            g_rayDotGreen.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "RayDotElevation", &value))
+            g_rayDotElevationDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "RayDotWindage", &value))
+            g_rayDotWindageDeg.store(value, std::memory_order_relaxed);
+        else if ([&] {
+                     std::string text;
+                     for (int i = 0; i < kHolsterZoneCount; ++i)
+                     {
+                         if (ParseStringSetting(line, kHolsterZoneKeys[i], &text))
+                         {
+                             std::lock_guard<std::mutex> holsterLock(g_holsterMutex);
+                             g_holsterActions[i] = text;
+                             return true;
+                         }
+                         float xyz[3];
+                         if (ParseStringSetting(line, kHolsterPosKeys[i], &text) &&
+                             sscanf_s(text.c_str(), "%f,%f,%f", &xyz[0], &xyz[1], &xyz[2]) == 3)
+                         {
+                             for (int k = 0; k < 3; ++k)
+                                 g_holsterPos[i][k].store(xyz[k], std::memory_order_relaxed);
+                             return true;
+                         }
+                     }
+                     return false;
+                 }())
+        {
+        }
         else if (ParseFloatSetting(line, "TwoHandGrabRadius", &value))
             g_twoHandGrabRadius.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "TwoHandReach", &value))
@@ -589,14 +762,139 @@ bool GetHudPlacementEnabled()
     return g_hudPlacementEnabled.load(std::memory_order_relaxed);
 }
 
+bool GetHideReticle()
+{
+    return g_hideReticle.load(std::memory_order_relaxed);
+}
+
 float GetHudScale()
 {
     return g_hudScale.load(std::memory_order_relaxed);
 }
 
+float GetMenuScreenScale()
+{
+    return g_menuScreenScale.load(std::memory_order_relaxed);
+}
+
+
+void GetHudOffsetDeg(float* x, float* y)
+{
+    *x = g_hudOffsetXDeg.load(std::memory_order_relaxed);
+    *y = g_hudOffsetYDeg.load(std::memory_order_relaxed);
+}
+
+float GetHudIpdScale()
+{
+    return g_hudIpdScale.load(std::memory_order_relaxed);
+}
+
 float GetHudDepth()
 {
     return g_hudDepth.load(std::memory_order_relaxed);
+}
+
+bool GetRemoveShotSpread()
+{
+    return g_removeShotSpread.load(std::memory_order_relaxed);
+}
+
+bool GetFireViaMouse()
+{
+    return g_fireViaMouse.load(std::memory_order_relaxed);
+}
+
+bool GetLeftHanded()
+{
+    return g_leftHanded.load(std::memory_order_relaxed);
+}
+
+bool GetWeaponDriveEnabled()
+{
+    return g_weaponDriveEnabled.load(std::memory_order_relaxed);
+}
+
+void SetWeaponDriveEnabled(bool value)
+{
+    g_weaponDriveEnabled.store(value, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_fileMutex);
+    WriteSettingsFileLocked();
+}
+
+bool GetHolsterHoldToKeep()
+{
+    return g_holsterHoldToKeep.load(std::memory_order_relaxed);
+}
+
+float GetHolsterRadius()
+{
+    return g_holsterRadius.load(std::memory_order_relaxed);
+}
+
+float GetHolsterDrop()
+{
+    return g_holsterDrop.load(std::memory_order_relaxed);
+}
+
+void GetHolsterOffset(int zone, float out[3])
+{
+    for (int k = 0; k < 3; ++k)
+        out[k] = (zone >= 0 && zone < kHolsterZoneCount) ? g_holsterPos[zone][k].load(std::memory_order_relaxed) : 0.0f;
+}
+
+std::string GetHolsterAction(int zone)
+{
+    if (zone < 0 || zone >= kHolsterZoneCount)
+        return std::string();
+    std::lock_guard<std::mutex> lock(g_holsterMutex);
+    return g_holsterActions[zone];
+}
+
+bool GetSightDotEnabled()
+{
+    return g_sightDotEnabled.load(std::memory_order_relaxed);
+}
+
+float GetSightZeroDistance()
+{
+    return g_sightZeroDistance.load(std::memory_order_relaxed);
+}
+
+float GetSightDotSizeDeg()
+{
+    return g_sightDotSizeDeg.load(std::memory_order_relaxed);
+}
+
+bool GetOpticDotEnabled()
+{
+    return g_opticDotEnabled.load(std::memory_order_relaxed);
+}
+
+void GetOpticOffset(float* height, float* windage)
+{
+    *height = g_opticHeight.load(std::memory_order_relaxed);
+    *windage = g_opticWindage.load(std::memory_order_relaxed);
+}
+
+float GetOpticDistance()
+{
+    return g_opticDistance.load(std::memory_order_relaxed);
+}
+
+bool GetOpticDotGreen()
+{
+    return g_opticDotGreen.load(std::memory_order_relaxed);
+}
+
+bool GetRayDotGreen()
+{
+    return g_rayDotGreen.load(std::memory_order_relaxed);
+}
+
+void GetRayDotOffsetDeg(float* elevation, float* windage)
+{
+    *elevation = g_rayDotElevationDeg.load(std::memory_order_relaxed);
+    *windage = g_rayDotWindageDeg.load(std::memory_order_relaxed);
 }
 
 void GetWeaponGripOffset(float out[3])
@@ -620,12 +918,17 @@ struct MenuEntry
 {
     const char* group;
     const char* label;
-    std::atomic<bool>* toggle; // exactly one of toggle / number is set
+    std::atomic<bool>* toggle; // exactly one of toggle / number / holsterZone is set
     std::atomic<float>* number;
     float minValue, maxValue, step;
     int decimals;
     const char* unit;
+    int holsterZone = -1; // a choice entry: this zone's game action, cycled through g_holsterChoices
 };
+
+// Game actions a holster can be set to: every keyboard-bound action in the game's own profile, filled in by
+// openvr_direct/vr_hands.cpp (SetHolsterActionChoices) once it has read the profile. Guarded by g_holsterMutex.
+std::vector<std::string> g_holsterChoices;
 
 // Order = display order; entries of a group must be contiguous.
 const MenuEntry kMenu[] = {
@@ -647,6 +950,44 @@ const MenuEntry kMenu[] = {
     {"Controls", "Stick full deflection", nullptr, &g_vrStickFullDeflection, 0.5f, 1.0f, 0.01f, 2, ""},
     {"Controls", "Two-hand grab radius", nullptr, &g_twoHandGrabRadius, 0.05f, 0.5f, 0.01f, 2, "m"},
     {"Controls", "Two-hand reach", nullptr, &g_twoHandReach, 0.2f, 1.5f, 0.05f, 2, "m"},
+    {"Controls", "Remove shot spread", &g_removeShotSpread, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Fire / ADS as mouse (off = RT / LT)", &g_fireViaMouse, nullptr, 0, 0, 0, 0, ""},
+    {"Hands", "Left-handed", &g_leftHanded, nullptr, 0, 0, 0, 0, ""},
+    {"Hands", "Hold grip to keep weapon", &g_holsterHoldToKeep, nullptr, 0, 0, 0, 0, ""},
+    {"Hands", "Holster size", nullptr, &g_holsterRadius, 0.05f, 0.4f, 0.01f, 2, "m"},
+    {"Hands", "Holster height offset (+ lower)", nullptr, &g_holsterDrop, -0.4f, 0.4f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach X (each side)", nullptr, &g_holsterPos[0][0], 0.0f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach Y", nullptr, &g_holsterPos[0][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach Z", nullptr, &g_holsterPos[0][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Hip X (each side)", nullptr, &g_holsterPos[1][0], 0.0f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Hip Y", nullptr, &g_holsterPos[1][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Hip Z", nullptr, &g_holsterPos[1][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Chest X", nullptr, &g_holsterPos[2][0], -0.6f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Chest Y", nullptr, &g_holsterPos[2][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Chest Z", nullptr, &g_holsterPos[2][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Left shoulder X", nullptr, &g_holsterPos[3][0], -0.6f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Left shoulder Y", nullptr, &g_holsterPos[3][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Left shoulder Z", nullptr, &g_holsterPos[3][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Right shoulder X", nullptr, &g_holsterPos[4][0], -0.6f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Right shoulder Y", nullptr, &g_holsterPos[4][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Right shoulder Z", nullptr, &g_holsterPos[4][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {"Holster actions", "Stomach", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterStomach},
+    {"Holster actions", "Hips", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterHip},
+    {"Holster actions", "Chest", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterChest},
+    {"Holster actions", "Left shoulder", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterLeftShoulder},
+    {"Holster actions", "Right shoulder", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterRightShoulder},
+    {"Hands", "Optic dot", &g_opticDotEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Hands", "Optic dot green (off = red)", &g_opticDotGreen, nullptr, 0, 0, 0, 0, ""},
+    {"Hands", "Optic zero / height (+ up)", nullptr, &g_opticHeight, -0.3f, 0.3f, 0.001f, 3, "m"},
+    {"Hands", "Optic windage (+ right)", nullptr, &g_opticWindage, -0.3f, 0.3f, 0.001f, 3, "m"},
+    {"Hands", "Optic forward (from the hand)", nullptr, &g_opticDistance, 0.0f, 300.0f, 0.01f, 2, "m"},
+    {"Hands", "Aim ray dot", &g_sightDotEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Hands", "Aim ray dot green (off = red)", &g_rayDotGreen, nullptr, 0, 0, 0, 0, ""},
+    {"Hands", "Aim ray up (spread fix isn't exact)", nullptr, &g_rayDotElevationDeg, -5.0f, 5.0f, 0.05f, 2, "deg"},
+    {"Hands", "Aim ray right (spread fix isn't exact)", nullptr, &g_rayDotWindageDeg, -5.0f, 5.0f, 0.05f, 2, "deg"},
+    {"Hands", "Aim ray dot distance", nullptr, &g_sightZeroDistance, 1.0f, 300.0f, 1.0f, 0, "m"},
+    {"Hands", "Dot size", nullptr, &g_sightDotSizeDeg, 0.05f, 2.0f, 0.05f, 2, "deg"},
+    {"Weapon", "Gun follows controller (Numpad .)", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Weapon", "Grip offset right", nullptr, &g_weaponGripRight, -0.5f, 0.5f, 0.005f, 3, "m"},
     {"Weapon", "Grip offset up", nullptr, &g_weaponGripUp, -0.5f, 0.5f, 0.005f, 3, "m"},
     {"Weapon", "Grip offset back", nullptr, &g_weaponGripBack, -1.0f, 0.5f, 0.005f, 3, "m"},
@@ -654,8 +995,13 @@ const MenuEntry kMenu[] = {
     {"Weapon", "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {"Weapon", "Grip roll", nullptr, &g_weaponGripRollDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {"HUD", "HUD placement", &g_hudPlacementEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"HUD", "Menu / movie screen size", nullptr, &g_menuScreenScale, 0.3f, 1.2f, 0.01f, 2, "x"},
+    {"HUD", "Hide reticle (may clip pause-menu items)", &g_hideReticle, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "HUD scale", nullptr, &g_hudScale, 0.3f, 1.2f, 0.01f, 2, "x"},
-    {"HUD", "HUD depth", nullptr, &g_hudDepth, 0.5f, 10.0f, 0.1f, 1, "m"},
+    {"HUD", "HUD depth", nullptr, &g_hudDepth, 0.1f, 10.0f, 0.1f, 1, "m"},
+    {"HUD", "HUD IPD (x render IPD)", nullptr, &g_hudIpdScale, 0.0f, 4.0f, 0.02f, 2, "x"},
+    {"HUD", "HUD offset right", nullptr, &g_hudOffsetXDeg, -30.0f, 30.0f, 0.5f, 1, "deg"},
+    {"HUD", "HUD offset up", nullptr, &g_hudOffsetYDeg, -30.0f, 30.0f, 0.5f, 1, "deg"},
 };
 constexpr int kMenuCount = static_cast<int>(sizeof(kMenu) / sizeof(kMenu[0]));
 
@@ -674,12 +1020,28 @@ bool GetMenuSettingInfo(int index, MenuSettingInfo* out)
     out->group = e.group;
     out->label = e.label;
     out->isToggle = e.toggle != nullptr;
+    out->isChoice = e.holsterZone >= 0;
     out->value = e.toggle ? (e.toggle->load(std::memory_order_relaxed) ? 1.0f : 0.0f)
-                          : e.number->load(std::memory_order_relaxed);
+                          : (e.number ? e.number->load(std::memory_order_relaxed) : 0.0f);
     out->step = e.step;
     out->decimals = e.decimals;
     out->unit = e.unit;
+    out->text[0] = '\0';
+    if (out->isChoice)
+    {
+        std::string action = GetHolsterAction(e.holsterZone);
+        const char* shown = action.empty() ? "(none)" : action.c_str();
+        if (strncmp(shown, "Concept", 7) == 0) // the game's own prefix, just noise in a menu
+            shown += 7;
+        snprintf(out->text, sizeof(out->text), "%s", shown);
+    }
     return true;
+}
+
+void SetHolsterActionChoices(const std::vector<std::string>& actions)
+{
+    std::lock_guard<std::mutex> lock(g_holsterMutex);
+    g_holsterChoices = actions;
 }
 
 void AdjustMenuSetting(int index, int steps)
@@ -687,7 +1049,22 @@ void AdjustMenuSetting(int index, int steps)
     if (index < 0 || index >= kMenuCount || steps == 0)
         return;
     const MenuEntry& e = kMenu[index];
-    if (e.toggle)
+    if (e.holsterZone >= 0)
+    {
+        // Cycle through "(none)" + the game's keyboard-bound actions.
+        std::lock_guard<std::mutex> holsterLock(g_holsterMutex);
+        std::vector<std::string> options;
+        options.push_back(std::string());
+        options.insert(options.end(), g_holsterChoices.begin(), g_holsterChoices.end());
+        std::string& current = g_holsterActions[e.holsterZone];
+        int at = 0;
+        for (int i = 0; i < static_cast<int>(options.size()); ++i)
+            if (options[i] == current)
+                at = i;
+        int n = static_cast<int>(options.size());
+        current = options[((at + (steps > 0 ? 1 : -1)) % n + n) % n];
+    }
+    else if (e.toggle)
     {
         e.toggle->store(!e.toggle->load(std::memory_order_relaxed), std::memory_order_relaxed);
     }

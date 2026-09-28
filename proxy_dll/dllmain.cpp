@@ -109,11 +109,20 @@ void EnsureInitialized()
         if (!mohw::InstallPresentHook())
             MOHW_LOG(kLogFile, "InstallPresentHook FAILED -- see mohwvr_present.log");
 
-        if (!mohw::InstallConstantBufferHook())
-            MOHW_LOG(kLogFile, "InstallConstantBufferHook FAILED -- see mohwvr_cbscan.log");
-
-        if (!mohw::InstallEngineFunctionHook())
-            MOHW_LOG(kLogFile, "InstallEngineFunctionHook FAILED -- see mohwvr_enginefn.log");
+        // RETIRED 2026-09-28: the constant-buffer hook (bone-buffer detection + the bone-hide test) and the
+        // engine-function diagnostic hook are no longer installed. The bone-hide test was superseded by the viewmodel
+        // instance hide (camera_matrix_test_hook.cpp); what was left was pure overhead -- six hooks on hot D3D calls
+        // (Map/Unmap/UpdateSubresource/DrawIndexed/VS+PSSetConstantBuffers), the same kind of whole-frame hook cost
+        // that caused the 2026-09-22 ghosting regression -- plus hotkeys colliding with gameplay (End = the holsters'
+        // melee key, Delete, Numpad 0/1/2/8/9/+/-/*//). Code kept for reference; the Remove* calls below are no-ops.
+        constexpr bool kLegacyBoneHooksEnabled = false;
+        if (kLegacyBoneHooksEnabled)
+        {
+            if (!mohw::InstallConstantBufferHook())
+                MOHW_LOG(kLogFile, "InstallConstantBufferHook FAILED -- see mohwvr_cbscan.log");
+            if (!mohw::InstallEngineFunctionHook())
+                MOHW_LOG(kLogFile, "InstallEngineFunctionHook FAILED -- see mohwvr_enginefn.log");
+        }
 
         if (!mohw::InstallFovScaleHook())
             MOHW_LOG(kLogFile, "InstallFovScaleHook FAILED -- see mohwvr_fovscale.log");

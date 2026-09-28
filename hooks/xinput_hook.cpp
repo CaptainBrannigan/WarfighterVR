@@ -76,6 +76,18 @@ DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
         pad.sThumbRY = 0;
     }
 
+    // Pad buttons and triggers from the SteamVR pad actions (openvr_direct/vr_input.cpp), on top of a real pad's.
+    WORD vrButtons = 0;
+    BYTE vrLeftTrigger = 0, vrRightTrigger = 0;
+    if (openvr_direct::GetVrPadState(&vrButtons, &vrLeftTrigger, &vrRightTrigger))
+    {
+        pad.wButtons |= vrButtons;
+        if (vrLeftTrigger > pad.bLeftTrigger)
+            pad.bLeftTrigger = vrLeftTrigger;
+        if (vrRightTrigger > pad.bRightTrigger)
+            pad.bRightTrigger = vrRightTrigger;
+    }
+
     // XInput consumers may skip processing when the packet number hasn't changed, so bump it whenever the pad we
     // report differs from the last one.
     static XINPUT_GAMEPAD lastReported{};

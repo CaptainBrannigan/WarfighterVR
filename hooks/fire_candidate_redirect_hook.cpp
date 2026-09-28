@@ -99,7 +99,8 @@ struct ThisCallTrampoline
         }
 
         Vec3 controllerDir;
-        if (!GetControllerAimDirection(direction, &controllerDir))
+        static ShotSpreadRemover spreadRemover; // game thread only
+        if (!GetControllerAimDirection(direction, &controllerDir, &spreadRemover))
         {
             MOHW_LOG(kLogFile, "call #%d: no controller pose available, calling original unmodified", n);
             unsigned char result = g_originalFireCandidate(param1, param2, param3);
@@ -131,6 +132,17 @@ struct ThisCallTrampoline
                    "controller-redirected end={%.3f,%.3f,%.3f} (candidateCount before=%d)",
                    n, origin.x, origin.y, origin.z, fromHand ? "hand " : "unchanged ", newOrigin.x, newOrigin.y,
                    newOrigin.z, end.x, end.y, end.z, newEnd.x, newEnd.y, newEnd.z, countBefore);
+        float yawOffset = 0.0f, pitchOffset = 0.0f;
+        bool locked = spreadRemover.Get(&yawOffset, &pitchOffset);
+        const char* status = !GetRemoveShotSpread()            ? "kept (RemoveShotSpread off)"
+                             : !locked                         ? "kept (measuring)"
+                             : spreadRemover.lastWasOutlier    ? "kept (abnormal shot: game's own direction)"
+                                                               : "REMOVED";
+        MOHW_LOG(kLogFile,
+                   "call #%d: spread %s -- this shot's spread yaw %.2f pitch %.2f deg (locked offsets K %.3f C %.3f rad, "
+                   "outlier run %d)",
+                   n, status, spreadRemover.lastSpreadYaw * 57.29578f, spreadRemover.lastSpreadPitch * 57.29578f,
+                   yawOffset, pitchOffset, spreadRemover.outlierRun);
 
         unsigned char result = g_originalFireCandidate(param1, param2, param3);
 

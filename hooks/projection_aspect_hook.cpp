@@ -29,6 +29,9 @@ std::atomic<uint32_t> g_frustumFovBits{0};
 std::atomic<float> g_frustumAspect{0.0f}, g_frustumOffX{0.0f}, g_frustumOffY{0.0f};
 std::atomic<bool> g_frustumActive{false};
 std::atomic<int> g_frustumEyeIdx{-1}; // which eye (0/1) the values above currently represent -- set by eye_matched_fov.cpp
+// When the world camera last got this eye's true frustum (GetTickCount64 ms): the game is rendering the 3D world, as
+// opposed to a pre-rendered movie, a menu or a loading screen. See WorldRenderedRecently.
+std::atomic<unsigned long long> g_lastWorldFrustumMs{0};
 
 // MIXED-EYE BATCH diagnostic (2026-09-24): user-reported visual signature (a ghost on BOTH sides of a mesh
 // silhouette, not a directional trail following head motion) points at a geometric MISALIGNMENT between
@@ -451,6 +454,7 @@ void __fastcall Hooked_UpdateMatrices(float* self, void* edx)
             if (allowWrite && WriteFrustumProjection(self)) // SEH-guarded write -- see its own comment
             {
                 ++g_matched;
+                g_lastWorldFrustumMs.store(GetTickCount64(), std::memory_order_relaxed); // see WorldRenderedRecently
                 // Identity-change diagnostic -- see g_lastMatchedObj's comment. Also answers "how do I tell the
                 // candidates apart" -- position + near/far of whichever object just BECAME the one being written to.
                 void* prev = g_lastMatchedObj.exchange(self, std::memory_order_relaxed);
@@ -511,6 +515,40 @@ void __fastcall Hooked_UpdateMatrices(float* self, void* edx)
 }
 
 } // namespace
+
+// Whether the 3D world is being rendered, from how busy the camera matrix rebuild is (live 2026-09-28): real world
+// rendering rebuilds ~13,000+ camera matrices a second (shadows, reflections, the view...), while during a
+// pre-rendered movie the engine only keeps ~5 camera objects ticking, ~150 rebuilds a second, all of them still
+// matching the world camera -- so "was the world camera updated" can't tell the two apart, but the rate can.
+// Measured over >= withinMs windows (called per draw, render thread).
+bool WorldRenderedRecently(unsigned withinMs)
+{
+    constexpr long long kWorldRebuildsPerSecond = 1000;
+    static unsigned long long windowStartMs = 0;
+    static long long windowStartCalls = 0;
+    static bool rendering = true;
+    unsigned long long now = GetTickCount64();
+    long long calls = g_calls.load(std::memory_order_relaxed);
+    if (windowStartMs == 0)
+    {
+        windowStartMs = now;
+        windowStartCalls = calls;
+        return rendering;
+    }
+    unsigned long long elapsed = now - windowStartMs;
+    if (elapsed >= withinMs)
+    {
+        long long perSecond = (calls - windowStartCalls) * 1000 / static_cast<long long>(elapsed);
+        bool now3d = perSecond >= kWorldRebuildsPerSecond;
+        if (now3d != rendering)
+            MOHW_LOG(kLogFile, "frame content: %s (%lld camera rebuilds/s)", now3d ? "3D world" : "2D only (movie/menu/loading)",
+                      perSecond);
+        rendering = now3d;
+        windowStartMs = now;
+        windowStartCalls = calls;
+    }
+    return rendering;
+}
 
 void SetTrueFrustumProjection(float commitFovRad, float aspect, float offX, float offY, int eyeIdx)
 {

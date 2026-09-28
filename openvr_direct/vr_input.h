@@ -9,7 +9,8 @@ namespace mohw::openvr_direct {
 // Buttons/sticks. Poses are published separately, per hand, via hooks/companion_bridge.h's controller overrides.
 struct VrActionState
 {
-    bool fire = false;
+    bool fire = false; // the weapon hand's trigger
+    bool ads = false;  // the off hand's trigger: aim down sights (the game's zoom, right mouse)
     float moveX = 0.0f, moveY = 0.0f; // left stick by default, -1..1, +Y = pushed forward
     float turnX = 0.0f;               // right stick X by default, -1..1, + = pushed right
 };
@@ -28,5 +29,10 @@ bool GetVrActionState(VrActionState* out);
 // Lock-free read of just the stick axes, for hooks/xinput_hook.cpp, which runs inside the game's own controller
 // polling. Same values and false-until-first-update behaviour as GetVrActionState.
 bool GetVrSticks(float* moveX, float* moveY, float* turnX);
+
+// Lock-free read of the virtual gamepad's buttons (XINPUT_GAMEPAD_* mask) and triggers (0-255) from the SteamVR pad
+// actions, for hooks/xinput_hook.cpp. The weapon hand's trigger is RT and the other hand's LT, unless fire/ADS go out
+// as mouse clicks (FireViaMouse). False until the first update.
+bool GetVrPadState(unsigned short* buttons, unsigned char* leftTrigger, unsigned char* rightTrigger);
 
 } // namespace mohw::openvr_direct

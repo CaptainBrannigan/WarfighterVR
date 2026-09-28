@@ -5,6 +5,7 @@
 
 #include "../sdk/logging.h"
 #include "../sdk/vr_math.h"
+#include "../hooks/aiming_controller_hook.h"
 #include "../hooks/companion_bridge.h"
 #include "../hooks/render_pose_stamp.h"
 #include "../shared/ipc_protocol.h"
@@ -16,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <thread>
 
@@ -77,6 +79,55 @@ constexpr int kGetFloatTrackedDevicePropertyVtableIndex = 23;
 using PFN_GetFloatTrackedDeviceProperty = float(__thiscall*)(void* self, uint32_t unDeviceIndex, int prop, int* pError);
 constexpr uint32_t kTrackedDeviceIndexHmd = 0; // vr::k_unTrackedDeviceIndex_Hmd
 constexpr int kProp_DisplayFrequency_Float = 2002; // vr::Prop_DisplayFrequency_Float
+
+// HEADSET RECENTER (2026-09-28): the headset's own recenter (on a Quest 3, holding the Meta button) resets SteamVR's
+// zero pose, which SteamVR broadcasts as an event; on one of those the mod recenters head look too (same as F3 /
+// the dashboard button). PollNextEvent(30) / GetEventTypeNameFromEnum(33) on IVRSystem_026. Every other event type is
+// logged the first few times it arrives, so the exact event a given headset/streamer sends can be read off the log.
+constexpr int kPollNextEventVtableIndex = 30;
+constexpr int kGetEventTypeNameVtableIndex = 33;
+using PFN_PollNextEvent = bool(__thiscall*)(void* self, void* event, uint32_t size);
+using PFN_GetEventTypeName = const char*(__thiscall*)(void* self, int eventType);
+constexpr uint32_t kEventChaperoneUniverseHasChanged = 801;
+constexpr uint32_t kEventSeatedZeroPoseReset = 804;
+constexpr uint32_t kEventStandingZeroPoseReset = 808;
+// vr::VREvent_t: 12 bytes + 4 padding + a 48-byte data union (pack(8) on Windows) = 64.
+struct RawVrEvent
+{
+    uint32_t eventType;
+    uint32_t trackedDeviceIndex;
+    float eventAgeSeconds;
+    uint32_t padding;
+    uint64_t data[6];
+};
+static_assert(sizeof(RawVrEvent) == 64, "must match vr::VREvent_t");
+// Written once on the connect thread before SubmitThreadProc starts, then only read there.
+void* g_system = nullptr;
+PFN_PollNextEvent g_pollNextEvent = nullptr;
+PFN_GetEventTypeName g_getEventTypeName = nullptr;
+
+void PollSystemEvents()
+{
+    if (!g_system || !g_pollNextEvent)
+        return;
+    RawVrEvent ev{};
+    while (g_pollNextEvent(g_system, &ev, sizeof(ev)))
+    {
+        static std::map<uint32_t, int> seen;
+        int& count = seen[ev.eventType];
+        if (count < 5)
+        {
+            const char* name = g_getEventTypeName ? g_getEventTypeName(g_system, static_cast<int>(ev.eventType)) : "?";
+            MOHW_LOG(kLogFile, "SteamVR event %u (%s) device %u", ev.eventType, name ? name : "?",
+                      ev.trackedDeviceIndex);
+        }
+        ++count;
+        if (ev.eventType == kEventSeatedZeroPoseReset || ev.eventType == kEventStandingZeroPoseReset ||
+            ev.eventType == kEventChaperoneUniverseHasChanged)
+            RequestRecenter("headset recenter (SteamVR zero-pose event)");
+        ev = RawVrEvent{};
+    }
+}
 
 // Inverse of MatrixToQuat above (render-pose stamping port -- see render_pose_stamp.h's GetPendingRenderPoseStamp
 // comment). Places the quaternion's rotated identity basis vectors into the SAME row/column slots MatrixToQuat
@@ -311,6 +362,9 @@ void ConnectThreadProc()
     if (system)
     {
         void** sysVtable = *reinterpret_cast<void***>(system);
+        g_pollNextEvent = reinterpret_cast<PFN_PollNextEvent>(sysVtable[kPollNextEventVtableIndex]);
+        g_getEventTypeName = reinterpret_cast<PFN_GetEventTypeName>(sysVtable[kGetEventTypeNameVtableIndex]);
+        g_system = system;
         auto getProjectionRaw = reinterpret_cast<PFN_GetProjectionRaw>(sysVtable[kGetProjectionRawVtableIndex]);
         auto getFloatProp =
             reinterpret_cast<PFN_GetFloatTrackedDeviceProperty>(sysVtable[kGetFloatTrackedDevicePropertyVtableIndex]);
@@ -374,7 +428,7 @@ void ConnectThreadProc()
     int overlayErr = kInitError_None;
     void* overlay = getGenericInterface("IVROverlay_028", &overlayErr);
     MOHW_LOG(kLogFile, "IVROverlay_028 = %p, err=%d", overlay, overlayErr);
-    if (!InitVrOverlay(overlay))
+    if (!InitVrOverlay(overlay, trackingUniverse))
         MOHW_LOG(kLogFile, "dashboard settings tab setup FAILED -- continuing without it (see mohwvr_overlay.log)");
 
     MOHW_LOG(kLogFile, "CONNECTED -- game thread will start the separate-device SubmitThreadProc on its first call");
@@ -509,6 +563,7 @@ void SubmitThreadProc()
         RawTrackedDevicePose hmdPose{};
         g_waitGetPoses(g_compositor, &hmdPose, 1, nullptr, 0);
         UpdateVrInput();
+        PollSystemEvents();
 
         if (hmdPose.poseIsValid)
         {

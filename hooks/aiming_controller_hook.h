@@ -92,4 +92,8 @@ float GetHeadYawOffset();
 // HMD position (XR local space, meters) captured at the last recenter -- the origin head-position tracking measures from.
 bool GetHeadAimPositionOrigin(float out[3]);
 
+// Same as F3: re-anchors "straight ahead" (yaw and head-position origin) to where the headset is now, on the next
+// head-aim tick. Safe from any thread; used by the SteamVR Recenter action and the dashboard's Recenter button.
+void RequestRecenter(const char* source);
+
 } // namespace mohw

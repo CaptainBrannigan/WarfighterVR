@@ -1,6 +1,9 @@
 #include "vr_input.h"
 
 #include "openvr_types.h"
+#include "vr_hands.h"
+#include "vr_overlay.h"
+#include "../hooks/aiming_controller_hook.h"
 #include "../hooks/companion_bridge.h"
 #include "../sdk/logging.h"
 #include "../sdk/settings.h"
@@ -12,6 +15,7 @@
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace mohw::openvr_direct {
 namespace {
@@ -21,17 +25,118 @@ constexpr const char* kLogFile = "mohwvr_vrinput.log";
 constexpr const char* kManifestFileName = "mohwvr_actions.json";
 constexpr const char* kTouchBindingsFileName = "mohwvr_bindings_oculus_touch.json";
 
-constexpr const char* kActionManifestJson = R"({
+// GAME ACTIONS (2026-09-28): one SteamVR boolean action per game keybinding (a GstKeyBinding concept from the game's
+// own profile, infantry or infantrySP context), holding that action's key for as long as the button is held -- so
+// everything the game can do from the keyboard can be bound to the controllers in SteamVR's binding UI. Keys are
+// looked up from the profile at launch (vr_hands.cpp), so rebinding in the game's own menu carries over. Menu select
+// and back aren't in the profile (the menus use fixed Enter / Escape), so those two send fixed keys. Movement (WASD)
+// and the arrow-key actions are left out on purpose; fire and zoom are mouse-bound and have their own actions.
+struct GameAction
+{
+    const char* name;        // SteamVR action /actions/main/in/Game<name>
+    const char* concept;     // GstKeyBinding concept whose keyboard key is sent, or nullptr for fixedKey
+    int fixedKey;            // DirectInput scancode sent when concept is nullptr
+    const char* label;
+    const char* defaultPath; // the oculus_touch input bound by default, or nullptr = unbound by default
+    const char* defaultMode; // "button", or "joystick" for a stick click
+    const char* defaultInput; // "click" or "long" (long press)
+};
+constexpr int kDikEscape = 0x01;
+constexpr int kDikEnter = 0x1C;
+const GameAction kGameActions[] = {
+    {"Jump", "ConceptJump", -1, "Jump", nullptr, nullptr, nullptr},
+    {"MenuSelect", nullptr, kDikEnter, "Menu select (Enter)", nullptr, nullptr, nullptr},
+    {"Reload", "ConceptReload", -1, "Reload", nullptr, nullptr, nullptr},
+    {"Interact", "ConceptInteract", -1, "Interact / use", nullptr, nullptr, nullptr},
+    {"MenuBack", nullptr, kDikEscape, "Menu back / pause (Escape)", nullptr, nullptr, nullptr},
+    {"Sprint", "ConceptSprint", -1, "Sprint", nullptr, nullptr, nullptr},
+    {"Crouch", "ConceptCrouch", -1, "Crouch", nullptr, nullptr, nullptr},
+    {"MeleeAttack", "ConceptMeleeAttack", -1, "Melee", nullptr, nullptr, nullptr},
+    {"ThrowGrenade", "ConceptThrowGrenade", -1, "Throw grenade", nullptr, nullptr, nullptr},
+    {"SelectInventoryItem1", "ConceptSelectInventoryItem1", -1, "Select primary weapon", nullptr, nullptr, nullptr},
+    {"SelectInventoryItem2", "ConceptSelectInventoryItem2", -1, "Select secondary weapon", nullptr, nullptr, nullptr},
+    {"ToggleLTLM", "ConceptToggleLTLM", -1, "Toggle LTLM designator", nullptr, nullptr, nullptr},
+    {"SwitchToGrenadeLauncher", "ConceptSwitchToGrenadeLauncher", -1, "Grenade launcher", nullptr, nullptr, nullptr},
+    {"Prone", "ConceptProne", -1, "Prone", nullptr, nullptr, nullptr},
+    {"SprintSlide", "ConceptSprintSlide", -1, "Sprint slide", nullptr, nullptr, nullptr},
+    {"PickUp", "ConceptPickUp", -1, "Pick up", nullptr, nullptr, nullptr},
+    {"ChangeVehicle", "ConceptChangeVehicle", -1, "Change vehicle seat", nullptr, nullptr, nullptr},
+    {"CycleFireMode", "ConceptCycleFireMode", -1, "Cycle fire mode", nullptr, nullptr, nullptr},
+    {"ToggleWeaponLight", "ConceptToggleWeaponLight", -1, "Toggle weapon light", nullptr, nullptr, nullptr},
+    {"ClassAbility", "ConceptClassAbility", -1, "Class ability", nullptr, nullptr, nullptr},
+    {"ShowHAG", "ConceptShowHAG", -1, "Show HAG", nullptr, nullptr, nullptr},
+    {"Spot", "ConceptSpot", -1, "Spot", nullptr, nullptr, nullptr},
+    {"BreathControl", "ConceptBreathControl", -1, "Hold breath", nullptr, nullptr, nullptr},
+    {"PeekAndLean", "ConceptPeekAndLean", -1, "Peek and lean", nullptr, nullptr, nullptr},
+    {"PCPeekLeft", "ConceptPCPeekLeft", -1, "Peek left", nullptr, nullptr, nullptr},
+    {"PCPeekRight", "ConceptPCPeekRight", -1, "Peek right", nullptr, nullptr, nullptr},
+};
+constexpr int kGameActionCount = static_cast<int>(sizeof(kGameActions) / sizeof(kGameActions[0]));
+
+// PAD ACTIONS (2026-09-28): the virtual gamepad's buttons as SteamVR actions, fed into hooks/xinput_hook.cpp's pad.
+// The game maps pad buttons to actions itself, per context (infantry, vehicles, the Apache, spectating, and the
+// menus' own pad navigation), from the gamepad bindings in its profile (type=2 entries; 5 = A = jump, 6 = X =
+// reload/use, 7 = B = crouch, 4 = Y = next weapon, 10/11 = stick clicks, 16/17 = LB/RB, 14/15 = LT/RT). Default Touch
+// layout is 1:1 (A=A, B=B, X=X, Y=Y, stick clicks), the D-pad on double presses, Start on a long Y; LB, RB and Back
+// are unbound by default. Triggers aren't here: the weapon hand's trigger is RT and the other hand's LT.
+struct PadAction
+{
+    const char* name; // SteamVR action /actions/main/in/Pad<name>
+    const char* label;
+    unsigned short mask; // XINPUT_GAMEPAD_* bit
+    const char* defaultPath;
+    const char* defaultMode;
+    const char* defaultInput; // "click", "double" (double press), "long" (long press)
+};
+const PadAction kPadActions[] = {
+    {"A", "A", 0x1000, "/user/hand/right/input/a", "button", "click"},
+    {"B", "B", 0x2000, "/user/hand/right/input/b", "button", "click"},
+    {"X", "X", 0x4000, "/user/hand/left/input/x", "button", "click"},
+    {"Y", "Y", 0x8000, "/user/hand/left/input/y", "button", "click"},
+    {"LeftStick", "Left stick click", 0x0040, "/user/hand/left/input/joystick", "joystick", "click"},
+    {"RightStick", "Right stick click", 0x0080, "/user/hand/right/input/joystick", "joystick", "click"},
+    {"DpadUp", "D-pad up", 0x0001, "/user/hand/left/input/y", "button", "double"},
+    {"DpadDown", "D-pad down", 0x0002, "/user/hand/right/input/a", "button", "double"},
+    {"DpadLeft", "D-pad left", 0x0004, "/user/hand/left/input/x", "button", "double"},
+    {"DpadRight", "D-pad right", 0x0008, "/user/hand/right/input/b", "button", "double"},
+    {"Start", "Start / menu", 0x0010, "/user/hand/left/input/y", "button", "long"},
+    {"Back", "Back / view", 0x0020, nullptr, nullptr, nullptr},
+    {"LB", "Left bumper", 0x0100, nullptr, nullptr, nullptr},
+    {"RB", "Right bumper", 0x0200, nullptr, nullptr, nullptr},
+};
+constexpr int kPadActionCount = static_cast<int>(sizeof(kPadActions) / sizeof(kPadActions[0]));
+
+std::string PadActionName(const PadAction& a)
+{
+    return std::string("/actions/main/in/Pad") + a.name;
+}
+
+std::string GameActionName(const GameAction& a)
+{
+    return std::string("/actions/main/in/Game") + a.name;
+}
+
+std::string BuildActionManifest()
+{
+    std::string s = R"({
   "default_bindings": [
     { "controller_type": "oculus_touch", "binding_url": "mohwvr_bindings_oculus_touch.json" }
   ],
   "actions": [
     { "name": "/actions/main/in/RightHandAim", "type": "pose" },
     { "name": "/actions/main/in/LeftHandAim", "type": "pose" },
-    { "name": "/actions/main/in/Fire", "type": "boolean" },
-    { "name": "/actions/main/in/TwoHandGrip", "type": "boolean" },
+    { "name": "/actions/main/in/FireRight", "type": "boolean" },
+    { "name": "/actions/main/in/FireLeft", "type": "boolean" },
+    { "name": "/actions/main/in/GripRight", "type": "boolean" },
+    { "name": "/actions/main/in/GripLeft", "type": "boolean" },
+    { "name": "/actions/main/in/Recenter", "type": "boolean" },
     { "name": "/actions/main/in/Move", "type": "vector2" },
-    { "name": "/actions/main/in/Turn", "type": "vector2" }
+    { "name": "/actions/main/in/Turn", "type": "vector2" })";
+    for (const PadAction& a : kPadActions)
+        s += ",\n    { \"name\": \"" + PadActionName(a) + "\", \"type\": \"boolean\" }";
+    for (const GameAction& a : kGameActions)
+        s += ",\n    { \"name\": \"" + GameActionName(a) + "\", \"type\": \"boolean\" }";
+    s += R"(
   ],
   "action_sets": [
     { "name": "/actions/main", "usage": "single" }
@@ -42,16 +147,72 @@ constexpr const char* kActionManifestJson = R"({
       "/actions/main": "Gameplay",
       "/actions/main/in/RightHandAim": "Right hand aim",
       "/actions/main/in/LeftHandAim": "Left hand aim",
-      "/actions/main/in/Fire": "Fire",
-      "/actions/main/in/TwoHandGrip": "Two-handed grip - off hand",
+      "/actions/main/in/FireRight": "Fire - right hand",
+      "/actions/main/in/FireLeft": "Fire - left hand",
+      "/actions/main/in/GripRight": "Grip - right hand: holsters, two-handed",
+      "/actions/main/in/GripLeft": "Grip - left hand: holsters, two-handed",
+      "/actions/main/in/Recenter": "Recenter view",
       "/actions/main/in/Move": "Move",
-      "/actions/main/in/Turn": "Turn"
+      "/actions/main/in/Turn": "Turn")";
+    for (const PadAction& a : kPadActions)
+        s += ",\n      \"" + PadActionName(a) + "\": \"Gamepad: " + a.label + "\"";
+    for (const GameAction& a : kGameActions)
+        s += ",\n      \"" + GameActionName(a) + "\": \"Keyboard: " + a.label + "\"";
+    s += R"(
     }
   ]
 }
 )";
+    return s;
+}
 
-constexpr const char* kTouchBindingsJson = R"({
+// One default binding: an input of a controller source feeding an action.
+struct DefaultBinding
+{
+    std::string path, mode, input, output;
+};
+
+// The default Touch binding, grouped into one source per path+mode (a button can carry several inputs, e.g. A = click
+// Jump + long press Menu select).
+std::string BuildTouchBindings()
+{
+    std::vector<DefaultBinding> bindings = {
+        {"/user/hand/right/input/trigger", "trigger", "click", "/actions/main/in/FireRight"},
+        {"/user/hand/left/input/trigger", "trigger", "click", "/actions/main/in/FireLeft"},
+        {"/user/hand/right/input/grip", "button", "click", "/actions/main/in/GripRight"},
+        {"/user/hand/left/input/grip", "button", "click", "/actions/main/in/GripLeft"},
+        {"/user/hand/left/input/joystick", "joystick", "position", "/actions/main/in/Move"},
+        {"/user/hand/right/input/joystick", "joystick", "position", "/actions/main/in/Turn"},
+    };
+    for (const PadAction& a : kPadActions)
+        if (a.defaultPath)
+            bindings.push_back({a.defaultPath, a.defaultMode, a.defaultInput, PadActionName(a)});
+    for (const GameAction& a : kGameActions)
+        if (a.defaultPath)
+            bindings.push_back({a.defaultPath, a.defaultMode, a.defaultInput, GameActionName(a)});
+
+    std::string sources;
+    std::vector<bool> done(bindings.size(), false);
+    for (size_t i = 0; i < bindings.size(); ++i)
+    {
+        if (done[i])
+            continue;
+        std::string inputs;
+        for (size_t j = i; j < bindings.size(); ++j)
+            if (!done[j] && bindings[j].path == bindings[i].path && bindings[j].mode == bindings[i].mode)
+            {
+                done[j] = true;
+                if (!inputs.empty())
+                    inputs += ", ";
+                inputs += "\"" + bindings[j].input + "\": { \"output\": \"" + bindings[j].output + "\" }";
+            }
+        if (!sources.empty())
+            sources += ",\n";
+        sources += "        {\n          \"path\": \"" + bindings[i].path + "\",\n          \"mode\": \"" + bindings[i].mode +
+                   "\",\n          \"inputs\": { " + inputs + " }\n        }";
+    }
+
+    std::string s = R"({
   "controller_type": "oculus_touch",
   "name": "MOHW VR defaults",
   "description": "Default MOHW VR bindings for Touch controllers",
@@ -62,31 +223,16 @@ constexpr const char* kTouchBindingsJson = R"({
         { "output": "/actions/main/in/LeftHandAim", "path": "/user/hand/left/pose/tip" }
       ],
       "sources": [
-        {
-          "path": "/user/hand/right/input/trigger",
-          "mode": "trigger",
-          "inputs": { "click": { "output": "/actions/main/in/Fire" } }
-        },
-        {
-          "path": "/user/hand/left/input/grip",
-          "mode": "button",
-          "inputs": { "click": { "output": "/actions/main/in/TwoHandGrip" } }
-        },
-        {
-          "path": "/user/hand/left/input/joystick",
-          "mode": "joystick",
-          "inputs": { "position": { "output": "/actions/main/in/Move" } }
-        },
-        {
-          "path": "/user/hand/right/input/joystick",
-          "mode": "joystick",
-          "inputs": { "position": { "output": "/actions/main/in/Turn" } }
-        }
+)";
+    s += sources;
+    s += R"(
       ]
     }
   }
 }
 )";
+    return s;
+}
 
 // Plain-data stand-ins for IVRInput's structs (openvr.h, IVRInput section). That section has no #pragma pack, so
 // they use natural alignment: the 64-bit handles sit at offset 8. SteamVR also checks the size we pass.
@@ -158,8 +304,16 @@ PFN_GetPoseActionDataForNextFrame g_getPose = nullptr;
 uint64_t g_mainSet = 0;
 uint64_t g_rightAimAction = 0;
 uint64_t g_leftAimAction = 0;
-uint64_t g_fireAction = 0;
-uint64_t g_twoHandAction = 0;
+uint64_t g_fireAction[2] = {0, 0}; // [kLeftHand], [kRightHand]
+uint64_t g_gripAction[2] = {0, 0};
+uint64_t g_recenterAction = 0;
+uint64_t g_gameActionHandles[kGameActionCount] = {};
+uint64_t g_padActionHandles[kPadActionCount] = {};
+// Lock-free virtual pad state for GetVrPadState (buttons mask, triggers 0-255).
+std::atomic<bool> g_havePad{false};
+std::atomic<unsigned> g_padButtons{0};
+std::atomic<unsigned> g_padLeftTrigger{0}, g_padRightTrigger{0};
+bool g_gameActionDown[kGameActionCount] = {}; // submit thread only: the key is currently held
 uint64_t g_moveAction = 0;
 uint64_t g_turnAction = 0;
 
@@ -196,107 +350,10 @@ bool ReadHandPose(uint64_t action, PoseActionData* data)
     return err == 0 && data->active && data->pose.poseIsValid;
 }
 
-Vec3 PoseColumn(const PoseActionData& data, int col)
-{
-    Vec3 v{};
-    v.x = data.pose.deviceToAbsoluteTracking[0][col];
-    v.y = data.pose.deviceToAbsoluteTracking[1][col];
-    v.z = data.pose.deviceToAbsoluteTracking[2][col];
-    return v;
-}
-
-Vec3 Cross(const Vec3& a, const Vec3& b)
-{
-    Vec3 out{};
-    out.x = a.y * b.z - a.z * b.y;
-    out.y = a.z * b.x - a.x * b.z;
-    out.z = a.x * b.y - a.y * b.x;
-    return out;
-}
-
-bool Normalize(Vec3* v)
-{
-    float len = sqrtf(VecDot(*v, *v));
-    if (len < 1e-4f)
-        return false;
-    *v = VecScale(*v, 1.0f / len);
-    return true;
-}
-
-// TWO-HANDED AIM (2026-09-26): pressing the off-hand grip (TwoHandGrip) with the left hand near the rifle -- within
-// TwoHandGrabRadius of the line running forward from the right hand, between 5 cm and TwoHandReach along it -- aims
-// along the right-to-left-hand vector for as long as the grip is held. Done here, on the right hand's published
-// orientation, so the shot direction and the gun on the controller both follow without knowing about it. The right
-// hand's up axis is kept (made perpendicular to the new forward), so tilting the gun still rolls it.
-// Pose matrices: columns 0-2 = right/up/back (+Z is back, -Z forward), column 3 = position, tracking space.
-bool g_twoHanded = false; // submit thread only
-
-void UpdateTwoHanded(bool gripHeld, bool rightTracked, bool leftTracked, const PoseActionData& right,
-                     const PoseActionData& left)
-{
-    bool was = g_twoHanded;
-    if (!gripHeld || !rightTracked || !leftTracked)
-    {
-        g_twoHanded = false;
-    }
-    else if (!g_twoHanded)
-    {
-        Vec3 forward = VecScale(PoseColumn(right, 2), -1.0f);
-        Vec3 toLeft = VecSub(PoseColumn(left, 3), PoseColumn(right, 3));
-        float along = VecDot(toLeft, forward);
-        Vec3 perp = VecSub(toLeft, VecScale(forward, along));
-        float perpDist = sqrtf(VecDot(perp, perp));
-        float radius = GetTwoHandGrabRadius(), reach = GetTwoHandReach();
-        g_twoHanded = along >= 0.05f && along <= reach && perpDist <= radius;
-        static int missLines = 0;
-        if (!g_twoHanded && missLines < 20)
-        {
-            ++missLines;
-            MOHW_LOG(kLogFile,
-                      "two-handed grip pressed but left hand not on the rifle: %.2f m along the barrel (0.05..%.2f), "
-                      "%.2f m off it (max %.2f)",
-                      along, reach, perpDist, radius);
-        }
-    }
-    if (g_twoHanded != was)
-        MOHW_LOG(kLogFile, "two-handed aim %s", g_twoHanded ? "ON" : "off");
-}
-
-// The right hand's orientation aimed at the left hand, or false if the hands are too close to give a direction.
-bool TwoHandedOrientation(const PoseActionData& right, const PoseActionData& left, Quat* out)
-{
-    Vec3 forward = VecSub(PoseColumn(left, 3), PoseColumn(right, 3));
-    if (sqrtf(VecDot(forward, forward)) < 0.08f || !Normalize(&forward))
-        return false;
-    Vec3 back = VecScale(forward, -1.0f);
-    Vec3 up = PoseColumn(right, 1);
-    up = VecSub(up, VecScale(forward, VecDot(up, forward)));
-    if (!Normalize(&up))
-    {
-        up = Vec3{};
-        up.y = 1.0f;
-        up = VecSub(up, VecScale(forward, VecDot(up, forward)));
-        if (!Normalize(&up))
-            return false;
-    }
-    Vec3 rightAxis = Cross(up, back);
-    if (!Normalize(&rightAxis))
-        return false;
-    up = Cross(back, rightAxis);
-    float m[3][4] = {};
-    const Vec3* cols[3] = {&rightAxis, &up, &back};
-    for (int c = 0; c < 3; ++c)
-    {
-        m[0][c] = cols[c]->x;
-        m[1][c] = cols[c]->y;
-        m[2][c] = cols[c]->z;
-    }
-    *out = MatrixToQuat(m);
-    return true;
-}
-
-// Publishes one hand's pose, or marks it untracked. orientationOverride replaces the pose's own orientation.
-void PublishHandPose(const PoseActionData& data, bool tracked, bool rightHand, UINT64 frameCounter,
+// Publishes one hand's pose, or marks it untracked. aimSlot = the "right controller" slot (the weapon hand, which the
+// shot and gun hooks read); otherwise the "left" (off hand) slot. orientationOverride replaces the pose's own
+// orientation.
+void PublishHandPose(const PoseActionData& data, bool tracked, bool aimSlot, UINT64 frameCounter,
                      const Quat* orientationOverride, Vec3* outForward)
 {
     mohwvr::ipc::ControllerPoseBlock block{};
@@ -316,7 +373,7 @@ void PublishHandPose(const PoseActionData& data, bool tracked, bool rightHand, U
         localForward.z = 1.0f;
         *outForward = QuatRotateVector(q, localForward);
     }
-    if (rightHand)
+    if (aimSlot)
         SetRightControllerPoseOverride(block);
     else
         SetLeftControllerPoseOverride(block);
@@ -333,7 +390,8 @@ bool InitVrInput(void* input, int trackingUniverse)
 
     std::string manifestPath = LogFilePath(kManifestFileName);
     std::string bindingsPath = LogFilePath(kTouchBindingsFileName);
-    if (!WriteTextFile(manifestPath, kActionManifestJson) || !WriteTextFile(bindingsPath, kTouchBindingsJson))
+    if (!WriteTextFile(manifestPath, BuildActionManifest().c_str()) ||
+        !WriteTextFile(bindingsPath, BuildTouchBindings().c_str()))
     {
         MOHW_LOG(kLogFile, "FAILED to write the action manifest/bindings next to the DLL (%s)", manifestPath.c_str());
         return false;
@@ -348,25 +406,48 @@ bool InitVrInput(void* input, int trackingUniverse)
     g_getAnalog = reinterpret_cast<PFN_GetAnalogActionData>(vtable[kGetAnalogActionDataIndex]);
     g_getPose = reinterpret_cast<PFN_GetPoseActionDataForNextFrame>(vtable[kGetPoseActionDataForNextFrameIndex]);
 
-    int err = setManifest(input, manifestPath.c_str());
-    MOHW_LOG(kLogFile, "SetActionManifestPath(%s) err=%d, tracking universe=%d", manifestPath.c_str(), err,
-              trackingUniverse);
-    if (err != 0)
+    // IPCError (7) = our end of the call timed out while vrserver was busy (live 2026-09-28: it logged the manifest as
+    // received, but took 1.01 s, while the Steam client was flooding it with binding reloads). Retry, and on a timeout
+    // carry on to the handle lookups anyway -- the server did take the manifest, so they normally resolve.
+    constexpr int kIpcError = 7;
+    constexpr int kManifestAttempts = 5;
+    int err = 0;
+    for (int attempt = 1; attempt <= kManifestAttempts; ++attempt)
+    {
+        err = setManifest(input, manifestPath.c_str());
+        MOHW_LOG(kLogFile, "SetActionManifestPath(%s) err=%d (attempt %d), tracking universe=%d", manifestPath.c_str(),
+                  err, attempt, trackingUniverse);
+        if (err != kIpcError)
+            break;
+        Sleep(750);
+    }
+    if (err != 0 && err != kIpcError)
         return false;
 
     bool ok = GetNamedHandle(getSetHandle, "/actions/main", &g_mainSet);
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/RightHandAim", &g_rightAimAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/LeftHandAim", &g_leftAimAction) && ok;
-    ok = GetNamedHandle(getActionHandle, "/actions/main/in/Fire", &g_fireAction) && ok;
-    ok = GetNamedHandle(getActionHandle, "/actions/main/in/TwoHandGrip", &g_twoHandAction) && ok;
+    ok = GetNamedHandle(getActionHandle, "/actions/main/in/FireLeft", &g_fireAction[kLeftHand]) && ok;
+    ok = GetNamedHandle(getActionHandle, "/actions/main/in/FireRight", &g_fireAction[kRightHand]) && ok;
+    ok = GetNamedHandle(getActionHandle, "/actions/main/in/GripLeft", &g_gripAction[kLeftHand]) && ok;
+    ok = GetNamedHandle(getActionHandle, "/actions/main/in/GripRight", &g_gripAction[kRightHand]) && ok;
+    ok = GetNamedHandle(getActionHandle, "/actions/main/in/Recenter", &g_recenterAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/Move", &g_moveAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/Turn", &g_turnAction) && ok;
+    // Game actions: one failing only loses that action, not the whole input system.
+    for (int i = 0; i < kGameActionCount; ++i)
+        if (!GetNamedHandle(getActionHandle, GameActionName(kGameActions[i]).c_str(), &g_gameActionHandles[i]))
+            g_gameActionHandles[i] = 0;
+    for (int i = 0; i < kPadActionCount; ++i)
+        if (!GetNamedHandle(getActionHandle, PadActionName(kPadActions[i]).c_str(), &g_padActionHandles[i]))
+            g_padActionHandles[i] = 0;
     if (!ok)
     {
         g_updateActionState = nullptr; // UpdateVrInput no-ops
         return false;
     }
     MOHW_LOG(kLogFile, "SteamVR Input ready");
+    PreloadGameBindings();
     return true;
 }
 
@@ -389,28 +470,50 @@ void UpdateVrInput()
 
     static UINT64 frameCounter = 0;
     ++frameCounter;
-    PoseActionData rightPose{}, leftPose{};
-    bool rightTracked = ReadHandPose(g_rightAimAction, &rightPose);
-    bool leftTracked = ReadHandPose(g_leftAimAction, &leftPose);
+    PoseActionData poses[2]{};
+    HandInput hands[2]{};
+    const uint64_t poseActions[2] = {g_leftAimAction, g_rightAimAction};
+    for (int h = 0; h < 2; ++h)
+    {
+        hands[h].tracked = ReadHandPose(poseActions[h], &poses[h]);
+        memcpy(hands[h].pose, poses[h].pose.deviceToAbsoluteTracking, sizeof(hands[h].pose));
+        DigitalActionData grip{}, fire{};
+        hands[h].grip = g_getDigital(g_input, g_gripAction[h], &grip, sizeof(grip), 0) == 0 && grip.active && grip.state;
+        hands[h].trigger =
+            g_getDigital(g_input, g_fireAction[h], &fire, sizeof(fire), 0) == 0 && fire.active && fire.state;
+    }
 
-    DigitalActionData twoHand{};
-    int twoHandErr = g_getDigital(g_input, g_twoHandAction, &twoHand, sizeof(twoHand), 0);
-    UpdateTwoHanded(twoHandErr == 0 && twoHand.active && twoHand.state, rightTracked, leftTracked, rightPose, leftPose);
-    Quat twoHandedQ{};
-    bool useTwoHanded = g_twoHanded && TwoHandedOrientation(rightPose, leftPose, &twoHandedQ);
+    mohwvr::ipc::HeadPoseBlock head{};
+    bool haveHead = GetHeadPose(&head);
+    float headPos[3] = {head.positionX, head.positionY, head.positionZ};
+    Quat headQ{head.orientationX, head.orientationY, head.orientationZ, head.orientationW};
+    HandsResult result{};
+    UpdateHands(hands, haveHead, headPos, headQ, &result);
 
-    Vec3 rightForward{}, leftForward{};
-    PublishHandPose(rightPose, rightTracked, true, frameCounter, useTwoHanded ? &twoHandedQ : nullptr, &rightForward);
-    PublishHandPose(leftPose, leftTracked, false, frameCounter, nullptr, &leftForward);
+    // The weapon hand's pose goes in the "right controller" (aim) slot everything downstream reads -- the shot
+    // direction and origin, the gun on the controller -- and the other hand in the left slot.
+    int weaponHand = result.weaponHand;
+    Vec3 aimForward{}, offForward{};
+    PublishHandPose(poses[weaponHand], hands[weaponHand].tracked, true, frameCounter,
+                    result.twoHanded ? &result.weaponOrientation : nullptr, &aimForward);
+    PublishHandPose(poses[1 - weaponHand], hands[1 - weaponHand].tracked, false, frameCounter, nullptr, &offForward);
 
-    DigitalActionData fire{};
+    // Sight dots, from the weapon hand's published aim orientation.
+    {
+        Quat aimQ = result.twoHanded ? result.weaponOrientation : MatrixToQuat(poses[weaponHand].pose.deviceToAbsoluteTracking);
+        float origin[3] = {poses[weaponHand].pose.deviceToAbsoluteTracking[0][3],
+                           poses[weaponHand].pose.deviceToAbsoluteTracking[1][3],
+                           poses[weaponHand].pose.deviceToAbsoluteTracking[2][3]};
+        UpdateSightDot(hands[weaponHand].tracked && haveHead, origin, aimQ, headPos);
+    }
+
     AnalogActionData move{}, turn{};
-    int fireErr = g_getDigital(g_input, g_fireAction, &fire, sizeof(fire), 0);
     int moveErr = g_getAnalog(g_input, g_moveAction, &move, sizeof(move), 0);
     int turnErr = g_getAnalog(g_input, g_turnAction, &turn, sizeof(turn), 0);
 
     VrActionState state{};
-    state.fire = fireErr == 0 && fire.active && fire.state;
+    state.fire = result.fire;
+    state.ads = result.ads;
     if (moveErr == 0 && move.active)
     {
         state.moveX = move.x;
@@ -428,8 +531,69 @@ void UpdateVrInput()
     g_turnX.store(state.turnX, std::memory_order_relaxed);
     g_haveSticks.store(true, std::memory_order_release);
 
-    if (fireErr == 0 && fire.changed)
-        MOHW_LOG(kLogFile, "Fire %s", fire.state ? "PRESSED" : "released");
+    static bool lastFire = false;
+    if (state.fire != lastFire)
+        MOHW_LOG(kLogFile, "Fire (%s hand) %s", weaponHand == kLeftHand ? "left" : "right",
+                  state.fire ? "PRESSED" : "released");
+    lastFire = state.fire;
+
+    DigitalActionData recenter{};
+    if (g_getDigital(g_input, g_recenterAction, &recenter, sizeof(recenter), 0) == 0 && recenter.active &&
+        recenter.changed && recenter.state)
+        RequestRecenter("Recenter action (controller)");
+
+    // Pad actions -> the virtual pad's buttons; triggers from the hand roles (weapon hand = RT = fire, off hand = LT =
+    // zoom), unless fire/ADS go out as mouse clicks instead (controller_trigger_hook.cpp).
+    {
+        // Minimum hold: with a double press also bound, SteamVR can only report a single click once the double-press
+        // window has passed, and then as a pulse as short as one input update (~11 ms) -- the game samples the pad at
+        // ~30 Hz, so most single presses were missed (live: "single press needs ~4 tries, double press works").
+        // Every press is held for at least kPadMinHoldMs.
+        constexpr unsigned long long kPadMinHoldMs = 100;
+        static unsigned long long heldUntil[kPadActionCount] = {};
+        unsigned long long nowMs = GetTickCount64();
+        unsigned buttons = 0;
+        for (int i = 0; i < kPadActionCount; ++i)
+        {
+            if (!g_padActionHandles[i])
+                continue;
+            DigitalActionData data{};
+            bool down =
+                g_getDigital(g_input, g_padActionHandles[i], &data, sizeof(data), 0) == 0 && data.active && data.state;
+            if (down && nowMs >= heldUntil[i])
+                heldUntil[i] = nowMs + kPadMinHoldMs;
+            if (down || nowMs < heldUntil[i])
+                buttons |= kPadActions[i].mask;
+        }
+        bool triggersToPad = !GetFireViaMouse();
+        static unsigned lastButtons = 0;
+        if (buttons != lastButtons)
+        {
+            MOHW_LOG(kLogFile, "gamepad buttons 0x%04X", buttons);
+            lastButtons = buttons;
+        }
+        g_padButtons.store(buttons, std::memory_order_relaxed);
+        g_padRightTrigger.store(triggersToPad && result.fire ? 255u : 0u, std::memory_order_relaxed);
+        g_padLeftTrigger.store(triggersToPad && result.ads ? 255u : 0u, std::memory_order_relaxed);
+        g_havePad.store(true, std::memory_order_release);
+    }
+
+    // Game actions: hold the game's key while the action is held (released too if the action goes inactive, e.g. a
+    // binding change mid-press, so no key is left stuck down).
+    for (int i = 0; i < kGameActionCount; ++i)
+    {
+        if (!g_gameActionHandles[i])
+            continue;
+        DigitalActionData data{};
+        bool held = g_getDigital(g_input, g_gameActionHandles[i], &data, sizeof(data), 0) == 0 && data.active &&
+                    data.state;
+        if (held == g_gameActionDown[i])
+            continue;
+        g_gameActionDown[i] = held;
+        const GameAction& a = kGameActions[i];
+        int dik = a.concept ? SetGameActionKey(a.concept, held) : SendGameScancode(a.fixedKey, held);
+        MOHW_LOG(kLogFile, "game action %s %s -> key %d", kGameActions[i].label, held ? "pressed" : "released", dik);
+    }
 
     // Once a second: which actions SteamVR actually has bound (active=0 means no binding reached it), plus the
     // right hand's forward vector for checking the aim direction's axes live.
@@ -439,11 +603,12 @@ void UpdateVrInput()
     {
         nextLogMs = now + 1000;
         MOHW_LOG(kLogFile,
-                  "aim tracked R=%d L=%d | active fire=%d move=%d turn=%d twoHand=%d | move=(%.2f,%.2f) turnX=%.2f | "
-                  "right forward=(%.3f,%.3f,%.3f)%s | errs fire=%d move=%d turn=%d twoHand=%d",
-                  rightTracked, leftTracked, fire.active, move.active, turn.active, twoHand.active, state.moveX,
-                  state.moveY, state.turnX, rightForward.x, rightForward.y, rightForward.z,
-                  useTwoHanded ? " (two-handed)" : "", fireErr, moveErr, turnErr, twoHandErr);
+                  "tracked L=%d R=%d | weapon hand %s%s | grip L=%d R=%d trigger L=%d R=%d | active move=%d turn=%d | "
+                  "move=(%.2f,%.2f) turnX=%.2f | errs move=%d turn=%d",
+                  hands[kLeftHand].tracked, hands[kRightHand].tracked, weaponHand == kLeftHand ? "left" : "right",
+                  result.twoHanded ? " (two-handed)" : "", hands[kLeftHand].grip, hands[kRightHand].grip,
+                  hands[kLeftHand].trigger, hands[kRightHand].trigger, move.active, turn.active, state.moveX,
+                  state.moveY, state.turnX, moveErr, turnErr);
     }
 }
 
@@ -453,6 +618,16 @@ bool GetVrActionState(VrActionState* out)
     if (!g_haveState)
         return false;
     *out = g_state;
+    return true;
+}
+
+bool GetVrPadState(unsigned short* buttons, unsigned char* leftTrigger, unsigned char* rightTrigger)
+{
+    if (!g_havePad.load(std::memory_order_acquire))
+        return false;
+    *buttons = static_cast<unsigned short>(g_padButtons.load(std::memory_order_relaxed));
+    *leftTrigger = static_cast<unsigned char>(g_padLeftTrigger.load(std::memory_order_relaxed));
+    *rightTrigger = static_cast<unsigned char>(g_padRightTrigger.load(std::memory_order_relaxed));
     return true;
 }
 

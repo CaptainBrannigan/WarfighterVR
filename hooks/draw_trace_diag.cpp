@@ -5,6 +5,8 @@
 #include "../sdk/settings.h"
 #include "alternating_eye.h"
 #include "companion_bridge.h"
+#include "camera_matrix_test_hook.h"
+#include "projection_aspect_hook.h"
 
 #include <windows.h>
 #include <atomic>
@@ -157,11 +159,35 @@ void EnsureUiSnapshotTex(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& bbDes
 // true-frustum mode each eye showed it centred on that eye's (off-centre) image rather than on where the eye looks,
 // and the two copies didn't fuse. After draw 1 (the world composite, per draw_trace_diag.h) the rest of the frame is
 // the HUD, so one viewport placed here moves all of it. The target is a single head-locked rectangle, centred on head
-// forward at HudDepth meters and sized HudScale of the eye's real field of view, so the HUD stays out towards the
-// corners. Projected into this eye with its real tangents (the eye image maps linearly onto them) and its half-IPD:
-// image x = (t - eyeOffset/depth - centre) / halfWidth. Vertically the rectangle is centred on the image (both eyes
-// share the vertical frustum).
-void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height)
+// forward (moved by HudOffsetX/Y) and sized HudScale of the eye's real field of view, so the HUD stays out towards the
+// corners. Projected into this eye with its real tangents (the eye image maps linearly onto them) and its eye offset:
+// image x = (t - eyeOffset/HudDepth - centre) / halfWidth, eyeOffset = the rendering eye offset * HudIpdScale (so the
+// HUD's IPD follows the world's). Vertically the rectangle is centred on the image (both eyes share the vertical
+// frustum).
+// A frame whose whole final pass is 2D: a pre-rendered movie, a menu or a loading screen. In gameplay draw 1 of the
+// final pass is the 3D world composite (kept full-frame, its IPD comes from the camera) and only the draws after it are
+// placed; in a 2D frame draw 1 is itself 2D (the movie frame, the menu background), so it's placed too and the whole
+// frame becomes one head-locked screen whose eye copies fuse. Told apart by whether the world camera got the true
+// per-eye frustum recently (hooks/projection_aspect_hook.cpp).
+bool Is2DFrame()
+{
+    constexpr unsigned kWorldRecentMs = 200; // rate window, see WorldRenderedRecently
+    return !WorldRenderedRecently(kWorldRecentMs);
+}
+
+void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s);
+
+// Before the first draw of the final pass in a 2D frame: place it (and, the viewport being state, everything after).
+void MaybePlaceWhole2DFrame(ID3D11DeviceContext* ctx)
+{
+    if (!g_curTargetIsBackbuffer || g_backbufferDrawCount != 0 || !g_backbuffer || !Is2DFrame())
+        return;
+    D3D11_TEXTURE2D_DESC bbDesc{};
+    g_backbuffer->GetDesc(&bbDesc);
+    PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height, GetMenuScreenScale());
+}
+
+void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s)
 {
     if (!GetHudPlacementEnabled())
         return;
@@ -174,21 +200,28 @@ void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height)
     float centreX = (tL + tR) * 0.5f, halfW = (tR - tL) * 0.5f, halfH = (tU - tD) * 0.5f;
     if (halfW < 0.05f || halfH < 0.05f)
         return;
-    float s = GetHudScale();
+    // s: HudScale for the HUD over the 3D world, MenuScreenScale for a whole 2D frame (see Is2DFrame).
     if (!(s >= 0.2f && s <= 1.5f))
         s = 0.75f;
-    float depth = GetHudDepth();
-    if (!(depth >= 0.25f))
-        depth = 2.0f;
-    float eyeX = (eye == 1 ? 1.0f : -1.0f) * fabsf(GetActiveEyeOffsetAlongRow0()); // right eye sits at +x
-    float shift = eyeX / depth;
-    float ndcLeft = (-s * halfW - shift - centreX) / halfW;
-    float ndcRight = (s * halfW - shift - centreX) / halfW;
+    constexpr float kDegToRad = 3.14159265f / 180.0f;
+    float depth = GetHudDepth(); // meters, 0.1 minimum; HudIpdScale 0 puts the HUD at infinity
+    if (!(depth >= 0.1f))
+        depth = 0.1f;
+    float ipdScale = GetHudIpdScale();
+    if (!(ipdScale >= 0.0f && ipdScale <= 10.0f))
+        ipdScale = 1.0f;
+    float offsetXDeg = 0.0f, offsetYDeg = 0.0f;
+    GetHudOffsetDeg(&offsetXDeg, &offsetYDeg);
+    float eyeX = (eye == 1 ? 1.0f : -1.0f) * fabsf(GetActiveEyeOffsetAlongRow0()) * ipdScale; // right eye sits at +x
+    float centreTan = tanf(offsetXDeg * kDegToRad) - eyeX / depth;
+    float ndcLeft = (centreTan - s * halfW - centreX) / halfW;
+    float ndcRight = (centreTan + s * halfW - centreX) / halfW;
+    float ndcUpShift = tanf(offsetYDeg * kDegToRad) / halfH;
 
     D3D11_VIEWPORT vp{};
     vp.TopLeftX = (ndcLeft + 1.0f) * 0.5f * static_cast<float>(width);
     vp.Width = (ndcRight - ndcLeft) * 0.5f * static_cast<float>(width);
-    vp.TopLeftY = (1.0f - s) * 0.5f * static_cast<float>(height);
+    vp.TopLeftY = (1.0f - s - ndcUpShift) * 0.5f * static_cast<float>(height);
     vp.Height = s * static_cast<float>(height);
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
@@ -198,8 +231,11 @@ void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height)
     if (lines < 6)
     {
         ++lines;
-        MOHW_LOG(kLogFile, "HUD placed for eye %d: viewport x=%.1f y=%.1f w=%.1f h=%.1f of %ux%u (scale %.2f, depth %.2f m, tan L/R %.3f/%.3f)",
-                  eye, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, width, height, s, depth, tL, tR);
+        MOHW_LOG(kLogFile,
+                  "HUD placed for eye %d: viewport x=%.1f y=%.1f w=%.1f h=%.1f of %ux%u (scale %.2f, depth %.2f m, IPD x%.2f, "
+                  "offset %.1f/%.1f deg, tan L/R %.3f/%.3f)",
+                  eye, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, width, height, s, depth, ipdScale, offsetXDeg,
+                  offsetYDeg, tL, tR);
     }
 }
 
@@ -221,7 +257,7 @@ void MaybeSnapshotUi(ID3D11DeviceContext* ctx)
     if (g_uiSnapshotTex)
         ctx->CopyResource(g_uiSnapshotTex, g_backbuffer); // recorded right after this draw's commands -- correct GPU ordering, no sync needed
     device->Release();
-    PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height);
+    PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height, Is2DFrame() ? GetMenuScreenScale() : GetHudScale());
 }
 
 void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv)
@@ -264,14 +300,34 @@ void CountDraw(ID3D11DeviceContext* ctx, UINT verts)
     MaybeSnapshotUi(ctx);
 }
 
+// RETICLE HIDE (2026-09-28): the reticle is draws 2..7 under the tail backbuffer bind in gameplay (walked and confirmed
+// 2026-09-22, see project memory). Menus draw into the same bind, so the same draw numbers can be menu elements; the
+// hide only applies while the first-person viewmodel is being drawn (IsPlayerSkeletonLoaded: gameplay), which keeps
+// the main menu and loading screens intact, but can still clip parts of an in-game (pause) menu -- hence the setting.
+// Skipped draws are still counted, so later draw numbers (and the HUD placement after draw 1) are unaffected.
+constexpr int kReticleFirstDraw = 2;
+constexpr int kReticleLastDraw = 7;
+
+bool ShouldSkipAsReticle()
+{
+    if (!g_curTargetIsBackbuffer || !GetHideReticle())
+        return false;
+    int next = g_backbufferDrawCount + 1; // the number this draw will get
+    return next >= kReticleFirstDraw && next <= kReticleLastDraw && IsPlayerSkeletonLoaded();
+}
+
 void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT s, INT b)
 {
-    g_origDrawIndexed(c, n, s, b);
+    MaybePlaceWhole2DFrame(c);
+    if (!ShouldSkipAsReticle())
+        g_origDrawIndexed(c, n, s, b);
     CountDraw(c, n);
 }
 void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
 {
-    g_origDraw(c, n, s);
+    MaybePlaceWhole2DFrame(c);
+    if (!ShouldSkipAsReticle())
+        g_origDraw(c, n, s);
     CountDraw(c, n);
 }
 void STDMETHODCALLTYPE Hook_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT n, UINT i, UINT s, INT b, UINT si)
@@ -341,13 +397,16 @@ void InstallOnce(ID3D11Device* device)
         return;
     void** vtable = *reinterpret_cast<void***>(ctx);
     MH_Initialize();
-    // LEAN footprint (2026-09-22, see kEnabled/kFullTraceHooksEnabled's declaration comments): DrawIndexed is
-    // already hooked by constantbuffer_hook.cpp (it calls DrawTraceNoteDraw), so it is skipped here regardless.
-    // OMSetRenderTargets + Draw are the only other hooks installed by default; the remaining four (instanced draws,
-    // clears, copies) only matter for the rich Scroll-Lock trace log and are gated separately.
+    // LEAN footprint (2026-09-22, see kEnabled/kFullTraceHooksEnabled's declaration comments): OMSetRenderTargets,
+    // Draw and DrawIndexed. DrawIndexed used to be counted through constantbuffer_hook.cpp's own hook (via
+    // DrawTraceNoteDraw); that hook was retired 2026-09-28, so it's hooked here now -- a bool check and the original
+    // per call, far cheaper than the retired hook. The remaining four (instanced draws, clears, copies) only matter for
+    // the rich Scroll-Lock trace log and are gated separately.
     bool ok = true;
     ok &= HookOne(vtable, kIdxOMSetRenderTargets, reinterpret_cast<void*>(&Hook_OM), reinterpret_cast<void**>(&g_origOM), "OMSetRenderTargets");
     ok &= HookOne(vtable, kIdxDraw, reinterpret_cast<void*>(&Hook_Draw), reinterpret_cast<void**>(&g_origDraw), "Draw");
+    ok &= HookOne(vtable, kIdxDrawIndexed, reinterpret_cast<void*>(&Hook_DrawIndexed),
+                  reinterpret_cast<void**>(&g_origDrawIndexed), "DrawIndexed");
     if (kFullTraceHooksEnabled)
     {
         ok &= HookOne(vtable, kIdxDrawIndexedInstanced, reinterpret_cast<void*>(&Hook_DrawIndexedInstanced),

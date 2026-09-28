@@ -30,6 +30,12 @@ void SetInnerEdgeProjection(float commitFovRad, float trim);
 // projection_aspect_hook.cpp's g_frustumEyeIdx comment) -- does not affect matching/write behavior at all.
 void SetTrueFrustumProjection(float commitFovRad, float aspect, float offX, float offY, int eyeIdx);
 
+// True while the game is rendering the 3D world, judged from the camera matrix rebuild rate over withinMs windows
+// (thousands a second with the world, ~150 during a pre-rendered movie). False during movies, and menus/loading
+// screens without a 3D scene, whose whole final pass is 2D (hooks/draw_trace_diag.cpp places all of it, not just the
+// HUD after draw 1). Render thread.
+bool WorldRenderedRecently(unsigned withinMs);
+
 // DIAGNOSTIC selector (2026-09-21), NOT a "pick the right camera" tool -- CORRECTED same day after live testing: the
 // several objects matching within a position-filtered true-frustum session are NOT independent cameras with their own
 // viewpoint. The player's view position never moves when a different one is picked; what changes is which render

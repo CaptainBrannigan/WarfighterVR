@@ -255,10 +255,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
     CheckAimingControllerHotkeys();
     // F7,F8 step: live control for IPD scale -- see alternating_eye.h.
     CheckAlternatingEyeHotkeys();
-    // Delete toggle / Numpad+,Numpad- range start / Numpad*,Numpad/ range
-    // end: live controls for the bone-hide proof-of-concept -- see
-    // constantbuffer_hook.h.
-    CheckBoneHideHotkeys();
+    // (CheckBoneHideHotkeys retired 2026-09-28 with the constant-buffer hook -- see dllmain.cpp.)
 
     // Every frame: hand this frame's real backbuffer to the companion (and openvr_direct) via the shared D3D11
     // textures. Called here specifically because by the time Present fires, all of this frame's draws have
