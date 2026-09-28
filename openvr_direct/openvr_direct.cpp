@@ -1,6 +1,7 @@
 #include "openvr_direct.h"
 #include "openvr_types.h"
 #include "vr_input.h"
+#include "vr_overlay.h"
 
 #include "../sdk/logging.h"
 #include "../sdk/vr_math.h"
@@ -368,6 +369,13 @@ void ConnectThreadProc()
     MOHW_LOG(kLogFile, "IVRInput_011 = %p, err=%d", input, inputErr);
     if (!InitVrInput(input, trackingUniverse))
         MOHW_LOG(kLogFile, "SteamVR Input setup FAILED -- continuing without controllers (see mohwvr_vrinput.log)");
+
+    // Settings menu: a "MOHW VR" tab in the SteamVR dashboard.
+    int overlayErr = kInitError_None;
+    void* overlay = getGenericInterface("IVROverlay_028", &overlayErr);
+    MOHW_LOG(kLogFile, "IVROverlay_028 = %p, err=%d", overlay, overlayErr);
+    if (!InitVrOverlay(overlay))
+        MOHW_LOG(kLogFile, "dashboard settings tab setup FAILED -- continuing without it (see mohwvr_overlay.log)");
 
     MOHW_LOG(kLogFile, "CONNECTED -- game thread will start the separate-device SubmitThreadProc on its first call");
     g_state.store(static_cast<int>(ConnectState::Connected), std::memory_order_release);

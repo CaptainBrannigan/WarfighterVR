@@ -103,6 +103,7 @@
     <ClCompile Include="..\hooks\draw_trace_diag.cpp" />
     <ClCompile Include="..\openvr_direct\openvr_direct.cpp" />
     <ClCompile Include="..\openvr_direct\vr_input.cpp" />
+    <ClCompile Include="..\openvr_direct\vr_overlay.cpp" />
     <ClCompile Include="..\hooks\alternating_eye.cpp" />
     <ClCompile Include="..\hooks\bullet_raycast_redirect_hook.cpp" />
     <ClCompile Include="..\hooks\fire_candidate_redirect_hook.cpp" />
@@ -143,6 +144,7 @@
     <ClInclude Include="..\openvr_direct\openvr_direct.h" />
     <ClInclude Include="..\openvr_direct\openvr_types.h" />
     <ClInclude Include="..\openvr_direct\vr_input.h" />
+    <ClInclude Include="..\openvr_direct\vr_overlay.h" />
     <ClInclude Include="..\hooks\alternating_eye.h" />
     <ClInclude Include="..\hooks\bullet_raycast_redirect_hook.h" />
     <ClInclude Include="..\hooks\fire_candidate_redirect_hook.h" />

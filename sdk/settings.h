@@ -182,6 +182,30 @@ float GetVrStickFullDeflection();
 float GetTwoHandGrabRadius();
 float GetTwoHandReach();
 
+// HUD placement (hooks/draw_trace_diag.cpp, true-frustum mode only): the game's full-screen HUD is drawn into HudScale
+// of each eye's real field of view (so it keeps to the corners), as one head-locked rectangle fused at HudDepth meters.
+// Ini-only for now (HudPlacementEnabled / HudScale / HudDepth).
+bool GetHudPlacementEnabled();
+float GetHudScale();
+float GetHudDepth();
+
+// Menu table for the SteamVR dashboard tab (openvr_direct/vr_overlay.cpp): every setting a player can adjust, in
+// display order, grouped. AdjustMenuSetting flips a toggle (any nonzero steps) or moves a number by steps * step
+// (clamped to its range) and saves the ini. Safe from any thread.
+struct MenuSettingInfo
+{
+    const char* group;
+    const char* label;
+    bool isToggle;
+    float value; // toggles: 0 or 1
+    float step;
+    int decimals;
+    const char* unit;
+};
+int GetMenuSettingCount();
+bool GetMenuSettingInfo(int index, MenuSettingInfo* out);
+void AdjustMenuSetting(int index, int steps);
+
 // Where the right controller sits on the gun for the weapon drive (hooks/camera_matrix_test_hook.cpp), in the gun's
 // rest view: out = {right, up, back} in meters (forward is negative back). Ini-only (WeaponGripRight/Up/Back).
 void GetWeaponGripOffset(float out[3]);

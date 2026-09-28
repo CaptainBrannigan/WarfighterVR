@@ -2,9 +2,13 @@
 
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/logging.h"
+#include "../sdk/settings.h"
+#include "alternating_eye.h"
+#include "companion_bridge.h"
 
 #include <windows.h>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -149,6 +153,56 @@ void EnsureUiSnapshotTex(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& bbDes
     }
 }
 
+// HUD PLACEMENT (2026-09-26): the game draws its HUD over the whole backbuffer, laid out for a flat screen, so in
+// true-frustum mode each eye showed it centred on that eye's (off-centre) image rather than on where the eye looks,
+// and the two copies didn't fuse. After draw 1 (the world composite, per draw_trace_diag.h) the rest of the frame is
+// the HUD, so one viewport placed here moves all of it. The target is a single head-locked rectangle, centred on head
+// forward at HudDepth meters and sized HudScale of the eye's real field of view, so the HUD stays out towards the
+// corners. Projected into this eye with its real tangents (the eye image maps linearly onto them) and its half-IPD:
+// image x = (t - eyeOffset/depth - centre) / halfWidth. Vertically the rectangle is centred on the image (both eyes
+// share the vertical frustum).
+void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height)
+{
+    if (!GetHudPlacementEnabled())
+        return;
+    mohwvr::ipc::HmdViewBlock hmd{};
+    if (!GetHmdView(&hmd) || hmd.viewMode != mohwvr::ipc::kViewModeTrueFrustum)
+        return;
+    int eye = IsRightEyeActive() ? 1 : 0;
+    float tL = tanf(hmd.angleLeft[eye]), tR = tanf(hmd.angleRight[eye]);
+    float tU = tanf(hmd.angleUp[eye]), tD = tanf(hmd.angleDown[eye]);
+    float centreX = (tL + tR) * 0.5f, halfW = (tR - tL) * 0.5f, halfH = (tU - tD) * 0.5f;
+    if (halfW < 0.05f || halfH < 0.05f)
+        return;
+    float s = GetHudScale();
+    if (!(s >= 0.2f && s <= 1.5f))
+        s = 0.75f;
+    float depth = GetHudDepth();
+    if (!(depth >= 0.25f))
+        depth = 2.0f;
+    float eyeX = (eye == 1 ? 1.0f : -1.0f) * fabsf(GetActiveEyeOffsetAlongRow0()); // right eye sits at +x
+    float shift = eyeX / depth;
+    float ndcLeft = (-s * halfW - shift - centreX) / halfW;
+    float ndcRight = (s * halfW - shift - centreX) / halfW;
+
+    D3D11_VIEWPORT vp{};
+    vp.TopLeftX = (ndcLeft + 1.0f) * 0.5f * static_cast<float>(width);
+    vp.Width = (ndcRight - ndcLeft) * 0.5f * static_cast<float>(width);
+    vp.TopLeftY = (1.0f - s) * 0.5f * static_cast<float>(height);
+    vp.Height = s * static_cast<float>(height);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &vp);
+
+    static int lines = 0;
+    if (lines < 6)
+    {
+        ++lines;
+        MOHW_LOG(kLogFile, "HUD placed for eye %d: viewport x=%.1f y=%.1f w=%.1f h=%.1f of %ux%u (scale %.2f, depth %.2f m, tan L/R %.3f/%.3f)",
+                  eye, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, width, height, s, depth, tL, tR);
+    }
+}
+
 // Unconditional (every frame, not gated by tracing) -- see g_curTargetIsBackbuffer's declaration comment.
 void MaybeSnapshotUi(ID3D11DeviceContext* ctx)
 {
@@ -167,6 +221,7 @@ void MaybeSnapshotUi(ID3D11DeviceContext* ctx)
     if (g_uiSnapshotTex)
         ctx->CopyResource(g_uiSnapshotTex, g_backbuffer); // recorded right after this draw's commands -- correct GPU ordering, no sync needed
     device->Release();
+    PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height);
 }
 
 void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv)

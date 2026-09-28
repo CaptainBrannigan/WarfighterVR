@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -57,6 +58,11 @@ constexpr float kDefaultVrStickFullDeflection = 0.9f; // hooks/xinput_hook.cpp o
 // it from the right hand, when the off-hand grip is pressed. Meters.
 constexpr float kDefaultTwoHandGrabRadius = 0.15f;
 constexpr float kDefaultTwoHandReach = 0.8f;
+// HUD placement (hooks/draw_trace_diag.cpp): the game's full-screen HUD squeezed into HudScale of each eye's real view,
+// fused at HudDepth meters.
+constexpr bool kDefaultHudPlacementEnabled = true;
+constexpr float kDefaultHudScale = 0.75f;
+constexpr float kDefaultHudDepth = 2.0f;
 // Weapon drive grip point (hooks/camera_matrix_test_hook.cpp): where the controller sits on the gun, in the gun's
 // rest view (right, up, back; meters). Default = the average of three live "hold it where the gun sits" captures.
 constexpr float kDefaultWeaponGripRight = 0.13f;
@@ -91,6 +97,9 @@ std::atomic<float> g_vrTurnSpeed{kDefaultVrTurnSpeed};
 std::atomic<float> g_vrStickFullDeflection{kDefaultVrStickFullDeflection};
 std::atomic<float> g_twoHandGrabRadius{kDefaultTwoHandGrabRadius};
 std::atomic<float> g_twoHandReach{kDefaultTwoHandReach};
+std::atomic<bool> g_hudPlacementEnabled{kDefaultHudPlacementEnabled};
+std::atomic<float> g_hudScale{kDefaultHudScale};
+std::atomic<float> g_hudDepth{kDefaultHudDepth};
 std::atomic<float> g_weaponGripRight{kDefaultWeaponGripRight};
 std::atomic<float> g_weaponGripUp{kDefaultWeaponGripUp};
 std::atomic<float> g_weaponGripBack{kDefaultWeaponGripBack};
@@ -149,6 +158,9 @@ void WriteSettingsFileLocked()
     fprintf(f, "VrStickFullDeflection=%.4f\n", g_vrStickFullDeflection.load(std::memory_order_relaxed));
     fprintf(f, "TwoHandGrabRadius=%.4f\n", g_twoHandGrabRadius.load(std::memory_order_relaxed));
     fprintf(f, "TwoHandReach=%.4f\n", g_twoHandReach.load(std::memory_order_relaxed));
+    fprintf(f, "HudPlacementEnabled=%d\n", g_hudPlacementEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "HudScale=%.4f\n", g_hudScale.load(std::memory_order_relaxed));
+    fprintf(f, "HudDepth=%.4f\n", g_hudDepth.load(std::memory_order_relaxed));
     fprintf(f, "WeaponGripRight=%.4f\n", g_weaponGripRight.load(std::memory_order_relaxed));
     fprintf(f, "WeaponGripUp=%.4f\n", g_weaponGripUp.load(std::memory_order_relaxed));
     fprintf(f, "WeaponGripBack=%.4f\n", g_weaponGripBack.load(std::memory_order_relaxed));
@@ -256,6 +268,12 @@ void LoadSettings()
             g_boneHideRange2End.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "PlayerBoneDistanceThreshold", &value))
             g_playerBoneDistanceThreshold.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "HudPlacementEnabled", &boolValue))
+            g_hudPlacementEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "HudScale", &value))
+            g_hudScale.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "HudDepth", &value))
+            g_hudDepth.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "TwoHandGrabRadius", &value))
             g_twoHandGrabRadius.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "TwoHandReach", &value))
@@ -566,6 +584,21 @@ float GetTwoHandReach()
     return g_twoHandReach.load(std::memory_order_relaxed);
 }
 
+bool GetHudPlacementEnabled()
+{
+    return g_hudPlacementEnabled.load(std::memory_order_relaxed);
+}
+
+float GetHudScale()
+{
+    return g_hudScale.load(std::memory_order_relaxed);
+}
+
+float GetHudDepth()
+{
+    return g_hudDepth.load(std::memory_order_relaxed);
+}
+
 void GetWeaponGripOffset(float out[3])
 {
     out[0] = g_weaponGripRight.load(std::memory_order_relaxed);
@@ -578,6 +611,99 @@ void GetWeaponGripRotationDeg(float out[3])
     out[0] = g_weaponGripPitchDeg.load(std::memory_order_relaxed);
     out[1] = g_weaponGripYawDeg.load(std::memory_order_relaxed);
     out[2] = g_weaponGripRollDeg.load(std::memory_order_relaxed);
+}
+
+// ---- Menu table (2026-09-26, for openvr_direct/vr_overlay.cpp's SteamVR dashboard tab) ----------------------------
+namespace {
+
+struct MenuEntry
+{
+    const char* group;
+    const char* label;
+    std::atomic<bool>* toggle; // exactly one of toggle / number is set
+    std::atomic<float>* number;
+    float minValue, maxValue, step;
+    int decimals;
+    const char* unit;
+};
+
+// Order = display order; entries of a group must be contiguous.
+const MenuEntry kMenu[] = {
+    {"Head", "Head aim", &g_headAimEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Head aim sensitivity", nullptr, &g_headAimSensitivity, 0.1f, 3.0f, 0.05f, 2, ""},
+    {"Head", "Invert head yaw", &g_headAimInvertYaw, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Invert head pitch", &g_headAimInvertPitch, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Clamp pitch to game limits", &g_headAimClampPitch, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Head roll", &g_headRollEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Invert head roll", &g_headRollInvert, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Head position", &g_headPositionEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Head position scale", nullptr, &g_headPositionScale, 0.1f, 3.0f, 0.05f, 2, "x"},
+    {"Head", "Invert head position (horizontal)", &g_headPositionInvertHorizontal, nullptr, 0, 0, 0, 0, ""},
+    {"View", "IPD scale", nullptr, &g_ipdScale, 0.5f, 2.0f, 0.02f, 2, "x"},
+    {"View", "World scale (frustum)", nullptr, &g_frustumScale, 0.5f, 2.0f, 0.02f, 2, "x"},
+    {"View", "Rotation smoothing (keep on)", &g_rotationSmoothingEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"View", "Smoothing window", nullptr, &g_rotationSmoothingWindowMs, 10.0f, 200.0f, 1.0f, 1, "ms"},
+    {"Controls", "Stick turn speed", nullptr, &g_vrTurnSpeed, 0.2f, 3.0f, 0.05f, 2, "x"},
+    {"Controls", "Stick full deflection", nullptr, &g_vrStickFullDeflection, 0.5f, 1.0f, 0.01f, 2, ""},
+    {"Controls", "Two-hand grab radius", nullptr, &g_twoHandGrabRadius, 0.05f, 0.5f, 0.01f, 2, "m"},
+    {"Controls", "Two-hand reach", nullptr, &g_twoHandReach, 0.2f, 1.5f, 0.05f, 2, "m"},
+    {"Weapon", "Grip offset right", nullptr, &g_weaponGripRight, -0.5f, 0.5f, 0.005f, 3, "m"},
+    {"Weapon", "Grip offset up", nullptr, &g_weaponGripUp, -0.5f, 0.5f, 0.005f, 3, "m"},
+    {"Weapon", "Grip offset back", nullptr, &g_weaponGripBack, -1.0f, 0.5f, 0.005f, 3, "m"},
+    {"Weapon", "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"Weapon", "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"Weapon", "Grip roll", nullptr, &g_weaponGripRollDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"HUD", "HUD placement", &g_hudPlacementEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"HUD", "HUD scale", nullptr, &g_hudScale, 0.3f, 1.2f, 0.01f, 2, "x"},
+    {"HUD", "HUD depth", nullptr, &g_hudDepth, 0.5f, 10.0f, 0.1f, 1, "m"},
+};
+constexpr int kMenuCount = static_cast<int>(sizeof(kMenu) / sizeof(kMenu[0]));
+
+} // namespace
+
+int GetMenuSettingCount()
+{
+    return kMenuCount;
+}
+
+bool GetMenuSettingInfo(int index, MenuSettingInfo* out)
+{
+    if (index < 0 || index >= kMenuCount || !out)
+        return false;
+    const MenuEntry& e = kMenu[index];
+    out->group = e.group;
+    out->label = e.label;
+    out->isToggle = e.toggle != nullptr;
+    out->value = e.toggle ? (e.toggle->load(std::memory_order_relaxed) ? 1.0f : 0.0f)
+                          : e.number->load(std::memory_order_relaxed);
+    out->step = e.step;
+    out->decimals = e.decimals;
+    out->unit = e.unit;
+    return true;
+}
+
+void AdjustMenuSetting(int index, int steps)
+{
+    if (index < 0 || index >= kMenuCount || steps == 0)
+        return;
+    const MenuEntry& e = kMenu[index];
+    if (e.toggle)
+    {
+        e.toggle->store(!e.toggle->load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+    else
+    {
+        float v = e.number->load(std::memory_order_relaxed) + e.step * static_cast<float>(steps);
+        // Snap to the step grid so repeated clicks don't accumulate float noise.
+        v = roundf(v / e.step) * e.step;
+        if (v < e.minValue)
+            v = e.minValue;
+        if (v > e.maxValue)
+            v = e.maxValue;
+        e.number->store(v, std::memory_order_relaxed);
+    }
+    std::lock_guard<std::mutex> lock(g_fileMutex);
+    WriteSettingsFileLocked();
 }
 
 } // namespace mohw
