@@ -193,10 +193,22 @@ float GetHudScale();
 // Size of the head-locked screen a whole-2D frame (pre-rendered movie, menu, loading screen) is drawn into, as a
 // fraction of the eye's view; same depth/IPD/offset rules as the HUD. MenuScreenScale, default 0.75.
 float GetMenuScreenScale();
+// Markers test (hooks/draw_trace_diag.cpp): from this draw number of the final 2D pass on, the full frame is restored
+// instead of the HUD rectangle, to see whether the in-world objective markers are already placed per eye by the game.
+// 0 = off. FullFrameFromDraw.
+int GetFullFrameFromDraw();
 // Hides the game's screen-centre reticle (draws 2..7 of the frame's final backbuffer pass, gameplay only). Menus draw
 // into the same pass, so while it's on an in-game (pause) menu can lose the elements at those draw positions.
 // HideReticle, default on.
 bool GetHideReticle();
+
+// First-person body batch parts (instance index 0..) hidden while the gun follows the controller, ini HideBodyPart1..
+// The part count isn't known ahead (only 3 seen so far, and levels differ): the menu shows one row per part of the body
+// batch now drawn (SetBodyPartCountSeen, from hooks/camera_matrix_test_hook.cpp), plus any hidden part beyond that.
+// kMaxBodyParts is storage only; a batch with more parts is logged.
+constexpr int kMaxBodyParts = 32;
+bool GetHideBodyPart(int index);
+void SetBodyPartCountSeen(int count);
 // Moves the HUD rectangle off head-forward: degrees, + = right / up (HudOffsetX / HudOffsetY).
 void GetHudOffsetDeg(float* x, float* y);
 // The HUD's eye separation as a multiple of the rendering IPD (the eye offset the world is drawn with, IpdScale
@@ -244,6 +256,12 @@ void GetHolsterOffset(int zone, float out[3]);
 // Sight dot (openvr_direct/vr_overlay.cpp): a dot on the weapon hand's aim ray at SightZeroDistance meters, so targets
 // at that distance line up with where the shot lands. SightDotSize in degrees.
 bool GetSightDotEnabled();
+// Both sight dots only while the weapon grip is on: the weapon hand's grip held (HolsterHoldToKeep on), or toggled on
+// by a weapon-hand grip press (off). See openvr_direct/vr_hands.h HandsResult::weaponGripped.
+bool GetDotsOnlyWithGrip();
+// A grip double-tap holds that hand's bumper (left LB, right RB) for the second press (openvr_direct/vr_input.cpp).
+// GripDoubleTapBumpers, default on.
+bool GetGripDoubleTapBumpers();
 float GetSightZeroDistance();
 float GetSightDotSizeDeg();
 
@@ -274,6 +292,7 @@ struct MenuSettingInfo
     int decimals;
     const char* unit;
     char text[64];
+    char labelBuffer[64]; // backs label for rows built at runtime (body parts)
 };
 int GetMenuSettingCount();
 bool GetMenuSettingInfo(int index, MenuSettingInfo* out);

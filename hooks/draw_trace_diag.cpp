@@ -175,7 +175,7 @@ bool Is2DFrame()
     return !WorldRenderedRecently(kWorldRecentMs);
 }
 
-void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s);
+void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s, bool keepAspect);
 
 // Before the first draw of the final pass in a 2D frame: place it (and, the viewport being state, everything after).
 void MaybePlaceWhole2DFrame(ID3D11DeviceContext* ctx)
@@ -184,10 +184,15 @@ void MaybePlaceWhole2DFrame(ID3D11DeviceContext* ctx)
         return;
     D3D11_TEXTURE2D_DESC bbDesc{};
     g_backbuffer->GetDesc(&bbDesc);
-    PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height, GetMenuScreenScale());
+    PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height, GetMenuScreenScale(), true);
 }
 
-void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s)
+// keepAspect (whole 2D frames): the image fills the eye's whole field of view, which isn't the image's shape (Quest 3:
+// 2.22 x 2.39 in tangents for a 1280x720 image, so a pixel shows at about half its width), so a rectangle that is s of
+// the view both ways squashed the movie horizontally. With keepAspect it has the image's own width:height instead,
+// as large as fits inside s of the view. Off (the HUD over the world), it stays s of the view both ways, out towards
+// the corners.
+void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s, bool keepAspect)
 {
     if (!GetHudPlacementEnabled())
         return;
@@ -213,16 +218,27 @@ void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float
     float offsetXDeg = 0.0f, offsetYDeg = 0.0f;
     GetHudOffsetDeg(&offsetXDeg, &offsetYDeg);
     float eyeX = (eye == 1 ? 1.0f : -1.0f) * fabsf(GetActiveEyeOffsetAlongRow0()) * ipdScale; // right eye sits at +x
+    // Half extents of the placed rectangle, in tangents.
+    float rectHalfW = s * halfW, rectHalfH = s * halfH;
+    if (keepAspect && width > 0 && height > 0)
+    {
+        float imageAspect = static_cast<float>(width) / static_cast<float>(height);
+        if (rectHalfH * imageAspect <= rectHalfW)
+            rectHalfW = rectHalfH * imageAspect;
+        else
+            rectHalfH = rectHalfW / imageAspect;
+    }
     float centreTan = tanf(offsetXDeg * kDegToRad) - eyeX / depth;
-    float ndcLeft = (centreTan - s * halfW - centreX) / halfW;
-    float ndcRight = (centreTan + s * halfW - centreX) / halfW;
+    float ndcLeft = (centreTan - rectHalfW - centreX) / halfW;
+    float ndcRight = (centreTan + rectHalfW - centreX) / halfW;
     float ndcUpShift = tanf(offsetYDeg * kDegToRad) / halfH;
+    float heightFraction = rectHalfH / halfH;
 
     D3D11_VIEWPORT vp{};
     vp.TopLeftX = (ndcLeft + 1.0f) * 0.5f * static_cast<float>(width);
     vp.Width = (ndcRight - ndcLeft) * 0.5f * static_cast<float>(width);
-    vp.TopLeftY = (1.0f - s - ndcUpShift) * 0.5f * static_cast<float>(height);
-    vp.Height = s * static_cast<float>(height);
+    vp.TopLeftY = (1.0f - heightFraction - ndcUpShift) * 0.5f * static_cast<float>(height);
+    vp.Height = heightFraction * static_cast<float>(height);
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
     ctx->RSSetViewports(1, &vp);
@@ -257,8 +273,12 @@ void MaybeSnapshotUi(ID3D11DeviceContext* ctx)
     if (g_uiSnapshotTex)
         ctx->CopyResource(g_uiSnapshotTex, g_backbuffer); // recorded right after this draw's commands -- correct GPU ordering, no sync needed
     device->Release();
-    PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height, Is2DFrame() ? GetMenuScreenScale() : GetHudScale());
+    bool whole2D = Is2DFrame();
+    PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height, whole2D ? GetMenuScreenScale() : GetHudScale(), whole2D);
 }
+
+bool g_capturingPass = false; // render thread: this final pass is being logged (markers pass capture, below)
+void MaybeStartPassCapture();
 
 void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv)
 {
@@ -286,6 +306,10 @@ void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTar
         return isBb;
     }() : false;
     g_backbufferDrawCount = 0;
+    if (g_curTargetIsBackbuffer)
+        MaybeStartPassCapture();
+    else
+        g_capturingPass = false;
     g_origOM(ctx, n, rtvs, dsv);
 }
 
@@ -310,23 +334,139 @@ constexpr int kReticleLastDraw = 7;
 
 bool ShouldSkipAsReticle()
 {
-    if (!g_curTargetIsBackbuffer || !GetHideReticle())
+    // Only while the controller aims (the weapon drive): with it off, shots follow the game's own aim again and the
+    // reticle is needed to see it.
+    if (!g_curTargetIsBackbuffer || !GetHideReticle() || !GetWeaponDriveEnabled())
         return false;
     int next = g_backbufferDrawCount + 1; // the number this draw will get
     return next >= kReticleFirstDraw && next <= kReticleLastDraw && IsPlayerSkeletonLoaded();
 }
 
+// ---- In-world objective markers (2026-09-29) -----------------------------------------------------------------------
+// The markers are 2D draws in the final pass like the HUD, so they get the HUD rectangle (scaled, shifted to HUD depth)
+// and leave their targets. Two tools to find their treatment:
+//  - FullFrameFromDraw (dashboard, 0 = off): from that draw number on, the full frame is restored. If a marker then
+//    sits on its target at its depth, the game already places markers per eye and they only need exempting.
+//  - A capture of every final-pass draw (both eyes) every kPassCaptureEveryMs in gameplay, to mohwvr_hudlayers.log:
+//    number, count, shaders, first texture and size -- to find a signature for marker draws, as the numbering shifts
+//    with HUD content.
+constexpr const char* kHudLayerLog = "mohwvr_hudlayers.log";
+constexpr unsigned long long kPassCaptureEveryMs = 15000;
+constexpr int kPassCaptureMaxPasses = 20; // captures, each kPassCaptureDraws draws
+int g_passesCaptured = 0;
+
+// Called from Hook_OM on every backbuffer bind. The game binds the backbuffer several times a frame and the final 2D
+// pass comes in a later bind (live: a per-bind capture started twice a frame and logged no draws), so a capture runs for
+// the next kPassCaptureDraws backbuffer draws across however many binds, marking each bind with the eye it's for.
+constexpr int kPassCaptureDraws = 300;
+int g_captureDrawsLeft = 0; // render thread
+
+void MaybeStartPassCapture()
+{
+    static unsigned long long nextCaptureMs = 0;
+    if (g_captureDrawsLeft > 0)
+    {
+        MOHW_LOG(kHudLayerLog, " BIND (eye %d)", IsRightEyeActive() ? 1 : 0);
+        g_capturingPass = true;
+        return;
+    }
+    g_capturingPass = false;
+    if (g_passesCaptured >= kPassCaptureMaxPasses || !IsPlayerSkeletonLoaded())
+        return;
+    unsigned long long now = GetTickCount64();
+    if (now < nextCaptureMs)
+        return;
+    nextCaptureMs = now + kPassCaptureEveryMs;
+    ++g_passesCaptured;
+    g_captureDrawsLeft = kPassCaptureDraws;
+    g_capturingPass = true;
+    MOHW_LOG(kHudLayerLog, "CAPTURE %d: next %d backbuffer draws; HUD placement %s, full frame from draw %d",
+              g_passesCaptured, kPassCaptureDraws, GetHudPlacementEnabled() ? "on" : "off", GetFullFrameFromDraw());
+    MOHW_LOG(kHudLayerLog, " BIND (eye %d)", IsRightEyeActive() ? 1 : 0);
+}
+
+void LogPassDraw(ID3D11DeviceContext* ctx, UINT count, bool indexed, bool skipped)
+{
+    ID3D11VertexShader* vs = nullptr;
+    ID3D11PixelShader* ps = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    ctx->VSGetShader(&vs, nullptr, nullptr);
+    ctx->PSGetShader(&ps, nullptr, nullptr);
+    ctx->PSGetShaderResources(0, 1, &srv);
+    UINT texW = 0, texH = 0, texFormat = 0;
+    void* texPtr = nullptr;
+    if (srv)
+    {
+        ID3D11Resource* res = nullptr;
+        srv->GetResource(&res);
+        if (res)
+        {
+            texPtr = res;
+            ID3D11Texture2D* tex = nullptr;
+            if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex)
+            {
+                D3D11_TEXTURE2D_DESC d{};
+                tex->GetDesc(&d);
+                texW = d.Width;
+                texH = d.Height;
+                texFormat = d.Format;
+                tex->Release();
+            }
+            res->Release();
+        }
+        srv->Release();
+    }
+    D3D11_VIEWPORT vp{};
+    UINT vpCount = 1;
+    ctx->RSGetViewports(&vpCount, &vp);
+    MOHW_LOG(kHudLayerLog, "  draw %d %s count=%u VS=%p PS=%p tex=%p %ux%u fmt=%u viewport=(%.0f,%.0f %.0fx%.0f)%s",
+              g_backbufferDrawCount + 1, indexed ? "indexed" : "plain", count, static_cast<void*>(vs),
+              static_cast<void*>(ps), texPtr, texW, texH, texFormat, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height,
+              skipped ? " (skipped: reticle)" : "");
+    if (vs)
+        vs->Release();
+    if (ps)
+        ps->Release();
+}
+
+// Before each final-pass draw: the full-frame test, then the capture.
+void BeforeBackbufferDraw(ID3D11DeviceContext* ctx, UINT count, bool indexed, bool skipped)
+{
+    if (!g_curTargetIsBackbuffer || !g_backbuffer)
+        return;
+    int from = GetFullFrameFromDraw();
+    if (from > 0 && g_backbufferDrawCount + 1 == from && !Is2DFrame())
+    {
+        D3D11_TEXTURE2D_DESC bbDesc{};
+        g_backbuffer->GetDesc(&bbDesc);
+        D3D11_VIEWPORT vp{};
+        vp.Width = static_cast<float>(bbDesc.Width);
+        vp.Height = static_cast<float>(bbDesc.Height);
+        vp.MaxDepth = 1.0f;
+        ctx->RSSetViewports(1, &vp);
+    }
+    if (g_capturingPass && g_captureDrawsLeft > 0)
+    {
+        --g_captureDrawsLeft;
+        LogPassDraw(ctx, count, indexed, skipped);
+    }
+}
+
 void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT s, INT b)
 {
     MaybePlaceWhole2DFrame(c);
-    if (!ShouldSkipAsReticle())
+    bool skip = ShouldSkipAsReticle();
+    BeforeBackbufferDraw(c, n, true, skip);
+    if (!skip)
         g_origDrawIndexed(c, n, s, b);
     CountDraw(c, n);
 }
 void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
 {
     MaybePlaceWhole2DFrame(c);
-    if (!ShouldSkipAsReticle())
+    bool skip = ShouldSkipAsReticle();
+    BeforeBackbufferDraw(c, n, false, skip);
+    if (!skip)
         g_origDraw(c, n, s);
     CountDraw(c, n);
 }

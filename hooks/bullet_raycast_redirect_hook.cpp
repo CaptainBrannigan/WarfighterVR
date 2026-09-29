@@ -6,10 +6,14 @@
 #include "../sdk/mohw_common.h"
 #include "../sdk/vr_math.h"
 #include "../sdk/motion_controller_aim.h"
+#include "../openvr_direct/vr_input.h"
 
 #include <windows.h>
+#include <intrin.h>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 
 namespace mohw {
 namespace {
@@ -59,6 +63,95 @@ bool SehSafeTouch(const void* addr)
     }
 }
 
+// ---- Other raycasts around a shot (2026-09-29) ---------------------------------------------------------------------
+// Objective targets that aren't soldiers only registered hits aimed with the mouse, not the controller: the hit-scan
+// (fire_candidate_redirect_hook.cpp, every shot) and this hook's bullet ident both follow the controller, so whatever
+// scores those targets is another path still on the game's aim. Every other ident through GameWorld::RayCast is logged
+// here on first sight (with its caller), and each such call within kShotWindowMs of the trigger being held, with its
+// ray, to compare against the hit-scan log's "original end" (game aim) / "controller-redirected end" at the same time.
+constexpr const char* kShotLogFile = "mohwvr_shotraycasts.log";
+constexpr unsigned long long kShotWindowMs = 250;
+constexpr int kShotLinesPerSecond = 80;
+
+struct SeenRaycast
+{
+    const char* ident;
+    uintptr_t caller;
+};
+std::mutex g_seenRaycastMutex;
+SeenRaycast g_seenRaycasts[128];
+int g_seenRaycastCount = 0;
+
+// SEH-safe copy of a caller's ident string.
+void CopyIdent(const char* ident, char* out, int outSize)
+{
+    __try
+    {
+        int n = 0;
+        while (n < outSize - 1 && ident[n] != '\0')
+        {
+            out[n] = ident[n];
+            ++n;
+        }
+        out[n] = '\0';
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        out[0] = '\0';
+    }
+}
+
+bool ReadVec(const Vec3* p, Vec3* out)
+{
+    if (p == nullptr || !SehSafeTouch(p))
+        return false;
+    *out = *p;
+    return true;
+}
+
+void LogOtherRaycast(const char* ident, const Vec3* start, const Vec3* end, uintptr_t caller)
+{
+    uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    unsigned callerRva = static_cast<unsigned>(caller >= base ? caller - base : 0);
+    char name[96];
+    {
+        bool isNew = true;
+        std::lock_guard<std::mutex> lock(g_seenRaycastMutex);
+        for (int i = 0; i < g_seenRaycastCount; ++i)
+            if (g_seenRaycasts[i].ident == ident && g_seenRaycasts[i].caller == caller)
+                isNew = false;
+        if (isNew && g_seenRaycastCount < 128)
+        {
+            g_seenRaycasts[g_seenRaycastCount++] = SeenRaycast{ident, caller};
+            CopyIdent(ident, name, sizeof(name));
+            MOHW_LOG(kShotLogFile, "NEW raycast ident \"%s\" from caller image+0x%X (%p)", name, callerRva,
+                      reinterpret_cast<void*>(caller));
+        }
+    }
+
+    unsigned long long lastFire = openvr_direct::GetVrLastFireHeldMs();
+    unsigned long long now = GetTickCount64();
+    if (lastFire == 0 || now - lastFire > kShotWindowMs)
+        return;
+    static std::atomic<unsigned long long> windowSecond{0};
+    static std::atomic<int> linesThisSecond{0};
+    unsigned long long second = now / 1000;
+    if (windowSecond.exchange(second) != second)
+        linesThisSecond.store(0);
+    if (linesThisSecond.fetch_add(1) >= kShotLinesPerSecond)
+        return;
+    Vec3 s{}, e{};
+    if (!ReadVec(start, &s) || !ReadVec(end, &e))
+        return;
+    Vec3 d = e - s;
+    float len = sqrtf(d.Dot(d));
+    Vec3 dir = len > 1e-4f ? d * (1.0f / len) : d;
+    CopyIdent(ident, name, sizeof(name));
+    MOHW_LOG(kShotLogFile,
+              "shot+%llums \"%s\" caller image+0x%X start={%.3f,%.3f,%.3f} end={%.3f,%.3f,%.3f} len=%.2f dir={%.3f,%.3f,%.3f}",
+              now - lastFire, name, callerRva, s.x, s.y, s.z, e.x, e.y, e.z, len, dir.x, dir.y, dir.z);
+}
+
 // Same established __thiscall-hooking workaround as this project's other
 // hooks (engine_function_hook.cpp, shot_redirect_hook.cpp,
 // player_hitscan_redirect_hook.cpp): a non-static member function on a
@@ -75,6 +168,8 @@ struct ThisCallTrampoline
 
         if (ident == nullptr || !SehSafeTouch(ident) || std::strcmp(ident, kTargetIdent) != 0)
         {
+            if (ident != nullptr)
+                LogOtherRaycast(ident, start, end, reinterpret_cast<uintptr_t>(_ReturnAddress()));
             return g_originalRayCast(param1, ident, rayCastTest, start, end, hits, maxHitCount, materialFlags,
                                        flags, excluded);
         }

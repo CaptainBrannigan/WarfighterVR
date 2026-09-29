@@ -13,6 +13,7 @@ struct VrActionState
     bool ads = false;  // the off hand's trigger: aim down sights (the game's zoom, right mouse)
     float moveX = 0.0f, moveY = 0.0f; // left stick by default, -1..1, +Y = pushed forward
     float turnX = 0.0f;               // right stick X by default, -1..1, + = pushed right
+    float turnY = 0.0f;               // right stick Y, + = pushed forward; stick pitch only while head aim is off
 };
 
 // Connect thread, once, before SubmitThreadProc starts. input = the IVRInput_011 interface pointer,
@@ -28,11 +29,15 @@ bool GetVrActionState(VrActionState* out);
 
 // Lock-free read of just the stick axes, for hooks/xinput_hook.cpp, which runs inside the game's own controller
 // polling. Same values and false-until-first-update behaviour as GetVrActionState.
-bool GetVrSticks(float* moveX, float* moveY, float* turnX);
+bool GetVrSticks(float* moveX, float* moveY, float* turnX, float* turnY);
 
 // Lock-free read of the virtual gamepad's buttons (XINPUT_GAMEPAD_* mask) and triggers (0-255) from the SteamVR pad
 // actions, for hooks/xinput_hook.cpp. The weapon hand's trigger is RT and the other hand's LT, unless fire/ADS go out
 // as mouse clicks (FireViaMouse). False until the first update.
 bool GetVrPadState(unsigned short* buttons, unsigned char* leftTrigger, unsigned char* rightTrigger);
+
+// Lock-free: GetTickCount64() at the last input update with the weapon hand's trigger held, 0 if never. For
+// diagnostics that look at what happens right after a shot (hooks/bullet_raycast_redirect_hook.cpp).
+unsigned long long GetVrLastFireHeldMs();
 
 } // namespace mohw::openvr_direct

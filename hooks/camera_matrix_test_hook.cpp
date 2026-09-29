@@ -52,16 +52,10 @@ thread_local uint32_t t_lastCount = 0;
 thread_local const void* t_pendingViewmodelCamera = nullptr;
 thread_local uint32_t t_pendingViewmodelFovBits = 0;
 
-// 0 = use the index selector; 1 = weapon batches only (count != 3);
-// 2 = body+hands batch only (count == 3). Confirmed live 2026-09-19: the
-// count==3 batch is body+hands for both rifle and pistol groups.
+// 0 = use the index selector; 1 = weapon batches only (IsBodyBatch false);
+// 2 = body batch only. (Was count != 3 / == 3, confirmed 2026-09-19 for the
+// first rifle and pistol; other levels broke it, see IsBodyBatch.)
 std::atomic<int> g_roleMode{1}; // default: weapon only
-
-// Instance-hide test for the count==3 (body+hands) batch: -1 = off, 0..3 = do not
-// submit that instance index. Keys: ']' next, '[' previous.
-std::atomic<int> g_hideInstance{-1};
-std::atomic<int> g_lastLoggedHide{-2};
-std::atomic<bool> g_hideBodyAll{false}; // '\' toggles: hide every instance of the count==3 (legs+arms+hands) batch
 
 using DrawItemSubmitFn = void(__cdecl*)(void* item, void* drawState);
 DrawItemSubmitFn g_originalSubmit = nullptr;
@@ -265,6 +259,136 @@ void PollHotkeys()
 {
 }
 
+// ---- Batch composition log (2026-09-29) ----------------------------------------------------------------------------
+// The weapon/body split (count != 3 = weapon, count == 3 = legs+arms+hands, arms/hands = instances 1/2) was verified on
+// the first rifle and the pistol only; live, another level's weapon lost its lower receiver (a count==3 weapon batch
+// with instances 1/2 skipped) and the next level showed the hands (a body batch of another count or order). Every
+// distinct first-person batch (by count + first mesh) is logged once, with each instance's mesh object's vtable and any
+// asset-name strings reachable from it, to find a rule that holds across levels.
+//
+// Result (2026-09-29): no names, one vtable for every mesh, and the counts vary (that level's main weapon batch had 2
+// instances, the first rifle's 4) -- but the flags byte (+0xCC) splits them: the body batch 03 (0B on 2026-09-19), every
+// weapon batch 41 / 43 / 49 (43 / 4B for the pistol) -- bit 0x40 set on weapons only. Which of the body's parts are
+// hidden is the HideBodyPart1..4 settings.
+bool IsBodyBatch(const unsigned char* b)
+{
+    return (b[0xCC] & 0x40) == 0;
+}
+
+// SEH-safe: a NUL-terminated printable string of at least 5 characters at p, copied to out.
+bool ReadPrintableString(uintptr_t p, char* out, int outSize)
+{
+    if (p < 0x10000 || p > 0x7FFF0000)
+        return false;
+    __try
+    {
+        const char* s = reinterpret_cast<const char*>(p);
+        int n = 0;
+        while (n < outSize - 1 && n < 120)
+        {
+            char c = s[n];
+            if (c == '\0')
+                break;
+            if (c < 0x20 || c > 0x7E)
+                return false;
+            out[n++] = c;
+        }
+        out[n] = '\0';
+        return n >= 5 && s[n] == '\0';
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+// SEH-safe: appends strings found at obj's first 32 dwords (and, depth 2, at the objects those point to).
+void ProbeNames(uintptr_t obj, int depth, char* out, size_t outSize, int* found)
+{
+    if (obj < 0x10000 || obj > 0x7FFF0000 || *found >= 6)
+        return;
+    for (int i = 0; i < 32 && *found < 6; ++i)
+    {
+        uintptr_t v = 0;
+        __try
+        {
+            v = reinterpret_cast<const uintptr_t*>(obj)[i];
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return;
+        }
+        char str[128];
+        if (ReadPrintableString(v, str, sizeof(str)))
+        {
+            size_t len = strlen(out);
+            snprintf(out + len, outSize - len, " [d%d+0x%X]\"%s\"", depth, i * 4, str);
+            ++*found;
+        }
+        else if (depth < 2)
+        {
+            ProbeNames(v, depth + 1, out, outSize, found);
+        }
+    }
+}
+
+// SEH-safe: the mesh pair of instance i (mesh ptr, second ptr) and the mesh object's first dword (vtable).
+bool ReadInstance(const unsigned char* b, uint32_t i, uintptr_t* mesh, uintptr_t* second, uintptr_t* vtable)
+{
+    __try
+    {
+        const uintptr_t* inst = *reinterpret_cast<const uintptr_t* const*>(b + 0x78);
+        *mesh = inst[i * 2];
+        *second = inst[i * 2 + 1];
+        *vtable = *mesh ? *reinterpret_cast<const uintptr_t*>(*mesh) : 0;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+std::mutex g_seenBatchMutex;
+uintptr_t g_seenBatchKeys[256] = {};
+int g_seenBatchCount = 0;
+
+void LogBatchIfNew(const unsigned char* b, uint32_t count, bool classifiedBody)
+{
+    uintptr_t mesh0 = 0, second0 = 0, vt0 = 0;
+    if (count == 0 || count > 256 || !ReadInstance(b, 0, &mesh0, &second0, &vt0))
+        return;
+    uintptr_t key = mesh0 ^ (static_cast<uintptr_t>(count) << 28);
+    {
+        std::lock_guard<std::mutex> lock(g_seenBatchMutex);
+        for (int i = 0; i < g_seenBatchCount; ++i)
+            if (g_seenBatchKeys[i] == key)
+                return;
+        if (g_seenBatchCount >= 256)
+            return;
+        g_seenBatchKeys[g_seenBatchCount++] = key;
+    }
+    const float* transl = reinterpret_cast<const float*>(b + 0x40);
+    MOHW_LOG(kLogFile, "BATCH NEW seq=%d count=%u flags=%02X fov=%.1f transl=(%.3f,%.3f,%.3f) -> %s", t_seq, count,
+              static_cast<unsigned>(b[0xCC]), *reinterpret_cast<const float*>(b + 0xC4), transl[0], transl[1], transl[2],
+              classifiedBody ? "BODY (parts hidden per HideBodyPart1..4)" : "WEAPON (follows the controller)");
+    uintptr_t moduleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        uintptr_t mesh = 0, second = 0, vt = 0;
+        if (!ReadInstance(b, i, &mesh, &second, &vt))
+            break;
+        char names[1024] = {};
+        int found = 0;
+        ProbeNames(mesh, 0, names, sizeof(names), &found);
+        ProbeNames(second, 0, names, sizeof(names), &found);
+        MOHW_LOG(kLogFile, "  instance %u: mesh=%p vtable=%p (image+0x%X) second=%p names:%s", i,
+                  reinterpret_cast<void*>(mesh), reinterpret_cast<void*>(vt),
+                  static_cast<unsigned>(vt >= moduleBase ? vt - moduleBase : 0), reinterpret_cast<void*>(second),
+                  found ? names : " (none)");
+    }
+}
+
 void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr_t ret)
 {
     uintptr_t expectedRet = reinterpret_cast<uintptr_t>(Offset<void*>(OFFSET_CAMERAMATRIX_CALLER_VIEWMODEL));
@@ -282,6 +406,7 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     const unsigned char* b = reinterpret_cast<const unsigned char*>(batch);
     uint32_t count = *reinterpret_cast<const uint32_t*>(b + 0x7C);
     const float* transl = reinterpret_cast<const float*>(b + 0x40);
+    bool isBody = IsBodyBatch(b);
 
     uintptr_t batchAddr = reinterpret_cast<uintptr_t>(batch);
     if (batchAddr != t_lastBatch)
@@ -291,6 +416,19 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
         t_seq = startOfGroup ? 0 : t_seq + 1;
         t_lastCount = count;
 
+        LogBatchIfNew(b, count, isBody);
+        if (isBody)
+        {
+            // The live part count, for the settings menu's body part rows (the count differs between levels).
+            SetBodyPartCountSeen(static_cast<int>(count));
+            if (count > static_cast<uint32_t>(kMaxBodyParts))
+            {
+                static std::atomic<int> tooManyLogs{0};
+                if (tooManyLogs.fetch_add(1) < 4)
+                    MOHW_LOG(kLogFile, "body batch has %u parts, more than the %d the settings can hide -- parts past that stay "
+                              "visible", count, kMaxBodyParts);
+            }
+        }
         int line = g_seqLogLines.fetch_add(1);
         if (line < 60)
             MOHW_LOG(kLogFile, "SEQ tid=%lu seq=%d batch=%p count=%u transl=(%.3f,%.3f,%.3f)", GetCurrentThreadId(), t_seq,
@@ -311,9 +449,9 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     int roleMode = g_roleMode.load();
     bool patchThis;
     if (roleMode == 1)
-        patchThis = (count != 3);
+        patchThis = !isBody;
     else if (roleMode == 2)
-        patchThis = (count == 3);
+        patchThis = isBody;
     else
         patchThis = (sel == kSelectAll) || (t_seq == sel);
     if (roleMode != 0)
@@ -324,7 +462,7 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     // anchored to the head centre: the body+hands batch without the head's roll, the weapon with the drive off with
     // it (it's the view's gun then, and should roll with the view).
     if (!patchThis || !DriveWeaponFromController(m))
-        AnchorRigToHead(m, count == 3);
+        AnchorRigToHead(m, isBody);
 
     ++g_patched;
     int lastLogged = g_lastLoggedSelected.load();
@@ -335,8 +473,8 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     g_original(thisPtr, m);
 }
 
-// SEH-safe (no C++ objects in this frame): resolves which instance of a count==3
-// first-person batch this draw item is, from the item's mesh ptr and matrix ptr.
+// SEH-safe (no C++ objects in this frame): resolves which instance of a first-person body batch (IsBodyBatch) this draw
+// item is, from the item's mesh ptr and matrix ptr.
 bool ResolveBodyInstance(void* item, int* outIndex, void** outMesh)
 {
     __try
@@ -345,7 +483,7 @@ bool ResolveBodyInstance(void* item, int* outIndex, void** outMesh)
         unsigned char* batch = reinterpret_cast<unsigned char*>(matrixPtr) - 0x10;
         uint32_t count = *reinterpret_cast<uint32_t*>(batch + 0x7C);
         uint32_t originBits = *reinterpret_cast<uint32_t*>(batch + 0x60);
-        if (count != 3 || originBits == 0)
+        if (count == 0 || count > 256 || originBits == 0 || !IsBodyBatch(batch))
             return false;
         uintptr_t* inst = *reinterpret_cast<uintptr_t**>(batch + 0x78);
         uintptr_t mesh = *reinterpret_cast<uintptr_t*>(item);
@@ -366,29 +504,22 @@ bool ResolveBodyInstance(void* item, int* outIndex, void** outMesh)
     }
 }
 
-constexpr int kBodyInstanceArms = 1; // live-confirmed 2026-09-19: 0 = legs, 1 = arms, 2 = hands
-constexpr int kBodyInstanceHands = 2;
-
 void __cdecl HookedSubmit(void* item, void* drawState)
 {
-    int hide = g_hideInstance.load();
-    bool hideAll = g_hideBodyAll.load();
     // With the gun on the controller, the game's arms and hands are left reaching for where the gun used to be; they
-    // share the body batch's one view block with the legs, so they can't be moved on their own yet -- skipped instead.
-    bool hideArms = GetWeaponDriveEnabled();
-    if ((hide >= 0 || hideAll || hideArms) &&
+    // share the body batch's one view block with the legs, so they can't be moved on their own yet -- the parts picked
+    // in the settings (HideBodyPart1..4) are skipped instead.
+    if (GetWeaponDriveEnabled() &&
         reinterpret_cast<uintptr_t>(_ReturnAddress()) ==
             reinterpret_cast<uintptr_t>(Offset<void*>(OFFSET_DRAWITEMSUBMIT_CALLER_INSTANCELOOP)))
     {
         int idx = -1;
         void* mesh = nullptr;
-        if (ResolveBodyInstance(item, &idx, &mesh) && (hideAll || idx == hide || (hideArms && (idx == kBodyInstanceArms || idx == kBodyInstanceHands))))
+        if (ResolveBodyInstance(item, &idx, &mesh) && GetHideBodyPart(idx))
         {
-            if (hideAll || idx != hide)
-                return;
-            int last = g_lastLoggedHide.load();
-            if (last != hide && g_lastLoggedHide.compare_exchange_strong(last, hide))
-                MOHW_LOG(kLogFile, "HIDING count==3 batch instance %d (mesh=%p)", idx, mesh);
+            static std::atomic<int> hideLogs{0};
+            if (hideLogs.fetch_add(1) < 8)
+                MOHW_LOG(kLogFile, "HIDING body part %d (instance %d, mesh=%p)", idx + 1, idx, mesh);
             return;
         }
     }

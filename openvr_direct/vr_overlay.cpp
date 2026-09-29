@@ -23,6 +23,7 @@ constexpr const char* kLogFile = "mohwvr_overlay.log";
 
 // IVROverlay_028 vtable slots, counted from openvr.h's class IVROverlay declaration order.
 constexpr int kCreateOverlayIndex = 1;
+constexpr int kSetOverlayFlagIndex = 11;
 constexpr int kSetOverlayWidthInMetersIndex = 22;
 constexpr int kSetOverlayTransformAbsoluteIndex = 33;
 constexpr int kShowOverlayIndex = 43;
@@ -37,6 +38,10 @@ constexpr int kCreateDashboardOverlayIndex = 67;
 constexpr int kInputMethodMouse = 1;   // VROverlayInputMethod_Mouse
 constexpr uint32_t kEventMouseMove = 300;       // VREvent_MouseMove
 constexpr uint32_t kEventMouseButtonDown = 301; // VREvent_MouseButtonDown
+constexpr uint32_t kEventScrollDiscrete = 305;  // VREvent_ScrollDiscrete (data = scroll)
+constexpr uint32_t kEventScrollSmooth = 309;    // VREvent_ScrollSmooth (data = scroll)
+constexpr int kFlagSendVRDiscreteScrollEvents = 1 << 6; // VROverlayFlags_SendVRDiscreteScrollEvents
+using PFN_SetOverlayFlag = int(__thiscall*)(void* self, uint64_t handle, int flag, bool enabled);
 
 using PFN_CreateDashboardOverlay = int(__thiscall*)(void* self, const char* key, const char* name, uint64_t* mainHandle,
                                                     uint64_t* thumbnailHandle);
@@ -68,6 +73,13 @@ struct VrEvent
             uint32_t button;
             uint32_t cursorIndex;
         } mouse;
+        struct
+        {
+            float xdelta, ydelta; // + ydelta = scroll up
+            uint32_t unused;
+            float viewportScale;
+            uint32_t cursorIndex;
+        } scroll;
         uint64_t reserved[6];
     } data;
 };
@@ -96,6 +108,7 @@ struct HitBox
     int steps;
 };
 constexpr int kRecenterButton = -100;
+constexpr int kScrollButton = -101; // steps = rows to scroll, + = down
 
 void* g_overlay = nullptr;
 uint64_t g_main = 0, g_thumb = 0;
@@ -122,6 +135,20 @@ bool PollEvent(VrEvent* ev)
 // Overlay thread only.
 std::vector<HitBox> g_hits;
 int g_hover = -1;
+// Scrolling (2026-09-29, the columns outgrew the 1080-pixel canvas): the title bar stays put and the three columns
+// move up by g_scrollPx together; rows not wholly below the title bar and on the canvas aren't drawn or hittable.
+// Scrolled by the controller's scroll input on the overlay (discrete scroll events) or the title bar's buttons.
+int g_scrollPx = 0;
+int g_maxScrollPx = 0; // from the last draw: content bottom minus the canvas height
+
+void ScrollBy(int px)
+{
+    g_scrollPx += px;
+    if (g_scrollPx > g_maxScrollPx)
+        g_scrollPx = g_maxScrollPx;
+    if (g_scrollPx < 0)
+        g_scrollPx = 0;
+}
 
 // Which of the three columns a group goes in (groups are matched by prefix, so "Holsters (...)" counts as Holsters).
 int ColumnForGroup(const char* group)
@@ -258,10 +285,17 @@ void DrawMenu(Canvas& c)
     c.Text("Changes apply and save immediately", hint, smallFont, kDimText, DT_LEFT);
     RECT recenter{kWidth - 30 - 200, 18, kWidth - 30, kTitleHeight - 14};
     DrawButton(c, recenter, "Recenter view", rowFont, kButton, kRecenterButton, 0);
+    constexpr int kScrollRows = 6;
+    RECT scrollDown{recenter.left - 20 - 150, recenter.top, recenter.left - 20, recenter.bottom};
+    RECT scrollUp{scrollDown.left - 10 - 150, recenter.top, scrollDown.left - 10, recenter.bottom};
+    DrawButton(c, scrollUp, "Scroll up", rowFont, g_scrollPx > 0 ? kButton : kRowA, kScrollButton, -kScrollRows);
+    DrawButton(c, scrollDown, "Scroll down", rowFont, g_scrollPx < g_maxScrollPx ? kButton : kRowA, kScrollButton,
+               kScrollRows);
 
-    int y[kColumnCount] = {kTitleHeight, kTitleHeight, kTitleHeight};
+    int y[kColumnCount] = {kTitleHeight, kTitleHeight, kTitleHeight}; // content positions, before scrolling
     const char* lastGroup[kColumnCount] = {nullptr, nullptr, nullptr};
     int rowParity[kColumnCount] = {0, 0, 0};
+    auto onCanvas = [](int top, int bottom) { return top >= kTitleHeight && bottom <= kHeight; };
     for (int i = 0, n = GetMenuSettingCount(); i < n; ++i)
     {
         MenuSettingInfo info{};
@@ -271,15 +305,20 @@ void DrawMenu(Canvas& c)
         int x = kColumnX[col];
         if (!lastGroup[col] || strcmp(lastGroup[col], info.group) != 0)
         {
-            RECT header{x, y[col] + 6, x + kColumnWidth, y[col] + kHeaderHeight};
-            c.Text(info.group, header, headerFont, kAccent, DT_LEFT);
+            RECT header{x, y[col] + 6 - g_scrollPx, x + kColumnWidth, y[col] + kHeaderHeight - g_scrollPx};
+            if (onCanvas(header.top, header.bottom))
+                c.Text(info.group, header, headerFont, kAccent, DT_LEFT);
             y[col] += kHeaderHeight;
             lastGroup[col] = info.group;
             rowParity[col] = 0;
         }
 
-        RECT row{x, y[col], x + kColumnWidth, y[col] + kRowHeight};
-        c.Fill(row, (rowParity[col]++ & 1) ? kRowB : kRowA);
+        RECT row{x, y[col] - g_scrollPx, x + kColumnWidth, y[col] + kRowHeight - g_scrollPx};
+        y[col] += kRowHeight;
+        bool odd = (rowParity[col]++ & 1) != 0;
+        if (!onCanvas(row.top, row.bottom))
+            continue;
+        c.Fill(row, odd ? kRowB : kRowA);
         RECT label{x + 12, row.top, x + 420, row.bottom};
         c.Text(info.label, label, rowFont, kTextColor, DT_LEFT | DT_END_ELLIPSIS);
 
@@ -318,8 +357,14 @@ void DrawMenu(Canvas& c)
                 DrawButton(c, button, labels[b], rowFont, kButton, i, steps[b]);
             }
         }
-        y[col] += kRowHeight;
     }
+    int contentBottom = 0;
+    for (int col = 0; col < kColumnCount; ++col)
+        contentBottom = y[col] > contentBottom ? y[col] : contentBottom;
+    constexpr int kBottomMargin = 20;
+    g_maxScrollPx = contentBottom + kBottomMargin > kHeight ? contentBottom + kBottomMargin - kHeight : 0;
+    if (g_scrollPx > g_maxScrollPx)
+        g_scrollPx = g_maxScrollPx;
 }
 
 void DrawThumbnail(Canvas& c)
@@ -378,9 +423,29 @@ void OverlayThreadProc()
                 {
                     if (g_hits[hit].index == kRecenterButton)
                         RequestRecenter("Recenter button (dashboard)");
+                    else if (g_hits[hit].index == kScrollButton)
+                        ScrollBy(g_hits[hit].steps * kRowHeight);
                     else
                         AdjustMenuSetting(g_hits[hit].index, g_hits[hit].steps);
                     dirty = true;
+                }
+            }
+            else if (ev.eventType == kEventScrollDiscrete || ev.eventType == kEventScrollSmooth)
+            {
+                // Discrete: +-1 per notch, three rows each. Smooth (not requested, handled in case): fractions.
+                constexpr float kRowsPerUnit = 3.0f;
+                int px = static_cast<int>(-ev.data.scroll.ydelta * kRowsPerUnit * static_cast<float>(kRowHeight));
+                if (px != 0)
+                {
+                    ScrollBy(px);
+                    dirty = true;
+                }
+                static int scrollLogs = 0;
+                if (scrollLogs < 10)
+                {
+                    ++scrollLogs;
+                    MOHW_LOG(kLogFile, "overlay scroll event %u: ydelta=%.3f -> scroll %d / %d px", ev.eventType,
+                              ev.data.scroll.ydelta, g_scrollPx, g_maxScrollPx);
                 }
             }
             ev = VrEvent{};
@@ -624,8 +689,12 @@ bool InitVrOverlay(void* overlay, int trackingUniverse)
     int widthErr = setWidth(overlay, g_main, 2.5f);
     int inputErr = setInput(overlay, g_main, kInputMethodMouse);
     int scaleErr = setMouseScale(overlay, g_main, mouseScale);
-    MOHW_LOG(kLogFile, "SetOverlayWidthInMeters err=%d, SetOverlayInputMethod err=%d, SetOverlayMouseScale err=%d", widthErr,
-              inputErr, scaleErr);
+    auto setFlag = reinterpret_cast<PFN_SetOverlayFlag>(vtable[kSetOverlayFlagIndex]);
+    int scrollErr = setFlag(overlay, g_main, kFlagSendVRDiscreteScrollEvents, true);
+    MOHW_LOG(kLogFile,
+              "SetOverlayWidthInMeters err=%d, SetOverlayInputMethod err=%d, SetOverlayMouseScale err=%d, scroll events "
+              "err=%d",
+              widthErr, inputErr, scaleErr, scrollErr);
 
     std::thread(OverlayThreadProc).detach();
     MOHW_LOG(kLogFile, "dashboard tab ready (%d settings)", GetMenuSettingCount());

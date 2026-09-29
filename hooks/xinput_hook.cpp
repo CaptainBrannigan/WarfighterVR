@@ -51,9 +51,13 @@ DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
         result = ERROR_SUCCESS;
     }
 
-    float moveX = 0.0f, moveY = 0.0f, turnX = 0.0f;
-    if (!openvr_direct::GetVrSticks(&moveX, &moveY, &turnX))
+    float moveX = 0.0f, moveY = 0.0f, turnX = 0.0f, turnY = 0.0f;
+    if (!openvr_direct::GetVrSticks(&moveX, &moveY, &turnX, &turnY))
         return result;
+    // Stick pitch only with head aim off: with it on the head owns pitch (the aiming controller hook also removes pitch
+    // input then), so the stick's Y stays 0.
+    if (GetHeadAimEnabled())
+        turnY = 0.0f;
 
     XINPUT_GAMEPAD& pad = state->Gamepad;
     // Outer deadzone: VR sticks often don't reach 1.0 in every direction (live: Touch right stick peaked at 0.92
@@ -70,10 +74,11 @@ DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
         pad.sThumbLY = ToThumb(moveY * scale);
     }
     float turn = turnX / fullAt * GetVrTurnSpeed();
-    if (fabsf(turnX) > kVrStickActiveThreshold)
+    float pitch = turnY / fullAt * GetVrTurnSpeed();
+    if (fabsf(turnX) > kVrStickActiveThreshold || fabsf(turnY) > kVrStickActiveThreshold)
     {
         pad.sThumbRX = ToThumb(turn);
-        pad.sThumbRY = 0;
+        pad.sThumbRY = ToThumb(pitch);
     }
 
     // Pad buttons and triggers from the SteamVR pad actions (openvr_direct/vr_input.cpp), on top of a real pad's.

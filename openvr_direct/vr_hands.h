@@ -29,6 +29,9 @@ struct HandsResult
     Quat weaponOrientation{}; // valid when twoHanded: the weapon hand's orientation aimed at the off hand
     bool fire = false;         // the weapon hand's trigger
     bool ads = false;          // the off hand's trigger
+    // The weapon grip is on (DotsOnlyWithGrip): with HolsterHoldToKeep, while the weapon hand's grip is held;
+    // otherwise toggled by a weapon-hand grip press outside the holsters, and turned on by drawing a weapon from one.
+    bool weaponGripped = false;
 };
 
 // head: tracking-space head position and orientation (haveHead false if no head pose yet).

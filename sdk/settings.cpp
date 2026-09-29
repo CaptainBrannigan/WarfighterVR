@@ -79,6 +79,7 @@ constexpr bool kDefaultHolsterHoldToKeep = false; // false = sticky: a grabbed w
 constexpr float kDefaultHolsterRadius = 0.15f;    // meters
 constexpr float kDefaultHolsterDrop = 0.0f;       // meters, + moves every zone down
 constexpr bool kDefaultSightDotEnabled = true;
+constexpr bool kDefaultDotsOnlyWithGrip = false; // true = both dots only while the weapon grip is on
 constexpr float kDefaultSightZeroDistance = 25.0f; // meters
 constexpr float kDefaultSightDotSizeDeg = 0.35f;
 // Optic dot: at the weapon hand, raised by OpticHeight (the zero) and moved by OpticWindageOffset / OpticDistance, meters
@@ -145,8 +146,16 @@ std::atomic<float> g_twoHandGrabRadius{kDefaultTwoHandGrabRadius};
 std::atomic<float> g_twoHandReach{kDefaultTwoHandReach};
 std::atomic<bool> g_hudPlacementEnabled{kDefaultHudPlacementEnabled};
 std::atomic<bool> g_hideReticle{kDefaultHideReticle};
+// Body batch parts hidden while the gun follows the controller (hooks/camera_matrix_test_hook.cpp). Default = parts 2
+// and 3, the arms and hands on the first rifle and the pistol; the order isn't the same in every level, nor the count.
+std::atomic<bool> g_hideBodyPart[kMaxBodyParts] = {{false}, {true}, {true}};
+constexpr int kDefaultHiddenBodyPartRows = 3; // rows 1..3 always shown and saved, so the default-on 2 and 3 can be turned off
+std::atomic<int> g_bodyPartCountSeen{0};       // parts in the body batch now drawn, from SetBodyPartCountSeen
+int BodyPartRowCount();
 std::atomic<float> g_hudScale{kDefaultHudScale};
 std::atomic<float> g_menuScreenScale{kDefaultMenuScreenScale};
+// Marker test (2026-09-29): from this draw of the final 2D pass on, the full frame instead of the HUD rectangle; 0 = off.
+std::atomic<float> g_fullFrameFromDraw{0.0f};
 std::atomic<float> g_hudOffsetXDeg{kDefaultHudOffsetXDeg};
 std::atomic<float> g_hudOffsetYDeg{kDefaultHudOffsetYDeg};
 std::atomic<float> g_hudIpdScale{kDefaultHudIpdScale};
@@ -159,6 +168,8 @@ std::atomic<bool> g_holsterHoldToKeep{kDefaultHolsterHoldToKeep};
 std::atomic<float> g_holsterRadius{kDefaultHolsterRadius};
 std::atomic<float> g_holsterDrop{kDefaultHolsterDrop};
 std::atomic<bool> g_sightDotEnabled{kDefaultSightDotEnabled};
+std::atomic<bool> g_dotsOnlyWithGrip{kDefaultDotsOnlyWithGrip};
+std::atomic<bool> g_gripDoubleTapBumpers{true}; // openvr_direct/vr_input.cpp UpdateGripGesture
 std::atomic<float> g_sightZeroDistance{kDefaultSightZeroDistance};
 std::atomic<float> g_sightDotSizeDeg{kDefaultSightDotSizeDeg};
 std::atomic<bool> g_opticDotEnabled{kDefaultOpticDotEnabled};
@@ -233,8 +244,11 @@ void WriteSettingsFileLocked()
     fprintf(f, "TwoHandReach=%.4f\n", g_twoHandReach.load(std::memory_order_relaxed));
     fprintf(f, "HudPlacementEnabled=%d\n", g_hudPlacementEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HideReticle=%d\n", g_hideReticle.load(std::memory_order_relaxed) ? 1 : 0);
+    for (int i = 0, n = BodyPartRowCount(); i < n; ++i)
+        fprintf(f, "HideBodyPart%d=%d\n", i + 1, g_hideBodyPart[i].load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HudScale=%.4f\n", g_hudScale.load(std::memory_order_relaxed));
     fprintf(f, "MenuScreenScale=%.4f\n", g_menuScreenScale.load(std::memory_order_relaxed));
+    fprintf(f, "FullFrameFromDraw=%.0f\n", g_fullFrameFromDraw.load(std::memory_order_relaxed));
     fprintf(f, "HudIpdScale=%.4f\n", g_hudIpdScale.load(std::memory_order_relaxed));
     fprintf(f, "HudDepth=%.4f\n", g_hudDepth.load(std::memory_order_relaxed));
     fprintf(f, "HudOffsetX=%.4f\n", g_hudOffsetXDeg.load(std::memory_order_relaxed));
@@ -258,6 +272,8 @@ void WriteSettingsFileLocked()
         fprintf(f, "%s=%.4f,%.4f,%.4f\n", kHolsterPosKeys[i], g_holsterPos[i][0].load(std::memory_order_relaxed),
                 g_holsterPos[i][1].load(std::memory_order_relaxed), g_holsterPos[i][2].load(std::memory_order_relaxed));
     fprintf(f, "SightDotEnabled=%d\n", g_sightDotEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "DotsOnlyWithGrip=%d\n", g_dotsOnlyWithGrip.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "GripDoubleTapBumpers=%d\n", g_gripDoubleTapBumpers.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "SightZeroDistance=%.4f\n", g_sightZeroDistance.load(std::memory_order_relaxed));
     fprintf(f, "SightDotSize=%.4f\n", g_sightDotSizeDeg.load(std::memory_order_relaxed));
     fprintf(f, "OpticDotEnabled=%d\n", g_opticDotEnabled.load(std::memory_order_relaxed) ? 1 : 0);
@@ -312,6 +328,36 @@ bool ParseBoolSetting(const std::string& line, const char* key, bool* outValue)
         return false;
     *outValue = (asFloat != 0.0f);
     return true;
+}
+
+// HideBodyPart1..kMaxBodyParts.
+bool ParseBodyPartSetting(const std::string& line)
+{
+    if (line.compare(0, 12, "HideBodyPart") != 0)
+        return false;
+    for (int i = 0; i < kMaxBodyParts; ++i)
+    {
+        char key[32];
+        snprintf(key, sizeof(key), "HideBodyPart%d", i + 1);
+        bool value = false;
+        if (ParseBoolSetting(line, key, &value))
+        {
+            g_hideBodyPart[i].store(value, std::memory_order_relaxed);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Body part rows to show and save: every part of the body batch now drawn, plus any part set to hidden beyond that
+// (so a setting made in another level stays visible), and the default-hidden ones.
+int BodyPartRowCount()
+{
+    int n = g_bodyPartCountSeen.load(std::memory_order_relaxed);
+    for (int i = 0; i < kMaxBodyParts; ++i)
+        if (g_hideBodyPart[i].load(std::memory_order_relaxed) && i + 1 > n)
+            n = i + 1;
+    return n < kDefaultHiddenBodyPartRows ? kDefaultHiddenBodyPartRows : n;
 }
 
 } // namespace
@@ -376,10 +422,15 @@ void LoadSettings()
             g_hudPlacementEnabled.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "HideReticle", &boolValue))
             g_hideReticle.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBodyPartSetting(line))
+        {
+        }
         else if (ParseFloatSetting(line, "HudScale", &value))
             g_hudScale.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "MenuScreenScale", &value))
             g_menuScreenScale.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "FullFrameFromDraw", &value))
+            g_fullFrameFromDraw.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HudOffsetX", &value))
             g_hudOffsetXDeg.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HudOffsetY", &value))
@@ -404,6 +455,10 @@ void LoadSettings()
             g_holsterDrop.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "SightDotEnabled", &boolValue))
             g_sightDotEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "DotsOnlyWithGrip", &boolValue))
+            g_dotsOnlyWithGrip.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "GripDoubleTapBumpers", &boolValue))
+            g_gripDoubleTapBumpers.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SightZeroDistance", &value))
             g_sightZeroDistance.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SightDotSize", &value))
@@ -767,6 +822,16 @@ bool GetHideReticle()
     return g_hideReticle.load(std::memory_order_relaxed);
 }
 
+bool GetHideBodyPart(int index)
+{
+    return index >= 0 && index < kMaxBodyParts && g_hideBodyPart[index].load(std::memory_order_relaxed);
+}
+
+void SetBodyPartCountSeen(int count)
+{
+    g_bodyPartCountSeen.store(count < 0 ? 0 : (count > kMaxBodyParts ? kMaxBodyParts : count), std::memory_order_relaxed);
+}
+
 float GetHudScale()
 {
     return g_hudScale.load(std::memory_order_relaxed);
@@ -775,6 +840,11 @@ float GetHudScale()
 float GetMenuScreenScale()
 {
     return g_menuScreenScale.load(std::memory_order_relaxed);
+}
+
+int GetFullFrameFromDraw()
+{
+    return static_cast<int>(g_fullFrameFromDraw.load(std::memory_order_relaxed) + 0.5f);
 }
 
 
@@ -853,6 +923,16 @@ std::string GetHolsterAction(int zone)
 bool GetSightDotEnabled()
 {
     return g_sightDotEnabled.load(std::memory_order_relaxed);
+}
+
+bool GetDotsOnlyWithGrip()
+{
+    return g_dotsOnlyWithGrip.load(std::memory_order_relaxed);
+}
+
+bool GetGripDoubleTapBumpers()
+{
+    return g_gripDoubleTapBumpers.load(std::memory_order_relaxed);
 }
 
 float GetSightZeroDistance()
@@ -952,6 +1032,7 @@ const MenuEntry kMenu[] = {
     {"Controls", "Two-hand reach", nullptr, &g_twoHandReach, 0.2f, 1.5f, 0.05f, 2, "m"},
     {"Controls", "Remove shot spread", &g_removeShotSpread, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "Fire / ADS as mouse (off = RT / LT)", &g_fireViaMouse, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Grip double-tap = LB / RB", &g_gripDoubleTapBumpers, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Left-handed", &g_leftHanded, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Hold grip to keep weapon", &g_holsterHoldToKeep, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Holster size", nullptr, &g_holsterRadius, 0.05f, 0.4f, 0.01f, 2, "m"},
@@ -976,6 +1057,7 @@ const MenuEntry kMenu[] = {
     {"Holster actions", "Chest", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterChest},
     {"Holster actions", "Left shoulder", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterLeftShoulder},
     {"Holster actions", "Right shoulder", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterRightShoulder},
+    {"Hands", "Dots only with weapon grip", &g_dotsOnlyWithGrip, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Optic dot", &g_opticDotEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Optic dot green (off = red)", &g_opticDotGreen, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Optic zero / height (+ up)", nullptr, &g_opticHeight, -0.3f, 0.3f, 0.001f, 3, "m"},
@@ -987,7 +1069,7 @@ const MenuEntry kMenu[] = {
     {"Hands", "Aim ray right (spread fix isn't exact)", nullptr, &g_rayDotWindageDeg, -5.0f, 5.0f, 0.05f, 2, "deg"},
     {"Hands", "Aim ray dot distance", nullptr, &g_sightZeroDistance, 1.0f, 300.0f, 1.0f, 0, "m"},
     {"Hands", "Dot size", nullptr, &g_sightDotSizeDeg, 0.05f, 2.0f, 0.05f, 2, "deg"},
-    {"Weapon", "Gun follows controller (Numpad .)", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Weapon", "Gun + shots follow controller (Numpad .)", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Weapon", "Grip offset right", nullptr, &g_weaponGripRight, -0.5f, 0.5f, 0.005f, 3, "m"},
     {"Weapon", "Grip offset up", nullptr, &g_weaponGripUp, -0.5f, 0.5f, 0.005f, 3, "m"},
     {"Weapon", "Grip offset back", nullptr, &g_weaponGripBack, -1.0f, 0.5f, 0.005f, 3, "m"},
@@ -996,6 +1078,7 @@ const MenuEntry kMenu[] = {
     {"Weapon", "Grip roll", nullptr, &g_weaponGripRollDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {"HUD", "HUD placement", &g_hudPlacementEnabled, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "Menu / movie screen size", nullptr, &g_menuScreenScale, 0.3f, 1.2f, 0.01f, 2, "x"},
+    {"HUD", "Markers test: full frame from draw # (0 off)", nullptr, &g_fullFrameFromDraw, 0.0f, 64.0f, 1.0f, 0, ""},
     {"HUD", "Hide reticle (may clip pause-menu items)", &g_hideReticle, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "HUD scale", nullptr, &g_hudScale, 0.3f, 1.2f, 0.01f, 2, "x"},
     {"HUD", "HUD depth", nullptr, &g_hudDepth, 0.1f, 10.0f, 0.1f, 1, "m"},
@@ -1005,17 +1088,48 @@ const MenuEntry kMenu[] = {
 };
 constexpr int kMenuCount = static_cast<int>(sizeof(kMenu) / sizeof(kMenu[0]));
 
+// Menu rows after the table: one toggle per body part (BodyPartRowCount). The group title carries the live part count;
+// its buffer is only written by the menu (overlay) thread, the only caller, and stays put across rows.
+char g_bodyPartGroup[96];
+
+bool GetBodyPartMenuInfo(int part, MenuSettingInfo* out)
+{
+    if (part < 0 || part >= BodyPartRowCount() || part >= kMaxBodyParts)
+        return false;
+    int seen = g_bodyPartCountSeen.load(std::memory_order_relaxed);
+    if (seen > 0)
+        snprintf(g_bodyPartGroup, sizeof(g_bodyPartGroup), "Weapon: body parts hidden (%d in this level)", seen);
+    else
+        snprintf(g_bodyPartGroup, sizeof(g_bodyPartGroup), "Weapon: body parts hidden (no body drawn yet)");
+    // Names from the first rifle / pistol (2026-09-19); other levels may order the parts differently.
+    const char* knownAs[] = {" (legs, 1st rifle)", " (arms, 1st rifle)", " (hands, 1st rifle)"};
+    snprintf(out->labelBuffer, sizeof(out->labelBuffer), "Hide part %d%s%s", part + 1, part < 3 ? knownAs[part] : "",
+             seen > 0 && part >= seen ? " - not here" : "");
+    out->group = g_bodyPartGroup;
+    out->label = out->labelBuffer;
+    out->isToggle = true;
+    out->isChoice = false;
+    out->value = g_hideBodyPart[part].load(std::memory_order_relaxed) ? 1.0f : 0.0f;
+    out->step = 0.0f;
+    out->decimals = 0;
+    out->unit = "";
+    out->text[0] = '\0';
+    return true;
+}
+
 } // namespace
 
 int GetMenuSettingCount()
 {
-    return kMenuCount;
+    return kMenuCount + BodyPartRowCount(); // the body part rows follow the table
 }
 
 bool GetMenuSettingInfo(int index, MenuSettingInfo* out)
 {
-    if (index < 0 || index >= kMenuCount || !out)
+    if (index < 0 || !out)
         return false;
+    if (index >= kMenuCount)
+        return GetBodyPartMenuInfo(index - kMenuCount, out);
     const MenuEntry& e = kMenu[index];
     out->group = e.group;
     out->label = e.label;
@@ -1046,8 +1160,18 @@ void SetHolsterActionChoices(const std::vector<std::string>& actions)
 
 void AdjustMenuSetting(int index, int steps)
 {
-    if (index < 0 || index >= kMenuCount || steps == 0)
+    if (index < 0 || steps == 0)
         return;
+    if (index >= kMenuCount)
+    {
+        int part = index - kMenuCount;
+        if (part >= kMaxBodyParts)
+            return;
+        g_hideBodyPart[part].store(!g_hideBodyPart[part].load(std::memory_order_relaxed), std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(g_fileMutex);
+        WriteSettingsFileLocked();
+        return;
+    }
     const MenuEntry& e = kMenu[index];
     if (e.holsterZone >= 0)
     {

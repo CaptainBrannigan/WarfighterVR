@@ -52,7 +52,9 @@ newer version of the mod until you switch back to the defaults (or add the new a
 ### Motion controllers
 - **Aim with the controller:** shots leave from your hand along the controller's direction, independent of where you
   look. The weapon's random spread is removed.
-- **The gun follows your hand** (on by default, Numpad . toggles), with adjustable grip offset and rotation.
+- **The gun follows your hand** (on by default, Numpad . or "Gun + shots follow controller" toggles), with adjustable
+  grip offset and rotation. Turning it off also hands the shots back to the game's own aim (see
+  [Known issues](#known-issues)).
 - **Two-handed aiming:** grip with your other hand on the barrel to aim along the line between your hands.
 - **Left-handed mode.**
 - **Body holsters:** press grip with a hand at a body position to trigger an action. That hand also takes the weapon
@@ -84,8 +86,12 @@ vehicles, the Apache, menus). Default Touch layout:
 | Double-press X / Y / B / A | D-pad left / up / right / down | Items and gadgets |
 | Long-press Y | Start | Pause menu |
 | Grips | - | Holsters, two-handed grip |
+| Double-tap left / right grip | LB / RB | (setting: "Grip double-tap = LB / RB") |
 
-Everything is rebindable in SteamVR. Besides the gamepad buttons (including LB, RB and Back, unbound by default),
+Buttons that also have a double press (A, B, X) register a hold after 0.3 s, and a tap just after the double-press
+window; that is how SteamVR tells single from double presses. The grips are bound as their analog pull and the mod
+makes the press and the double-tap itself (SteamVR can't bind a double press on the Touch grip), so a grab is instant
+and a double-tap also counts as two quick grabs. Everything is rebindable in SteamVR. Besides the gamepad buttons (including LB, RB and Back, unbound by default),
 every keyboard action the game has (read from your game profile, so in-game rebinds carry over) is available as its
 own SteamVR action, listed as "Keyboard: ...", alongside "Gamepad: ..." for the pad buttons.
 
@@ -97,6 +103,10 @@ positions and actions. There is also a Recenter button.
 
 ## Known issues
 
+- **Objectives where you shoot something that isn't a soldier** (a target, a device) only count the game's own aim,
+  not the controller's. Until the objective is done, turn off **Head aim** and **Gun + shots follow controller**
+  (Numpad .) in the settings, and aim with the right stick (it then pitches as well as turns): the shots then go
+  where the game aims and the reticle comes back. Turn both on again afterwards.
 - Pre-rendered movies, menus and loading screens: the switch to a floating screen is new and may not apply to every
   movie yet.
 - Mission markers are shifted along with the HUD instead of staying on their targets.

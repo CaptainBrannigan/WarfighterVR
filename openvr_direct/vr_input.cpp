@@ -101,6 +101,7 @@ const PadAction kPadActions[] = {
     {"DpadRight", "D-pad right", 0x0008, "/user/hand/right/input/b", "button", "double"},
     {"Start", "Start / menu", 0x0010, "/user/hand/left/input/y", "button", "long"},
     {"Back", "Back / view", 0x0020, nullptr, nullptr, nullptr},
+    // Unbound by default: the grip can't take a double press (see BuildTouchBindings).
     {"LB", "Left bumper", 0x0100, nullptr, nullptr, nullptr},
     {"RB", "Right bumper", 0x0200, nullptr, nullptr, nullptr},
 };
@@ -127,8 +128,8 @@ std::string BuildActionManifest()
     { "name": "/actions/main/in/LeftHandAim", "type": "pose" },
     { "name": "/actions/main/in/FireRight", "type": "boolean" },
     { "name": "/actions/main/in/FireLeft", "type": "boolean" },
-    { "name": "/actions/main/in/GripRight", "type": "boolean" },
-    { "name": "/actions/main/in/GripLeft", "type": "boolean" },
+    { "name": "/actions/main/in/GripRight", "type": "vector1" },
+    { "name": "/actions/main/in/GripLeft", "type": "vector1" },
     { "name": "/actions/main/in/Recenter", "type": "boolean" },
     { "name": "/actions/main/in/Move", "type": "vector2" },
     { "name": "/actions/main/in/Turn", "type": "vector2" })";
@@ -149,8 +150,8 @@ std::string BuildActionManifest()
       "/actions/main/in/LeftHandAim": "Left hand aim",
       "/actions/main/in/FireRight": "Fire - right hand",
       "/actions/main/in/FireLeft": "Fire - left hand",
-      "/actions/main/in/GripRight": "Grip - right hand: holsters, two-handed",
-      "/actions/main/in/GripLeft": "Grip - left hand: holsters, two-handed",
+      "/actions/main/in/GripRight": "Grip - right hand (pull): holsters, two-handed, double-tap RB",
+      "/actions/main/in/GripLeft": "Grip - left hand (pull): holsters, two-handed, double-tap LB",
       "/actions/main/in/Recenter": "Recenter view",
       "/actions/main/in/Move": "Move",
       "/actions/main/in/Turn": "Turn")";
@@ -172,15 +173,24 @@ struct DefaultBinding
     std::string path, mode, input, output;
 };
 
+// Holding a button that also has a double press: SteamVR then only reports its click once the double-press window has
+// passed, as a pulse (live 2026-09-29: A/B/X/Y always exactly the 100 ms minimum hold, stick clicks held for seconds),
+// so the game never saw a hold. A long press does stay true while held, and a click is not reported after it (a long
+// Y = Start sent no Y), so such a source also gets its click's action on "long", after this delay: held past it, the
+// button is held for real until release.
+constexpr const char* kHoldLongPressDelay = "0.3";
+
 // The default Touch binding, grouped into one source per path+mode (a button can carry several inputs, e.g. A = click
-// Jump + long press Menu select).
+// A + double press D-pad down).
 std::string BuildTouchBindings()
 {
     std::vector<DefaultBinding> bindings = {
         {"/user/hand/right/input/trigger", "trigger", "click", "/actions/main/in/FireRight"},
         {"/user/hand/left/input/trigger", "trigger", "click", "/actions/main/in/FireLeft"},
-        {"/user/hand/right/input/grip", "button", "click", "/actions/main/in/GripRight"},
-        {"/user/hand/left/input/grip", "button", "click", "/actions/main/in/GripLeft"},
+        // Grips: the analog pull ("trigger" mode "pull", a vector1 action); the press and the double-tap bumpers are
+        // made in UpdateGripGesture, as SteamVR can't bind a double press on the Touch grip (see there).
+        {"/user/hand/right/input/grip", "trigger", "pull", "/actions/main/in/GripRight"},
+        {"/user/hand/left/input/grip", "trigger", "pull", "/actions/main/in/GripLeft"},
         {"/user/hand/left/input/joystick", "joystick", "position", "/actions/main/in/Move"},
         {"/user/hand/right/input/joystick", "joystick", "position", "/actions/main/in/Turn"},
     };
@@ -197,7 +207,8 @@ std::string BuildTouchBindings()
     {
         if (done[i])
             continue;
-        std::string inputs;
+        std::string inputs, clickOutput;
+        bool hasDouble = false, hasLong = false;
         for (size_t j = i; j < bindings.size(); ++j)
             if (!done[j] && bindings[j].path == bindings[i].path && bindings[j].mode == bindings[i].mode)
             {
@@ -205,11 +216,21 @@ std::string BuildTouchBindings()
                 if (!inputs.empty())
                     inputs += ", ";
                 inputs += "\"" + bindings[j].input + "\": { \"output\": \"" + bindings[j].output + "\" }";
+                if (bindings[j].input == "click")
+                    clickOutput = bindings[j].output;
+                hasDouble = hasDouble || bindings[j].input == "double";
+                hasLong = hasLong || bindings[j].input == "long";
             }
+        std::string parameters;
+        if (bindings[i].mode == "button" && hasDouble && !hasLong && !clickOutput.empty())
+        {
+            inputs += ", \"long\": { \"output\": \"" + clickOutput + "\" }"; // see kHoldLongPressDelay
+            parameters = std::string(",\n          \"parameters\": { \"long_press_delay\": \"") + kHoldLongPressDelay + "\" }";
+        }
         if (!sources.empty())
             sources += ",\n";
         sources += "        {\n          \"path\": \"" + bindings[i].path + "\",\n          \"mode\": \"" + bindings[i].mode +
-                   "\",\n          \"inputs\": { " + inputs + " }\n        }";
+                   "\",\n          \"inputs\": { " + inputs + " }" + parameters + "\n        }";
     }
 
     std::string s = R"({
@@ -323,7 +344,8 @@ bool g_haveState = false;
 
 // Lock-free copies of the stick axes for GetVrSticks, which runs inside the game's own axis reads (many per frame).
 std::atomic<bool> g_haveSticks{false};
-std::atomic<float> g_moveX{0.0f}, g_moveY{0.0f}, g_turnX{0.0f};
+std::atomic<float> g_moveX{0.0f}, g_moveY{0.0f}, g_turnX{0.0f}, g_turnY{0.0f};
+std::atomic<unsigned long long> g_lastFireHeldMs{0}; // GetVrLastFireHeldMs
 
 bool WriteTextFile(const std::string& path, const char* text)
 {
@@ -334,6 +356,54 @@ bool WriteTextFile(const std::string& path, const char* text)
     bool ok = fwrite(text, 1, len, f) == len;
     fclose(f);
     return ok;
+}
+
+// GRIPS (2026-09-29): the grip actions are the grip's analog pull (vector1, "trigger" mode "pull"), and the press and
+// the double-tap are made here. SteamVR can't do it: the Touch grip is an analog "trigger"-type input and every
+// button-mode input on it (click with double / held / long) is rejected ("Invalid input type button::double for path
+// /user/hand/.../input/grip" in vrserver.txt), so a grip double press was never bindable.
+// Pressed past kGripOnPull, released under kGripOffPull (hysteresis, so a half-held grip doesn't chatter). A press that
+// starts within kGripDoubleTapMs of a short (under kGripTapMaxMs) press's release is a double-tap: that hand's bumper
+// (left = LB, right = RB) is held for as long as the second press, when GripDoubleTapBumpers is on. The grip itself is
+// reported straight away either way, so a double-tap is also two quick grip presses to the holsters.
+constexpr float kGripOnPull = 0.70f;
+constexpr float kGripOffPull = 0.55f;
+constexpr unsigned long long kGripDoubleTapMs = 300;
+constexpr unsigned long long kGripTapMaxMs = 300;
+
+struct GripGesture
+{
+    bool down = false;
+    bool bumper = false;
+    unsigned long long pressedAtMs = 0;
+    unsigned long long lastTapReleaseMs = 0; // release of the last short press, 0 = none
+};
+GripGesture g_gripGesture[2]; // submit thread only
+
+// Returns whether the grip is down; *bumper = the double-tap bumper is held.
+bool UpdateGripGesture(int hand, float pull, bool* bumper)
+{
+    GripGesture& g = g_gripGesture[hand];
+    unsigned long long now = GetTickCount64();
+    bool down = g.down ? pull > kGripOffPull : pull >= kGripOnPull;
+    if (down && !g.down)
+    {
+        g.pressedAtMs = now;
+        g.bumper = GetGripDoubleTapBumpers() && g.lastTapReleaseMs != 0 && now - g.lastTapReleaseMs <= kGripDoubleTapMs;
+        g.lastTapReleaseMs = 0;
+        if (g.bumper)
+            MOHW_LOG(kLogFile, "grip double-tap (%s hand) -> %s", hand == kLeftHand ? "left" : "right",
+                      hand == kLeftHand ? "LB" : "RB");
+    }
+    else if (!down && g.down)
+    {
+        // Only a short press that wasn't itself a double-tap's second press can start the next double-tap.
+        g.lastTapReleaseMs = (!g.bumper && now - g.pressedAtMs <= kGripTapMaxMs) ? now : 0;
+        g.bumper = false;
+    }
+    g.down = down;
+    *bumper = g.bumper;
+    return down;
 }
 
 bool GetNamedHandle(PFN_GetHandle fn, const char* name, uint64_t* out)
@@ -473,12 +543,16 @@ void UpdateVrInput()
     PoseActionData poses[2]{};
     HandInput hands[2]{};
     const uint64_t poseActions[2] = {g_leftAimAction, g_rightAimAction};
+    bool gripBumper[2] = {false, false}; // a grip double-tap held: LB (left) / RB (right), see UpdateGripGesture
     for (int h = 0; h < 2; ++h)
     {
         hands[h].tracked = ReadHandPose(poseActions[h], &poses[h]);
         memcpy(hands[h].pose, poses[h].pose.deviceToAbsoluteTracking, sizeof(hands[h].pose));
-        DigitalActionData grip{}, fire{};
-        hands[h].grip = g_getDigital(g_input, g_gripAction[h], &grip, sizeof(grip), 0) == 0 && grip.active && grip.state;
+        DigitalActionData fire{};
+        AnalogActionData gripPull{};
+        bool gripReadOk =
+            g_getAnalog(g_input, g_gripAction[h], &gripPull, sizeof(gripPull), 0) == 0 && gripPull.active;
+        hands[h].grip = UpdateGripGesture(h, gripReadOk ? gripPull.x : 0.0f, &gripBumper[h]);
         hands[h].trigger =
             g_getDigital(g_input, g_fireAction[h], &fire, sizeof(fire), 0) == 0 && fire.active && fire.state;
     }
@@ -504,7 +578,9 @@ void UpdateVrInput()
         float origin[3] = {poses[weaponHand].pose.deviceToAbsoluteTracking[0][3],
                            poses[weaponHand].pose.deviceToAbsoluteTracking[1][3],
                            poses[weaponHand].pose.deviceToAbsoluteTracking[2][3]};
-        UpdateSightDot(hands[weaponHand].tracked && haveHead, origin, aimQ, headPos);
+        bool gripOk = !GetDotsOnlyWithGrip() || result.weaponGripped;
+        // No dots with the weapon attachment off: shots follow the game's aim then, not the controller.
+        UpdateSightDot(hands[weaponHand].tracked && haveHead && gripOk && GetWeaponDriveEnabled(), origin, aimQ, headPos);
     }
 
     AnalogActionData move{}, turn{};
@@ -520,7 +596,10 @@ void UpdateVrInput()
         state.moveY = move.y;
     }
     if (turnErr == 0 && turn.active)
+    {
         state.turnX = turn.x;
+        state.turnY = turn.y;
+    }
     {
         std::lock_guard<std::mutex> lock(g_stateMutex);
         g_state = state;
@@ -529,8 +608,11 @@ void UpdateVrInput()
     g_moveX.store(state.moveX, std::memory_order_relaxed);
     g_moveY.store(state.moveY, std::memory_order_relaxed);
     g_turnX.store(state.turnX, std::memory_order_relaxed);
+    g_turnY.store(state.turnY, std::memory_order_relaxed);
     g_haveSticks.store(true, std::memory_order_release);
 
+    if (state.fire)
+        g_lastFireHeldMs.store(GetTickCount64(), std::memory_order_relaxed);
     static bool lastFire = false;
     if (state.fire != lastFire)
         MOHW_LOG(kLogFile, "Fire (%s hand) %s", weaponHand == kLeftHand ? "left" : "right",
@@ -564,6 +646,16 @@ void UpdateVrInput()
                 heldUntil[i] = nowMs + kPadMinHoldMs;
             if (down || nowMs < heldUntil[i])
                 buttons |= kPadActions[i].mask;
+        }
+        // Grip double-taps: LB / RB, with the same minimum hold.
+        constexpr unsigned short kBumperMask[2] = {0x0100, 0x0200}; // [kLeftHand] = LB, [kRightHand] = RB
+        static unsigned long long bumperHeldUntil[2] = {0, 0};
+        for (int h = 0; h < 2; ++h)
+        {
+            if (gripBumper[h] && nowMs >= bumperHeldUntil[h])
+                bumperHeldUntil[h] = nowMs + kPadMinHoldMs;
+            if (gripBumper[h] || nowMs < bumperHeldUntil[h])
+                buttons |= kBumperMask[h];
         }
         bool triggersToPad = !GetFireViaMouse();
         static unsigned lastButtons = 0;
@@ -631,13 +723,19 @@ bool GetVrPadState(unsigned short* buttons, unsigned char* leftTrigger, unsigned
     return true;
 }
 
-bool GetVrSticks(float* moveX, float* moveY, float* turnX)
+unsigned long long GetVrLastFireHeldMs()
+{
+    return g_lastFireHeldMs.load(std::memory_order_relaxed);
+}
+
+bool GetVrSticks(float* moveX, float* moveY, float* turnX, float* turnY)
 {
     if (!g_haveSticks.load(std::memory_order_acquire))
         return false;
     *moveX = g_moveX.load(std::memory_order_relaxed);
     *moveY = g_moveY.load(std::memory_order_relaxed);
     *turnX = g_turnX.load(std::memory_order_relaxed);
+    *turnY = g_turnY.load(std::memory_order_relaxed);
     return true;
 }
 

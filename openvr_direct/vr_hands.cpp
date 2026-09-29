@@ -338,6 +338,7 @@ int g_grabbedBy = -1; // hand that took the weapon from a holster, for HolsterHo
 bool g_twoHanded = false;
 bool g_prevGrip[2] = {false, false};
 bool g_offGripIsTwoHand = false; // the off hand's current grip press is (or may become) a two-handed grip
+bool g_weaponGripToggled = false; // HandsResult::weaponGripped when not HolsterHoldToKeep
 std::atomic<bool> g_weaponHandLeft{false};
 
 } // namespace
@@ -394,7 +395,13 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
                             g_twoHanded = false;
                         g_weaponHand = h;
                         g_grabbedBy = h;
+                        g_weaponGripToggled = true;
                     }
+                }
+                else if (h == g_weaponHand)
+                {
+                    g_weaponGripToggled = !g_weaponGripToggled;
+                    MOHW_LOG(kLogFile, "weapon grip %s (%s hand)", g_weaponGripToggled ? "on" : "off", HandName(h));
                 }
                 else if (h == off)
                 {
@@ -451,6 +458,7 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
     out->twoHanded = g_twoHanded && AimAtOffHand(hands[g_weaponHand], hands[off], &out->weaponOrientation);
     out->fire = hands[g_weaponHand].trigger;
     out->ads = hands[off].trigger;
+    out->weaponGripped = GetHolsterHoldToKeep() ? hands[g_weaponHand].grip : g_weaponGripToggled;
     g_weaponHandLeft.store(g_weaponHand == kLeftHand, std::memory_order_relaxed);
 }
 

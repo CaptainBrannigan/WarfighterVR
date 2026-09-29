@@ -187,6 +187,10 @@ struct ShotSpreadRemover
 inline bool GetControllerAimDirection(const Vec3& nativeDirection, Vec3* outDirection,
                                       ShotSpreadRemover* spreadRemover = nullptr)
 {
+    // The weapon attachment off (WeaponDriveEnabled, "Gun follows controller", Numpad .) hands shots back to the game's
+    // own aim: some objectives (shooting a target that isn't a soldier) only count the AimingController's aim.
+    if (!GetWeaponDriveEnabled())
+        return false;
     mohwvr::ipc::ControllerPoseBlock pose{};
     if (!GetRightControllerPose(&pose))
         return false;
@@ -240,6 +244,8 @@ inline bool GetControllerAimDirection(const Vec3& nativeDirection, Vec3* outDire
 inline bool GetControllerOriginOffset(Vec3* outOffset)
 {
     constexpr float kMaxOffsetMeters = 1.5f;
+    if (!GetWeaponDriveEnabled()) // see GetControllerAimDirection
+        return false;
     mohwvr::ipc::ControllerPoseBlock controller{};
     mohwvr::ipc::HeadPoseBlock head{};
     if (!GetRightControllerPose(&controller) || !GetHeadPose(&head))
