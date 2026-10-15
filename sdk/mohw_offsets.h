@@ -540,11 +540,30 @@
 #define OFFSET_TOSCREENFUNCTION_UNVERIFIED 0xECAAB0u
 #define OFFSET_SNOWROLLER_UNVERIFIED 0x2AEB8E0u
 
+// ADS sway (Frostbite reflection, 2026-09-30). The sway while aiming down sights is scaled per zoom level by
+// ZoomLevelData (a 0x5C-byte data class; its constructor FUN_025FBB70, from the type record's factory FUN_02601A60,
+// installs this vtable, so every instance starts with it). Field offsets from its reflection field records (name,
+// offset in the high word, type): +0x08 FieldOfView, +0x1C SwayPitchMultiplier, +0x20 SwayYawMultiplier, +0x24
+// SupportedSwayPitchMultiplier, +0x28 SupportedSwayYawMultiplier (+0x2C/+0x30 TimePitch/YawMultiplier = sway speed).
+// Tried first and NO effect live: GunSwayData's DeviationScaleFactorZoom (+0x30C, vtable 0x27EBB48) -- GunSwayData is
+// spread cone / recoil / turn lag, not the idle sway.
+#define OFFSET_ZOOMLEVELDATA_VTABLE 0x27E23C8u
+#define ZOOMLEVELDATA_FIELDOFVIEW 0x08u
+#define ZOOMLEVELDATA_SWAYPITCH 0x1Cu
+#define ZOOMLEVELDATA_SWAYYAW 0x20u
+#define ZOOMLEVELDATA_SUPPORTEDSWAYPITCH 0x24u
+#define ZOOMLEVELDATA_SUPPORTEDSWAYYAW 0x28u
+#define ZOOMLEVELDATA_SIZE 0x5Cu
+
 namespace mohw {
 
 inline uintptr_t g_moduleBase = 0;
 inline uintptr_t g_baseDelta = 0; // add to every OFFSET_* value
 inline bool g_buildVerified = false;
+// Running inside game\MOHWD.exe, the driving missions' executable (MOHW.exe swaps to it with -exeSwap, and back with
+// -returnExe): a different build (Oct 2012, image 0x251B000), so none of the offsets here apply. Only the build-
+// independent parts run there -- see proxy_dll/dllmain.cpp. (2026-10-14)
+inline bool g_drivingExe = false;
 
 // Must be called once after MOHW.exe's module is loaded (i.e. from the proxy
 // DLL's DllMain / a Present hook on first call) before any Offset<>() use.

@@ -184,6 +184,21 @@ struct ShotSpreadRemover
 // The difference from the yaw/pitch actually applied this tick (the view) then rotates the native direction. A
 // controller pointed where the view points fires the game's own shot exactly. Slopes, live-confirmed 2026-09-26:
 // world yaw moves opposite to AimingController yaw, world pitch the same way as AimingController pitch.
+// The ControllerAimUp / ControllerAimRight offset applied to a controller orientation, in its own frame (SteamVR: x
+// right, y up, -z forward): up = +angle about local x (turns -z towards +y), right = -angle about local y.
+inline Quat ApplyControllerAimOffset(const Quat& q)
+{
+    float upDeg = 0.0f, rightDeg = 0.0f;
+    GetControllerAimOffsetDeg(&upDeg, &rightDeg);
+    if (upDeg == 0.0f && rightDeg == 0.0f)
+        return q;
+    constexpr float kHalfDegToRad = 3.14159265f / 360.0f;
+    float p = upDeg * kHalfDegToRad, y = -rightDeg * kHalfDegToRad;
+    Quat pitch{sinf(p), 0.0f, 0.0f, cosf(p)};
+    Quat yaw{0.0f, sinf(y), 0.0f, cosf(y)};
+    return QuatMultiply(q, QuatMultiply(yaw, pitch));
+}
+
 inline bool GetControllerAimDirection(const Vec3& nativeDirection, Vec3* outDirection,
                                       ShotSpreadRemover* spreadRemover = nullptr)
 {
@@ -203,7 +218,7 @@ inline bool GetControllerAimDirection(const Vec3& nativeDirection, Vec3* outDire
         return false;
     Vec3 native = VecScale(nativeDirection, 1.0f / sqrtf(nativeLenSq));
 
-    Quat q{pose.orientationX, pose.orientationY, pose.orientationZ, pose.orientationW};
+    Quat q = ApplyControllerAimOffset(Quat{pose.orientationX, pose.orientationY, pose.orientationZ, pose.orientationW});
     float controllerYaw = 0.0f, controllerPitch = 0.0f;
     QuatToYawPitch(q, &controllerYaw, &controllerPitch);
 

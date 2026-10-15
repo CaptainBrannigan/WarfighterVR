@@ -15,9 +15,11 @@
 #include <d3d11.h>
 #include "render_pose_stamp.h"
 #include "draw_trace_diag.h"
+#include "driving_camera_hook.h"
 #include "projection_aspect_hook.h"
 #include "eye_matched_fov.h"
 #include "../openvr_direct/openvr_direct.h"
+#include "../sdk/d3d_util.h"
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -52,7 +54,8 @@ DXGI_FORMAT g_leftCaptureFormat = DXGI_FORMAT_UNKNOWN;
 bool EnsureLeftCaptureTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& backbufferDesc)
 {
     if (g_leftCaptureTexture && g_leftCaptureWidth == backbufferDesc.Width &&
-        g_leftCaptureHeight == backbufferDesc.Height && g_leftCaptureFormat == backbufferDesc.Format)
+        g_leftCaptureHeight == backbufferDesc.Height && g_leftCaptureFormat == backbufferDesc.Format &&
+        TextureOnDevice(g_leftCaptureTexture, device))
         return true;
 
     if (g_leftCaptureTexture)
@@ -101,7 +104,7 @@ bool EnsurePairLeftTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& sou
         D3D11_TEXTURE2D_DESC existing{};
         g_pairLeftTexture->GetDesc(&existing);
         if (existing.Width == sourceDesc.Width && existing.Height == sourceDesc.Height &&
-            existing.Format == sourceDesc.Format)
+            existing.Format == sourceDesc.Format && TextureOnDevice(g_pairLeftTexture, device))
             return true;
         g_pairLeftTexture->Release();
         g_pairLeftTexture = nullptr;
@@ -210,6 +213,30 @@ void PaceToDisplayFrequency()
     lastPresent = now;
 }
 
+// A failed Present / ResizeBuffers, with the device's removed reason (2026-09-30): the game twice shut itself down
+// right after a ResizeBuffers (3840x2160 -> 1280x720) when loading a level, with no crash report -- as if it hit a D3D
+// error. Logged on failure only, so these are the lines to look for next time.
+void LogD3DFailure(IDXGISwapChain* self, const char* what, HRESULT hr)
+{
+    if (SUCCEEDED(hr))
+        return;
+    HRESULT removed = S_OK;
+    ID3D11Device* device = nullptr;
+    self->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device));
+    if (device)
+    {
+        removed = device->GetDeviceRemovedReason();
+        device->Release();
+    }
+    static int lines = 0;
+    if (lines < 20)
+    {
+        ++lines;
+        MOHW_LOG(kLogFile, "%s FAILED: hr=0x%08X, device removed reason=0x%08X", what, static_cast<unsigned>(hr),
+                  static_cast<unsigned>(removed));
+    }
+}
+
 HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT flags)
 {
     PaceToDisplayFrequency();
@@ -264,6 +291,17 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
     self->GetDevice(__uuidof(ID3D11Device), reinterpret_cast<void**>(&device));
     if (device)
     {
+        // A new device / swap chain (the game rebuilt its graphics, e.g. at a level change): everything cached
+        // re-creates itself on the new device (sdk/d3d_util.h TextureOnDevice), logged here to see when it happens.
+        static ID3D11Device* lastDevice = nullptr;
+        static IDXGISwapChain* lastSwapChain = nullptr;
+        if (device != lastDevice || self != lastSwapChain)
+        {
+            MOHW_LOG(kLogFile, "D3D device %p -> %p, swap chain %p -> %p", static_cast<void*>(lastDevice),
+                      static_cast<void*>(device), static_cast<void*>(lastSwapChain), static_cast<void*>(self));
+            lastDevice = device;
+            lastSwapChain = self;
+        }
         ID3D11Texture2D* backbuffer = nullptr;
         self->GetBuffer(0, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&backbuffer));
         if (backbuffer)
@@ -295,6 +333,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
             // texture untouched (nullptr) -- UpdateOpenVrDirect treats a null source that way, which is exactly
             // temporal stereo's "other eye still shows its last frame" semantics.
             bool rightEye = IsRightEyeActive();
+            DrivingStereoOnPresent(rightEye); // driving missions: eye trace (no-op elsewhere)
             // PublishRenderPoseForEye must run BEFORE UpdateOpenVrDirect, not after -- UpdateOpenVrDirect's
             // in-process render-pose-stamp lookup (GetPendingRenderPoseStamp) reads whatever this function last
             // published for the ACTIVE eye; the reverse order fed Submit_TextureWithPose a stale pose every frame.
@@ -351,7 +390,11 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
     // doesn't skip any of that draw-call/shading cost, only the swap-chain flip/blit and whatever DWM compositor
     // work rides on it.
     if (presentedFrameWasLeftEye)
-        return g_originalPresent(self, syncInterval, flags);
+    {
+        HRESULT hr = g_originalPresent(self, syncInterval, flags);
+        LogD3DFailure(self, "Present", hr);
+        return hr;
+    }
     return S_OK;
 }
 
@@ -362,7 +405,10 @@ HRESULT __stdcall Hooked_ResizeBuffers(IDXGISwapChain* self, UINT bufferCount, U
     MOHW_LOG(kLogFile, "ResizeBuffers #%lld self=%p %ux%u format=%d bufferCount=%u", n, static_cast<void*>(self),
               width, height, static_cast<int>(newFormat), bufferCount);
 
-    return g_originalResizeBuffers(self, bufferCount, width, height, newFormat, swapChainFlags);
+    HRESULT hr = g_originalResizeBuffers(self, bufferCount, width, height, newFormat, swapChainFlags);
+    MOHW_LOG(kLogFile, "ResizeBuffers #%lld returned 0x%08X", n, static_cast<unsigned>(hr));
+    LogD3DFailure(self, "ResizeBuffers", hr);
+    return hr;
 }
 
 // Creates a throwaway device+swapchain purely to read the real Present/

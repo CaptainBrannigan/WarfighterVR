@@ -520,10 +520,12 @@ void __fastcall Hooked_UpdateMatrices(float* self, void* edx)
 // rendering rebuilds ~13,000+ camera matrices a second (shadows, reflections, the view...), while during a
 // pre-rendered movie the engine only keeps ~5 camera objects ticking, ~150 rebuilds a second, all of them still
 // matching the world camera -- so "was the world camera updated" can't tell the two apart, but the rate can.
-// Measured over >= withinMs windows (called per draw, render thread).
+// Measured over >= withinMs windows (called per draw, render thread). Threshold 2,500 (was 1,000 until 2026-09-30):
+// a movie with the next level streaming in behind it ran at 1,105/s and counted as 3D, while gameplay that session
+// ran at 4,800-5,600/s.
 bool WorldRenderedRecently(unsigned withinMs)
 {
-    constexpr long long kWorldRebuildsPerSecond = 1000;
+    constexpr long long kWorldRebuildsPerSecond = 2500;
     static unsigned long long windowStartMs = 0;
     static long long windowStartCalls = 0;
     static bool rendering = true;

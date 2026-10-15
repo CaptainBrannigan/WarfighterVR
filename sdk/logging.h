@@ -53,6 +53,14 @@ inline std::string LogFilePath(const char* fileName)
     std::string path(modulePath);
     size_t slash = path.find_last_of("\\/");
     path = (slash == std::string::npos) ? "" : path.substr(0, slash + 1);
+    // The driving missions run in game\MOHWD.exe, with a copy of this DLL next to it (2026-10-14): its logs, settings
+    // and SteamVR binding files go to the main folder, so both executables share them.
+    if (path.size() > 6 && _stricmp(path.c_str() + path.size() - 6, "\\game\\") == 0)
+    {
+        std::string parent = path.substr(0, path.size() - 5);
+        if (GetFileAttributesA((parent + "MOHW.exe").c_str()) != INVALID_FILE_ATTRIBUTES)
+            path = parent;
+    }
     path += fileName;
     return path;
 }
@@ -101,6 +109,15 @@ inline void Log(const char* fileName, const char* fmt, ...)
         // LogPoseTableIfLockedEntity history).
         std::string path = LogFilePath(fileName);
         bool preserveHistory = PreserveHistoryLogFiles().count(fileName) != 0;
+        // The previous session's file is kept as <name>.previous.log (2026-09-30): a crash followed by a relaunch
+        // used to truncate the crashed session's logs before they could be read.
+        if (!preserveHistory)
+        {
+            std::string previous = path;
+            size_t dot = previous.find_last_of('.');
+            previous = (dot == std::string::npos ? previous : previous.substr(0, dot)) + ".previous.log";
+            MoveFileExA(path.c_str(), previous.c_str(), MOVEFILE_REPLACE_EXISTING);
+        }
         HANDLE hFile = CreateFileA(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                                      preserveHistory ? OPEN_ALWAYS : CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hFile == INVALID_HANDLE_VALUE)

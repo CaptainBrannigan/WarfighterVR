@@ -1,9 +1,12 @@
 #include "xinput_hook.h"
 
 #include "../openvr_direct/vr_input.h"
+#include "../openvr_direct/vr_steering.h"
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/logging.h"
 #include "../sdk/settings.h"
+#include "../sdk/mohw_offsets.h"
+#include "driving_camera_hook.h"
 
 #include <windows.h>
 #include <Xinput.h> // types only -- nothing from xinput is linked, the real function is reached through the hook
@@ -56,7 +59,8 @@ DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
         return result;
     // Stick pitch only with head aim off: with it on the head owns pitch (the aiming controller hook also removes pitch
     // input then), so the stick's Y stays 0.
-    if (GetHeadAimEnabled())
+    // (In the driving missions' executable there is no head look at all -- g_drivingExe -- so the stick keeps its Y.)
+    if (GetHeadAimEnabled() && !g_drivingExe)
         turnY = 0.0f;
 
     XINPUT_GAMEPAD& pad = state->Gamepad;
@@ -73,11 +77,29 @@ DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
         pad.sThumbLX = ToThumb(moveX * scale);
         pad.sThumbLY = ToThumb(moveY * scale);
     }
+    // Driving missions: while a hand holds the steering wheel (openvr_direct/vr_steering.h), it steers -- left-stick X,
+    // over the thumbstick's, lifted past the game's deadzone like the head look. Not in the menu (paused): the menu
+    // gets the real stick.
+    float wheel = 0.0f;
+    if (g_drivingExe && !DrivingSimulationPaused() && openvr_direct::GetSteeringWheelStick(&wheel))
+    {
+        float deadzone = GetDrivingStickDeadzone();
+        if (fabsf(wheel) > 0.01f && deadzone > 0.0f && deadzone < 0.9f)
+            wheel = (wheel > 0.0f ? 1.0f : -1.0f) * (deadzone + (1.0f - deadzone) * fabsf(wheel));
+        pad.sThumbLX = ToThumb(wheel);
+    }
     float turn = turnX / fullAt * GetVrTurnSpeed();
     float pitch = turnY / fullAt * GetVrTurnSpeed();
-    if (fabsf(turnX) > kVrStickActiveThreshold || fabsf(turnY) > kVrStickActiveThreshold)
+    bool stickActive = fabsf(turnX) > kVrStickActiveThreshold || fabsf(turnY) > kVrStickActiveThreshold;
+    if (!stickActive)
+        turn = pitch = 0.0f;
+    // Driving missions: the head's yaw as the vehicle camera's stick look, added to the real stick
+    // (hooks/driving_camera_hook.h GetDrivingStickLook).
+    float headLook = 0.0f;
+    bool headLookActive = GetDrivingStickLook(&headLook);
+    if (stickActive || headLookActive)
     {
-        pad.sThumbRX = ToThumb(turn);
+        pad.sThumbRX = ToThumb(turn + headLook);
         pad.sThumbRY = ToThumb(pitch);
     }
 

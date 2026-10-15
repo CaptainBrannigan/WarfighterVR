@@ -33,4 +33,8 @@ void DrawTraceNoteDraw(ID3D11DeviceContext* context, unsigned indexCount);
 // tracing. Returns null until the first frame has produced one. Caller must not Release() it -- owned here.
 ID3D11Texture2D* GetUiSnapshotTexture();
 
+// Whether this frame's final pass into the backbuffer has drawn anything yet (reset at Present). Work done after it
+// belongs to the next frame -- see hooks/driving_camera_hook.cpp's late rebuilds.
+bool FinalPassStartedThisFrame();
+
 } // namespace mohw

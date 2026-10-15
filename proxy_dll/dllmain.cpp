@@ -26,15 +26,19 @@
 #include "../hooks/engine_function_hook.h"
 #include "../hooks/aiming_controller_hook.h"
 #include "../hooks/xinput_hook.h"
+#include "../hooks/weapon_sway_patch.h"
 #include "../hooks/fov_scale_hook.h"
 #include "../hooks/projection_aspect_hook.h"
 #include "../hooks/alternating_eye.h"
 #include "../hooks/bullet_raycast_redirect_hook.h"
 #include "../hooks/fire_candidate_redirect_hook.h"
 #include "../hooks/camera_matrix_test_hook.h"
+#include "../hooks/memory_dump.h"
+#include "../hooks/driving_camera_hook.h"
 #include "../third_party/minhook/include/MinHook.h"
 
 #include <dxgi.h>
+#include <cstring>
 #include <mutex>
 #include <thread>
 
@@ -81,6 +85,31 @@ void EnsureInitialized()
     static std::once_flag once;
     std::call_once(once, [] {
         MOHW_LOG(kLogFile, "proxy dxgi.dll attached to process");
+
+        // DRIVING MISSIONS (2026-10-14): MOHW.exe hands the driving levels to game\MOHWD.exe ("-exeSwap -returnExe
+        // ... -level ..."), a different build where none of the game offsets apply. With a copy of this DLL next to
+        // it, only the build-independent parts run: the SteamVR connection, the whole frame shown as a floating
+        // screen (draw_trace_diag's whole-frame placement -- no world camera rate is measured there, so every frame
+        // counts as 2D), and the controllers as the virtual gamepad. Plus a one-time dump of its decrypted code, to
+        // see how much of the main build's hooks could be ported by signature.
+        char exePath[MAX_PATH] = {};
+        GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+        const char* exeName = strrchr(exePath, '\\');
+        exeName = exeName ? exeName + 1 : exePath;
+        if (_stricmp(exeName, "MOHWD.exe") == 0)
+        {
+            mohw::g_drivingExe = true;
+            MOHW_LOG(kLogFile, "running in the driving missions' executable (%s): theater mode -- no game hooks", exePath);
+            mohw::LoadSettings();
+            if (!mohw::InstallPresentHook())
+                MOHW_LOG(kLogFile, "InstallPresentHook FAILED -- see mohwvr_present.log");
+            if (!mohw::InstallXInputHook())
+                MOHW_LOG(kLogFile, "InstallXInputHook FAILED -- see mohwvr_xinput.log");
+            // Head look on a camera picked in the dashboard (DrivingCamera) -- see hooks/driving_camera_hook.h.
+            if (!mohw::InstallDrivingCameraHook())
+                MOHW_LOG(kLogFile, "InstallDrivingCameraHook FAILED -- see mohwvr_drivingcamera.log");
+            return;
+        }
 
         if (!mohw::ResolveModule())
         {
@@ -154,6 +183,9 @@ void EnsureInitialized()
         if (!mohw::InstallCameraMatrixTestHook())
             MOHW_LOG(kLogFile, "InstallCameraMatrixTestHook FAILED -- see mohwvr_cameramatrix.log");
 
+        // ADS sway: scales the weapons' zoomed sway (GunSwayData) by AdsSwayScale -- see hooks/weapon_sway_patch.h.
+        mohw::StartWeaponSwayPatch();
+
         // Companion-bridge pose/view overrides and openvr_direct's own connection are driven from
         // present_hook.cpp's Present hook instead of here -- they need the game's real D3D11 device and
         // swapchain, which aren't available yet at this point in initialization.
@@ -186,14 +218,26 @@ extern "C" HRESULT WINAPI CreateDXGIFactory2(UINT flags, REFIID riid, void** ppF
     return real ? real(flags, riid, ppFactory) : E_FAIL;
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID /*reserved*/)
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
 {
     switch (reason)
     {
     case DLL_PROCESS_ATTACH:
+    {
         DisableThreadLibraryCalls(hModule);
+        // PINNED (2026-09-30): the game loads dxgi.dll with LoadLibrary and, at some level changes, tears its
+        // graphics device down and FreeLibrary's it -- which unloaded this proxy mid-game (DLL_PROCESS_DETACH right
+        // after a ResizeBuffers to 1280x720) and took the SteamVR connection with it, while the game carried on:
+        // its next LoadLibrary("dxgi.dll") found the real system dxgi.dll, still loaded by RealDxgiModule(). Pinned,
+        // a FreeLibrary can't unload the proxy; the new device is picked up in present_hook.cpp instead.
+        HMODULE pinned = nullptr;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                           reinterpret_cast<LPCSTR>(&DllMain), &pinned);
         break;
+    }
     case DLL_PROCESS_DETACH:
+        // reserved == nullptr: FreeLibrary (shouldn't happen any more, pinned); otherwise the process is exiting.
+        MOHW_LOG(kLogFile, "proxy dxgi.dll detaching: %s", reserved ? "process exit" : "FreeLibrary (unload)");
         mohw::RemovePresentHook();
         mohw::RemoveConstantBufferHook();
         mohw::RemoveEngineFunctionHook();

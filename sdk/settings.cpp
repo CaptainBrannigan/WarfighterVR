@@ -155,12 +155,37 @@ int BodyPartRowCount();
 std::atomic<float> g_hudScale{kDefaultHudScale};
 std::atomic<float> g_menuScreenScale{kDefaultMenuScreenScale};
 // Marker test (2026-09-29): from this draw of the final 2D pass on, the full frame instead of the HUD rectangle; 0 = off.
+std::atomic<float> g_drivingCameraIndex{0.0f};     // hooks/driving_camera_hook.cpp: 0 = auto, 1.. = ranked camera. Session-only
+                                                   // (not saved): a leftover manual pick silently overrode auto (2026-10-14)
+std::atomic<float> g_drivingCameraIndexTo{0.0f};   // end of the manual range (0 = only the "from" view); session-only
+std::atomic<bool> g_drivingHeadLookInvert{false};
+std::atomic<bool> g_drivingHeadLookAuto{true};
+std::atomic<float> g_drivingStickLookRangeDeg{90.0f}; // head yaw at full stick; 0 = render-only yaw
+std::atomic<float> g_drivingStickDeadzone{0.25f};     // the game's stick deadzone, skipped over (head look, steering wheel)
+std::atomic<bool> g_drivingStereo{true};              // per-eye shift + true frustum, full view (not the floating screen)
+std::atomic<bool> g_drivingLateNextEye{false};        // views rebuilt off the render thread get the next frame's eye
+// Steering wheel (openvr_direct/vr_steering.cpp): grips hold a virtual wheel, its turn goes out as left-stick X.
+std::atomic<bool> g_drivingSteeringWheel{true};
+std::atomic<float> g_drivingWheelLockDeg{90.0f};  // wheel turn for full stick deflection
+std::atomic<float> g_drivingWheelForward{0.45f};  // wheel centre from the head at recenter, metres
+std::atomic<float> g_drivingWheelDown{0.35f};
+std::atomic<float> g_drivingWheelRight{0.0f};
+std::atomic<float> g_drivingWheelTiltDeg{25.0f};  // top of the wheel leaning away from the driver
+std::atomic<float> g_drivingWheelRadius{0.18f};   // drawn wheel (openvr_direct/vr_overlay.cpp): rim radius, metres
+std::atomic<float> g_drivingWheelThickness{0.03f}; // rim thickness, metres
+std::atomic<float> g_drivingWheelOpacity{0.6f};   // 0 = not drawn
+std::atomic<bool> g_markersInWorld{true}; // hooks/draw_trace_diag.cpp: markers keep the full frame, found by texture
 std::atomic<float> g_fullFrameFromDraw{0.0f};
+std::atomic<float> g_fullFrameToDraw{0.0f}; // last draw of the full-frame range; 0 = to the end of the pass
+std::atomic<float> g_debugHideDraw{0.0f};   // final-pass draw number not drawn, to see what it is; 0 = off
 std::atomic<float> g_hudOffsetXDeg{kDefaultHudOffsetXDeg};
 std::atomic<float> g_hudOffsetYDeg{kDefaultHudOffsetYDeg};
 std::atomic<float> g_hudIpdScale{kDefaultHudIpdScale};
 std::atomic<float> g_hudDepth{kDefaultHudDepth};
 std::atomic<bool> g_removeShotSpread{kDefaultRemoveShotSpread};
+std::atomic<float> g_controllerAimUpDeg{0.0f};    // sdk/motion_controller_aim.h ApplyControllerAimOffset
+std::atomic<float> g_controllerAimRightDeg{0.0f};
+std::atomic<float> g_adsSwayScale{0.0f};          // hooks/weapon_sway_patch.cpp: 0 = no ADS sway, 1 = the game's own
 std::atomic<bool> g_fireViaMouse{kDefaultFireViaMouse};
 std::atomic<bool> g_leftHanded{kDefaultLeftHanded};
 std::atomic<bool> g_weaponDriveEnabled{kDefaultWeaponDriveEnabled};
@@ -248,12 +273,33 @@ void WriteSettingsFileLocked()
         fprintf(f, "HideBodyPart%d=%d\n", i + 1, g_hideBodyPart[i].load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HudScale=%.4f\n", g_hudScale.load(std::memory_order_relaxed));
     fprintf(f, "MenuScreenScale=%.4f\n", g_menuScreenScale.load(std::memory_order_relaxed));
+    fprintf(f, "MarkersInWorld=%d\n", g_markersInWorld.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "DrivingHeadLookInvert=%d\n", g_drivingHeadLookInvert.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "DrivingHeadLookAuto=%d\n", g_drivingHeadLookAuto.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "DrivingStickLookRange=%.0f\n", g_drivingStickLookRangeDeg.load(std::memory_order_relaxed));
+    fprintf(f, "DrivingStickDeadzone=%.2f\n", g_drivingStickDeadzone.load(std::memory_order_relaxed));
+    fprintf(f, "DrivingStereo=%d\n", g_drivingStereo.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "DrivingGameThreadNextEye=%d\n", g_drivingLateNextEye.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "DrivingSteeringWheel=%d\n", g_drivingSteeringWheel.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "DrivingWheelLock=%.0f\n", g_drivingWheelLockDeg.load(std::memory_order_relaxed));
+    fprintf(f, "DrivingWheelForward=%.2f\n", g_drivingWheelForward.load(std::memory_order_relaxed));
+    fprintf(f, "DrivingWheelDown=%.2f\n", g_drivingWheelDown.load(std::memory_order_relaxed));
+    fprintf(f, "DrivingWheelRight=%.2f\n", g_drivingWheelRight.load(std::memory_order_relaxed));
+    fprintf(f, "DrivingWheelTilt=%.0f\n", g_drivingWheelTiltDeg.load(std::memory_order_relaxed));
+    fprintf(f, "DrivingWheelRadius=%.2f\n", g_drivingWheelRadius.load(std::memory_order_relaxed));
+    fprintf(f, "DrivingWheelThickness=%.3f\n", g_drivingWheelThickness.load(std::memory_order_relaxed));
+    fprintf(f, "DrivingWheelOpacity=%.2f\n", g_drivingWheelOpacity.load(std::memory_order_relaxed));
     fprintf(f, "FullFrameFromDraw=%.0f\n", g_fullFrameFromDraw.load(std::memory_order_relaxed));
+    fprintf(f, "FullFrameToDraw=%.0f\n", g_fullFrameToDraw.load(std::memory_order_relaxed));
+    fprintf(f, "DebugHideDraw=%.0f\n", g_debugHideDraw.load(std::memory_order_relaxed));
     fprintf(f, "HudIpdScale=%.4f\n", g_hudIpdScale.load(std::memory_order_relaxed));
     fprintf(f, "HudDepth=%.4f\n", g_hudDepth.load(std::memory_order_relaxed));
     fprintf(f, "HudOffsetX=%.4f\n", g_hudOffsetXDeg.load(std::memory_order_relaxed));
     fprintf(f, "HudOffsetY=%.4f\n", g_hudOffsetYDeg.load(std::memory_order_relaxed));
     fprintf(f, "RemoveShotSpread=%d\n", g_removeShotSpread.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ControllerAimUp=%.2f\n", g_controllerAimUpDeg.load(std::memory_order_relaxed));
+    fprintf(f, "ControllerAimRight=%.2f\n", g_controllerAimRightDeg.load(std::memory_order_relaxed));
+    fprintf(f, "AdsSwayScale=%.2f\n", g_adsSwayScale.load(std::memory_order_relaxed));
     fprintf(f, "FireViaMouse=%d\n", g_fireViaMouse.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "LeftHanded=%d\n", g_leftHanded.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "WeaponDriveEnabled=%d\n", g_weaponDriveEnabled.load(std::memory_order_relaxed) ? 1 : 0);
@@ -429,8 +475,44 @@ void LoadSettings()
             g_hudScale.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "MenuScreenScale", &value))
             g_menuScreenScale.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "DrivingHeadLookInvert", &boolValue))
+            g_drivingHeadLookInvert.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "DrivingHeadLookAuto", &boolValue))
+            g_drivingHeadLookAuto.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingStickLookRange", &value))
+            g_drivingStickLookRangeDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingStickDeadzone", &value))
+            g_drivingStickDeadzone.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "DrivingStereo", &boolValue))
+            g_drivingStereo.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "DrivingGameThreadNextEye", &boolValue))
+            g_drivingLateNextEye.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "DrivingSteeringWheel", &boolValue))
+            g_drivingSteeringWheel.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingWheelLock", &value))
+            g_drivingWheelLockDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingWheelForward", &value))
+            g_drivingWheelForward.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingWheelDown", &value))
+            g_drivingWheelDown.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingWheelRight", &value))
+            g_drivingWheelRight.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingWheelTilt", &value))
+            g_drivingWheelTiltDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingWheelRadius", &value))
+            g_drivingWheelRadius.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingWheelThickness", &value))
+            g_drivingWheelThickness.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DrivingWheelOpacity", &value))
+            g_drivingWheelOpacity.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "MarkersInWorld", &boolValue))
+            g_markersInWorld.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "FullFrameFromDraw", &value))
             g_fullFrameFromDraw.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "FullFrameToDraw", &value))
+            g_fullFrameToDraw.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "DebugHideDraw", &value))
+            g_debugHideDraw.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HudOffsetX", &value))
             g_hudOffsetXDeg.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HudOffsetY", &value))
@@ -441,6 +523,12 @@ void LoadSettings()
             g_hudDepth.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "RemoveShotSpread", &boolValue))
             g_removeShotSpread.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ControllerAimUp", &value))
+            g_controllerAimUpDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ControllerAimRight", &value))
+            g_controllerAimRightDeg.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "AdsSwayScale", &value))
+            g_adsSwayScale.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "FireViaMouse", &boolValue))
             g_fireViaMouse.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "LeftHanded", &boolValue))
@@ -842,9 +930,89 @@ float GetMenuScreenScale()
     return g_menuScreenScale.load(std::memory_order_relaxed);
 }
 
+int GetDrivingCameraIndex()
+{
+    return static_cast<int>(g_drivingCameraIndex.load(std::memory_order_relaxed) + 0.5f);
+}
+
+int GetDrivingCameraIndexTo()
+{
+    return static_cast<int>(g_drivingCameraIndexTo.load(std::memory_order_relaxed) + 0.5f);
+}
+
+bool GetDrivingHeadLookInvert()
+{
+    return g_drivingHeadLookInvert.load(std::memory_order_relaxed);
+}
+
+bool GetDrivingHeadLookAuto()
+{
+    return g_drivingHeadLookAuto.load(std::memory_order_relaxed);
+}
+
+float GetDrivingStickLookRangeDeg()
+{
+    return g_drivingStickLookRangeDeg.load(std::memory_order_relaxed);
+}
+
+float GetDrivingStickDeadzone()
+{
+    return g_drivingStickDeadzone.load(std::memory_order_relaxed);
+}
+
+bool GetDrivingStereo()
+{
+    return g_drivingStereo.load(std::memory_order_relaxed);
+}
+
+bool GetDrivingLateNextEye()
+{
+    return g_drivingLateNextEye.load(std::memory_order_relaxed);
+}
+
+bool GetDrivingSteeringWheel()
+{
+    return g_drivingSteeringWheel.load(std::memory_order_relaxed);
+}
+
+float GetDrivingWheelLockDeg()
+{
+    return g_drivingWheelLockDeg.load(std::memory_order_relaxed);
+}
+
+void GetDrivingWheelPlacement(float* forward, float* down, float* right, float* tiltDeg)
+{
+    *forward = g_drivingWheelForward.load(std::memory_order_relaxed);
+    *down = g_drivingWheelDown.load(std::memory_order_relaxed);
+    *right = g_drivingWheelRight.load(std::memory_order_relaxed);
+    *tiltDeg = g_drivingWheelTiltDeg.load(std::memory_order_relaxed);
+}
+
+void GetDrivingWheelLook(float* radius, float* thickness, float* opacity)
+{
+    *radius = g_drivingWheelRadius.load(std::memory_order_relaxed);
+    *thickness = g_drivingWheelThickness.load(std::memory_order_relaxed);
+    *opacity = g_drivingWheelOpacity.load(std::memory_order_relaxed);
+}
+
+bool GetMarkersInWorld()
+{
+    return g_markersInWorld.load(std::memory_order_relaxed);
+}
+
 int GetFullFrameFromDraw()
 {
     return static_cast<int>(g_fullFrameFromDraw.load(std::memory_order_relaxed) + 0.5f);
+}
+
+int GetFullFrameToDraw()
+{
+    return static_cast<int>(g_fullFrameToDraw.load(std::memory_order_relaxed) + 0.5f);
+}
+
+int GetDebugHideDraw()
+{
+    return static_cast<int>(g_debugHideDraw.load(std::memory_order_relaxed) + 0.5f);
 }
 
 
@@ -928,6 +1096,17 @@ bool GetSightDotEnabled()
 bool GetDotsOnlyWithGrip()
 {
     return g_dotsOnlyWithGrip.load(std::memory_order_relaxed);
+}
+
+void GetControllerAimOffsetDeg(float* up, float* right)
+{
+    *up = g_controllerAimUpDeg.load(std::memory_order_relaxed);
+    *right = g_controllerAimRightDeg.load(std::memory_order_relaxed);
+}
+
+float GetAdsSwayScale()
+{
+    return g_adsSwayScale.load(std::memory_order_relaxed);
 }
 
 bool GetGripDoubleTapBumpers()
@@ -1031,6 +1210,9 @@ const MenuEntry kMenu[] = {
     {"Controls", "Two-hand grab radius", nullptr, &g_twoHandGrabRadius, 0.05f, 0.5f, 0.01f, 2, "m"},
     {"Controls", "Two-hand reach", nullptr, &g_twoHandReach, 0.2f, 1.5f, 0.05f, 2, "m"},
     {"Controls", "Remove shot spread", &g_removeShotSpread, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Controller aim offset up", nullptr, &g_controllerAimUpDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
+    {"Controls", "Controller aim offset right", nullptr, &g_controllerAimRightDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
+    {"Controls", "ADS sway (0 = none, 1 = game's)", nullptr, &g_adsSwayScale, 0.0f, 1.0f, 0.05f, 2, "x"},
     {"Controls", "Fire / ADS as mouse (off = RT / LT)", &g_fireViaMouse, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "Grip double-tap = LB / RB", &g_gripDoubleTapBumpers, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Left-handed", &g_leftHanded, nullptr, 0, 0, 0, 0, ""},
@@ -1076,9 +1258,29 @@ const MenuEntry kMenu[] = {
     {"Weapon", "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {"Weapon", "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {"Weapon", "Grip roll", nullptr, &g_weaponGripRollDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"Driving", "Head look", &g_drivingHeadLookAuto, nullptr, 0, 0, 0, 0, ""},
+    {"Driving", "Invert head look", &g_drivingHeadLookInvert, nullptr, 0, 0, 0, 0, ""},
+    {"Driving", "Stereo (full view)", &g_drivingStereo, nullptr, 0, 0, 0, 0, ""},
+    {"Driving", "Stereo uses next eye (swap)", &g_drivingLateNextEye, nullptr, 0, 0, 0, 0, ""},
+    {"Driving", "Stick look range (0 = render yaw)", nullptr, &g_drivingStickLookRangeDeg, 0.0f, 180.0f, 5.0f, 0, "deg"},
+    {"Driving", "Stick deadzone compensation", nullptr, &g_drivingStickDeadzone, 0.0f, 0.5f, 0.01f, 2, ""},
+    {"Driving", "Steering wheel (hold grip)", &g_drivingSteeringWheel, nullptr, 0, 0, 0, 0, ""},
+    {"Driving", "Wheel turn for full lock", nullptr, &g_drivingWheelLockDeg, 20.0f, 540.0f, 5.0f, 0, "deg"},
+    {"Driving", "Wheel distance forward", nullptr, &g_drivingWheelForward, 0.1f, 1.0f, 0.01f, 2, "m"},
+    {"Driving", "Wheel below eyes", nullptr, &g_drivingWheelDown, 0.0f, 1.0f, 0.01f, 2, "m"},
+    {"Driving", "Wheel offset right", nullptr, &g_drivingWheelRight, -0.5f, 0.5f, 0.01f, 2, "m"},
+    {"Driving", "Wheel tilt (top away)", nullptr, &g_drivingWheelTiltDeg, 0.0f, 80.0f, 5.0f, 0, "deg"},
+    {"Driving", "Wheel radius (drawn)", nullptr, &g_drivingWheelRadius, 0.08f, 0.4f, 0.01f, 2, "m"},
+    {"Driving", "Wheel thickness (drawn)", nullptr, &g_drivingWheelThickness, 0.005f, 0.1f, 0.005f, 3, "m"},
+    {"Driving", "Wheel opacity (0 = hidden)", nullptr, &g_drivingWheelOpacity, 0.0f, 1.0f, 0.05f, 2, ""},
+    {"Driving", "Debug: manual views from # (0 = auto)", nullptr, &g_drivingCameraIndex, 0.0f, 64.0f, 1.0f, 0, ""},
+    {"Driving", "Debug: manual views to # (0 = only from)", nullptr, &g_drivingCameraIndexTo, 0.0f, 64.0f, 1.0f, 0, ""},
     {"HUD", "HUD placement", &g_hudPlacementEnabled, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "Menu / movie screen size", nullptr, &g_menuScreenScale, 0.3f, 1.2f, 0.01f, 2, "x"},
-    {"HUD", "Markers test: full frame from draw # (0 off)", nullptr, &g_fullFrameFromDraw, 0.0f, 64.0f, 1.0f, 0, ""},
+    {"HUD", "Markers stay in the world (auto)", &g_markersInWorld, nullptr, 0, 0, 0, 0, ""},
+    {"HUD", "Manual markers: full frame from draw # (auto off)", nullptr, &g_fullFrameFromDraw, 0.0f, 128.0f, 1.0f, 0, ""},
+    {"HUD", "Manual markers: full frame to draw # (0 = end)", nullptr, &g_fullFrameToDraw, 0.0f, 128.0f, 1.0f, 0, ""},
+    {"HUD", "Debug: hide draw # (0 off)", nullptr, &g_debugHideDraw, 0.0f, 128.0f, 1.0f, 0, ""},
     {"HUD", "Hide reticle (may clip pause-menu items)", &g_hideReticle, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "HUD scale", nullptr, &g_hudScale, 0.3f, 1.2f, 0.01f, 2, "x"},
     {"HUD", "HUD depth", nullptr, &g_hudDepth, 0.1f, 10.0f, 0.1f, 1, "m"},

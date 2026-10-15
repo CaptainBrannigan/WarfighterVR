@@ -3,9 +3,11 @@
 #include "openvr_types.h"
 #include "vr_hands.h"
 #include "vr_overlay.h"
+#include "vr_steering.h"
 #include "../hooks/aiming_controller_hook.h"
 #include "../hooks/companion_bridge.h"
 #include "../sdk/logging.h"
+#include "../sdk/mohw_offsets.h"
 #include "../sdk/settings.h"
 
 #include <windows.h>
@@ -562,7 +564,19 @@ void UpdateVrInput()
     float headPos[3] = {head.positionX, head.positionY, head.positionZ};
     Quat headQ{head.orientationX, head.orientationY, head.orientationZ, head.orientationW};
     HandsResult result{};
-    UpdateHands(hands, haveHead, headPos, headQ, &result);
+    if (g_drivingExe)
+    {
+        // Driving missions: no weapon in hand -- no holsters (a grip near a hip would send a weapon key) and no
+        // two-handed aim. The grips hold the steering wheel; the triggers stay RT (weapon hand) and LT (other hand).
+        result.weaponHand = GetLeftHanded() ? kLeftHand : kRightHand;
+        result.fire = hands[result.weaponHand].trigger;
+        result.ads = hands[1 - result.weaponHand].trigger;
+        UpdateSteering(hands, haveHead, headPos, headQ);
+    }
+    else
+    {
+        UpdateHands(hands, haveHead, headPos, headQ, &result);
+    }
 
     // The weapon hand's pose goes in the "right controller" (aim) slot everything downstream reads -- the shot
     // direction and origin, the gun on the controller -- and the other hand in the left slot.
@@ -580,7 +594,8 @@ void UpdateVrInput()
                            poses[weaponHand].pose.deviceToAbsoluteTracking[2][3]};
         bool gripOk = !GetDotsOnlyWithGrip() || result.weaponGripped;
         // No dots with the weapon attachment off: shots follow the game's aim then, not the controller.
-        UpdateSightDot(hands[weaponHand].tracked && haveHead && gripOk && GetWeaponDriveEnabled(), origin, aimQ, headPos);
+        UpdateSightDot(hands[weaponHand].tracked && haveHead && gripOk && GetWeaponDriveEnabled() && !g_drivingExe, origin,
+                       aimQ, headPos);
     }
 
     AnalogActionData move{}, turn{};

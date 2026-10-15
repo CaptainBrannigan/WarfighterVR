@@ -475,6 +475,7 @@ void* g_hookAddress = nullptr;
 // their timestamps can be directly compared. Remove once this has answered
 // the question.
 std::atomic<long long> g_updateCalls{0};
+std::atomic<unsigned long long> g_lastUpdateMs{0}; // GetLastAimingUpdateMs
 
 struct ThisCallTrampoline
 {
@@ -506,6 +507,7 @@ struct ThisCallTrampoline
         if (haveBefore)
             LogYawChangeInsideUpdate(self, storedBefore, yawBefore, args.dwords, deviceAxesBefore);
 
+        g_lastUpdateMs.store(GetTickCount64(), std::memory_order_relaxed);
         long long n = ++g_updateCalls;
         if (n == 1 || n % 300 == 0)
             MOHW_LOG(kLogFile, "AimingControllerUpdate #%lld", n);
@@ -689,9 +691,17 @@ bool GetLastAppliedYawPitch(float* outYaw, float* outPitch)
     return true;
 }
 
+std::atomic<unsigned> g_recenterGeneration{0}; // GetRecenterGeneration
+
+unsigned GetRecenterGeneration()
+{
+    return g_recenterGeneration.load(std::memory_order_relaxed);
+}
+
 void RequestRecenter(const char* source)
 {
     g_recenterRequested.store(true, std::memory_order_relaxed);
+    g_recenterGeneration.fetch_add(1, std::memory_order_relaxed);
     MOHW_LOG(kLogFile, "%s -- head-aim will recenter on the next applicable frame", source ? source : "recenter");
 }
 
@@ -714,6 +724,11 @@ bool GetHeadAimMapping(float* zeroHeadYaw, float* zeroHeadPitch, float* baseline
     *baselineYaw = g_baselineYaw.load(std::memory_order_relaxed);
     *baselinePitch = g_baselinePitch.load(std::memory_order_relaxed);
     return true;
+}
+
+unsigned long long GetLastAimingUpdateMs()
+{
+    return g_lastUpdateMs.load(std::memory_order_relaxed);
 }
 
 float GetHeadYawOffset()

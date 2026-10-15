@@ -9,6 +9,7 @@
 #include <cstring>
 #include <vector>
 #include <string>
+#include <thread>
 
 namespace mohw {
 namespace {
@@ -43,7 +44,7 @@ bool SehSafeCopy(void* dst, const void* src, size_t size)
 // every address line up directly with live-captured addresses, with no
 // remapping needed). Wrapped in SEH per-region so a single bad page can't
 // crash the whole dump (or the game).
-bool DumpLiveModule()
+bool DumpLiveModule(const char* fileName = "mohwvr_memdump.bin")
 {
     HMODULE hExe = GetModuleHandleA(nullptr);
     if (!hExe)
@@ -117,7 +118,7 @@ bool DumpLiveModule()
         offset = regionEnd;
     }
 
-    std::string path = LogFilePath("mohwvr_memdump.bin");
+    std::string path = LogFilePath(fileName);
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "wb") != 0 || !f)
     {
@@ -241,6 +242,22 @@ void CheckMemoryDumpHotkey()
 
     MOHW_LOG(kLogFile, "F9 pressed -- starting one-shot live memory dump");
     DumpLiveModule();
+}
+
+} // namespace mohw
+
+namespace mohw {
+
+void StartDelayedModuleDump(const char* fileName, unsigned delayMs)
+{
+    std::thread([fileName, delayMs] {
+        Sleep(delayMs);
+        bool expected = false;
+        if (!g_alreadyDumped.compare_exchange_strong(expected, true))
+            return;
+        MOHW_LOG(kLogFile, "delayed one-shot live memory dump -> %s", fileName);
+        DumpLiveModule(fileName);
+    }).detach();
 }
 
 } // namespace mohw

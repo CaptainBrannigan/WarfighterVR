@@ -95,6 +95,8 @@
     <ClCompile Include="..\hooks\engine_function_hook.cpp" />
     <ClCompile Include="..\hooks\aiming_controller_hook.cpp" />
     <ClCompile Include="..\hooks\xinput_hook.cpp" />
+    <ClCompile Include="..\hooks\weapon_sway_patch.cpp" />
+    <ClCompile Include="..\hooks\driving_camera_hook.cpp" />
     <ClCompile Include="..\hooks\fov_scale_hook.cpp" />
     <ClCompile Include="..\hooks\eye_matched_fov.cpp" />
     <ClCompile Include="..\hooks\projection_aspect_hook.cpp" />
@@ -105,6 +107,7 @@
     <ClCompile Include="..\openvr_direct\vr_input.cpp" />
     <ClCompile Include="..\openvr_direct\vr_overlay.cpp" />
     <ClCompile Include="..\openvr_direct\vr_hands.cpp" />
+    <ClCompile Include="..\openvr_direct\vr_steering.cpp" />
     <ClCompile Include="..\hooks\alternating_eye.cpp" />
     <ClCompile Include="..\hooks\bullet_raycast_redirect_hook.cpp" />
     <ClCompile Include="..\hooks\fire_candidate_redirect_hook.cpp" />
@@ -136,6 +139,8 @@
     <ClInclude Include="..\hooks\engine_function_hook.h" />
     <ClInclude Include="..\hooks\aiming_controller_hook.h" />
     <ClInclude Include="..\hooks\xinput_hook.h" />
+    <ClInclude Include="..\hooks\weapon_sway_patch.h" />
+    <ClInclude Include="..\hooks\driving_camera_hook.h" />
     <ClInclude Include="..\hooks\fov_scale_hook.h" />
     <ClInclude Include="..\hooks\eye_matched_fov.h" />
     <ClInclude Include="..\hooks\projection_aspect_hook.h" />
@@ -147,6 +152,7 @@
     <ClInclude Include="..\openvr_direct\vr_input.h" />
     <ClInclude Include="..\openvr_direct\vr_overlay.h" />
     <ClInclude Include="..\openvr_direct\vr_hands.h" />
+    <ClInclude Include="..\openvr_direct\vr_steering.h" />
     <ClInclude Include="..\hooks\alternating_eye.h" />
     <ClInclude Include="..\hooks\bullet_raycast_redirect_hook.h" />
     <ClInclude Include="..\hooks\fire_candidate_redirect_hook.h" />

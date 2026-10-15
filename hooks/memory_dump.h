@@ -37,4 +37,9 @@ void CheckMemoryDumpHotkey();
 // the first successful trigger.
 void CheckModuleRegistryDumpHotkey();
 
+// One-shot dump of the running executable's decrypted image to fileName (next to the logs), delayMs after the call,
+// on its own thread. Used for game\MOHWD.exe (the driving missions' executable, encrypted on disk) to compare its code
+// against the main build's (2026-10-14).
+void StartDelayedModuleDump(const char* fileName, unsigned delayMs);
+
 } // namespace mohw

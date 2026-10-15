@@ -89,11 +89,19 @@ bool GetHeadAimMapping(float* zeroHeadYaw, float* zeroHeadPitch, float* baseline
 // The head-driven yaw (radians, AimingController space) added on top of the game's own yaw at the latest tick,
 // i.e. sign * sensitivity * (headYaw - zeroHeadYaw). 0 until head-aim has applied at least once.
 float GetHeadYawOffset();
+
+// GetTickCount64() at the last AimingController::Update (the ~30 Hz simulation tick), 0 if none yet. The update
+// belongs to the simulation, so it should stop while the game is paused (the in-game menu) although the world keeps
+// rendering -- hooks/draw_trace_diag.cpp's IsSimulationPaused uses that to tell the menu from gameplay.
+unsigned long long GetLastAimingUpdateMs();
 // HMD position (XR local space, meters) captured at the last recenter -- the origin head-position tracking measures from.
 bool GetHeadAimPositionOrigin(float out[3]);
 
 // Same as F3: re-anchors "straight ahead" (yaw and head-position origin) to where the headset is now, on the next
 // head-aim tick. Safe from any thread; used by the SteamVR Recenter action and the dashboard's Recenter button.
 void RequestRecenter(const char* source);
+// Bumped by every RequestRecenter, for consumers that keep their own reference (the driving missions' camera head
+// look, hooks/driving_camera_hook.cpp -- the aiming controller hook doesn't run there).
+unsigned GetRecenterGeneration();
 
 } // namespace mohw

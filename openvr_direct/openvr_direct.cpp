@@ -9,6 +9,7 @@
 #include "../hooks/companion_bridge.h"
 #include "../hooks/render_pose_stamp.h"
 #include "../shared/ipc_protocol.h"
+#include "../sdk/d3d_util.h"
 
 #include <windows.h>
 #include <d3d11.h>
@@ -225,7 +226,8 @@ bool EnsurePersistentEyeTexture(ID3D11Device* device, ID3D11Texture2D*& tex, UIN
                                   std::atomic<HANDLE>& outSharedHandle, std::atomic<int>& outGeneration,
                                   IDXGIKeyedMutex*& outKeyedMutex)
 {
-    if (tex && cachedWidth == sourceDesc.Width && cachedHeight == sourceDesc.Height && cachedFormat == sourceDesc.Format)
+    if (tex && cachedWidth == sourceDesc.Width && cachedHeight == sourceDesc.Height && cachedFormat == sourceDesc.Format &&
+        TextureOnDevice(tex, device)) // a new game device (level change) needs new shared textures too
         return true;
 
     if (tex)
@@ -297,12 +299,10 @@ bool EnsurePersistentEyeTexture(ID3D11Device* device, ID3D11Texture2D*& tex, UIN
 
 void ConnectThreadProc()
 {
+    // The main game folder, where the SteamVR-current copy was placed -- also from the driving missions'
+    // game\MOHWD.exe (LogFilePath resolves its game\ folder to the main one), so one copy serves both.
     char path[MAX_PATH] = {};
-    DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
-    while (n > 0 && path[n - 1] != '\\')
-        --n;
-    path[n] = 0;
-    strcat_s(path, "openvr_api.dll"); // the game's own directory -- where the SteamVR-current copy was placed
+    strcpy_s(path, LogFilePath("openvr_api.dll").c_str());
 
     MOHW_LOG(kLogFile, "loading %s ...", path);
     HMODULE h = LoadLibraryA(path);

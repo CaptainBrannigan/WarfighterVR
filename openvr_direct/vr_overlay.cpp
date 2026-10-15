@@ -156,7 +156,7 @@ int ColumnForGroup(const char* group)
     auto is = [group](const char* name) { return strncmp(group, name, strlen(name)) == 0; };
     if (is("Head") || is("View") || is("Legacy"))
         return 0;
-    if (is("Weapon") || is("Holster"))
+    if (is("Weapon") || is("Holster") || is("Driving"))
         return 2;
     return 1; // Controls, Hands, HUD
 }
@@ -488,6 +488,15 @@ struct DotPlacement
     float pos[3] = {};
     float width = 0.0f;
 };
+// The driving missions' steering wheel (2026-10-15, UpdateWheelOverlay): placed by the same thread.
+struct WheelPlacement
+{
+    bool visible = false;
+    float m[12] = {};       // overlay transform, tracking space
+    float radius = 0.0f;    // metres, the rim's middle
+    float thickness = 0.0f; // metres
+    float opacity = 0.0f;
+};
 struct SightState
 {
     DotPlacement dots[kDotCount];
@@ -495,8 +504,49 @@ struct SightState
 };
 std::mutex g_sightMutex;
 SightState g_sightState; // guarded by g_sightMutex
+WheelPlacement g_wheelState; // guarded by g_sightMutex
 HANDLE g_sightEvent = nullptr;
 uint64_t g_dotHandles[kDotCount] = {0, 0}; // written once before g_sightReady
+uint64_t g_wheelHandle = 0;                // written once before g_sightReady; 0 if it couldn't be created
+
+// The wheel's texture: the rim (light grey) with the up marker (orange) at its top -- a stretch of rim plus a tab
+// reaching inwards, so the wheel's turn reads at a glance. Sized to the rim's outer edge; the overlay's width is
+// 2 * (radius + thickness / 2). Opacity is baked in (it changes only from the settings menu).
+void UploadWheelTexture(uint64_t handle, float radius, float thickness, float opacity)
+{
+    constexpr int kSize = 512;
+    constexpr float kMarkerHalfDeg = 10.0f;
+    float extent = radius + thickness * 0.5f; // metres from the centre to the texture's edge
+    float pixel = 2.0f * extent / kSize;      // metres per texel, for antialiased edges
+    float markerInner = radius - thickness * 1.6f;
+    auto coverage = [pixel](float insideBy) { // insideBy = metres inside an edge (negative = outside)
+        float c = insideBy / pixel + 0.5f;
+        return c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c);
+    };
+    std::vector<uint8_t> rgba(kSize * kSize * 4);
+    for (int y = 0; y < kSize; ++y)
+        for (int x = 0; x < kSize; ++x)
+        {
+            float u = ((x + 0.5f) / kSize * 2.0f - 1.0f) * extent;  // metres, + right
+            float v = (1.0f - (y + 0.5f) / kSize * 2.0f) * extent;  // metres, + up (texture row 0 is the top)
+            float r = sqrtf(u * u + v * v);
+            float rim = coverage(thickness * 0.5f - fabsf(r - radius));
+            float fromTopDeg = fabsf(atan2f(u, v)) * 57.2958f;
+            float arcInside = r * (kMarkerHalfDeg - fromTopDeg) / 57.2958f; // metres along the rim inside the marker
+            float marker = coverage(arcInside) * coverage(radius + thickness * 0.5f - r) * coverage(r - markerInner);
+            float a = rim > marker ? rim : marker;
+            uint8_t* p = &rgba[(y * kSize + x) * 4];
+            float t = a > 0.0f ? marker / a : 0.0f; // share of marker colour
+            p[0] = static_cast<uint8_t>(220.0f + (255.0f - 220.0f) * t);
+            p[1] = static_cast<uint8_t>(220.0f + (140.0f - 220.0f) * t);
+            p[2] = static_cast<uint8_t>(220.0f + (0.0f - 220.0f) * t);
+            p[3] = static_cast<uint8_t>(a * opacity * 255.0f);
+        }
+    std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+    int err = g_setRaw(g_overlay, handle, rgba.data(), kSize, kSize, 4);
+    MOHW_LOG(kLogFile, "wheel texture (radius %.3f m, thickness %.3f m, opacity %.2f) err=%d", radius, thickness, opacity,
+              err);
+}
 
 void UploadDotTexture(uint64_t handle, uint8_t red, uint8_t green, uint8_t blue)
 {
@@ -565,9 +615,43 @@ void SightThreadProc()
         UploadDotColour(d, green[d]);
 
     bool shown[kDotCount] = {false, false};
+    bool wheelShown = false;
+    float wheelLook[3] = {-1.0f, -1.0f, -1.0f}; // radius, thickness, opacity of the uploaded texture
     for (;;)
     {
         WaitForSingleObject(g_sightEvent, 200);
+        WheelPlacement wheel;
+        {
+            std::lock_guard<std::mutex> lock(g_sightMutex);
+            wheel = g_wheelState;
+        }
+        if (g_wheelHandle != 0)
+        {
+            if (wheel.visible)
+            {
+                if (wheel.radius != wheelLook[0] || wheel.thickness != wheelLook[1] || wheel.opacity != wheelLook[2])
+                {
+                    UploadWheelTexture(g_wheelHandle, wheel.radius, wheel.thickness, wheel.opacity);
+                    wheelLook[0] = wheel.radius;
+                    wheelLook[1] = wheel.thickness;
+                    wheelLook[2] = wheel.opacity;
+                }
+                std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+                g_setWidth(g_overlay, g_wheelHandle, 2.0f * (wheel.radius + wheel.thickness * 0.5f));
+                g_setTransform(g_overlay, g_wheelHandle, g_trackingUniverse, wheel.m);
+                if (!wheelShown)
+                {
+                    g_show(g_overlay, g_wheelHandle);
+                    wheelShown = true;
+                }
+            }
+            else if (wheelShown)
+            {
+                std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+                g_hide(g_overlay, g_wheelHandle);
+                wheelShown = false;
+            }
+        }
         bool wantGreen[kDotCount] = {GetOpticDotGreen(), GetRayDotGreen()};
         for (int d = 0; d < kDotCount; ++d)
             if (wantGreen[d] != green[d])
@@ -633,6 +717,12 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
     // The aim ray dot: the hand's forward turned up by elevation and right by windage (degrees).
     float rayUpDeg = 0.0f, rayRightDeg = 0.0f;
     GetRayDotOffsetDeg(&rayUpDeg, &rayRightDeg);
+    // Plus the controller aim offset, which turns the shots (sdk/motion_controller_aim.h ApplyControllerAimOffset), so
+    // the ray dot keeps showing where they go.
+    float aimUpDeg = 0.0f, aimRightDeg = 0.0f;
+    GetControllerAimOffsetDeg(&aimUpDeg, &aimRightDeg);
+    rayUpDeg += aimUpDeg;
+    rayRightDeg += aimRightDeg;
     const float kRad = 3.14159265f / 180.0f;
     float e = rayUpDeg * kRad, w = rayRightDeg * kRad;
     Vec3 rayLocal{};
@@ -662,6 +752,45 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
     {
         std::lock_guard<std::mutex> lock(g_sightMutex);
         g_sightState = s;
+    }
+    SetEvent(g_sightEvent);
+}
+
+void UpdateWheelOverlay(bool visible, const Vec3& centre, const Vec3& right, const Vec3& up, float angle, float radius,
+                        float thickness, float opacity)
+{
+    if (!g_sightReady.load(std::memory_order_acquire) || g_wheelHandle == 0)
+        return;
+    WheelPlacement w;
+    w.visible = visible && radius > 0.01f && thickness > 0.001f && opacity > 0.0f;
+    if (w.visible)
+    {
+        // The turned wheel's axes: + angle is clockwise as the driver sees it, so the top heads towards right. The
+        // normal (overlay +Z, towards the driver) is right x up.
+        float c = cosf(angle), s = sinf(angle);
+        Vec3 x = VecSub(VecScale(right, c), VecScale(up, s));
+        Vec3 y = VecAdd(VecScale(up, c), VecScale(right, s));
+        Vec3 z;
+        z.x = right.y * up.z - right.z * up.y;
+        z.y = right.z * up.x - right.x * up.z;
+        z.z = right.x * up.y - right.y * up.x;
+        const Vec3* axes[3] = {&x, &y, &z};
+        const float origin[3] = {centre.x, centre.y, centre.z};
+        for (int col = 0; col < 3; ++col)
+        {
+            w.m[0 * 4 + col] = axes[col]->x;
+            w.m[1 * 4 + col] = axes[col]->y;
+            w.m[2 * 4 + col] = axes[col]->z;
+        }
+        for (int row = 0; row < 3; ++row)
+            w.m[row * 4 + 3] = origin[row];
+        w.radius = radius;
+        w.thickness = thickness;
+        w.opacity = opacity > 1.0f ? 1.0f : opacity;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_sightMutex);
+        g_wheelState = w;
     }
     SetEvent(g_sightEvent);
 }
@@ -722,6 +851,16 @@ bool InitVrOverlay(void* overlay, int trackingUniverse)
     }
     if (allCreated)
     {
+        // The steering wheel: optional -- the dots work without it.
+        int wheelErr = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+            wheelErr = createOverlay(overlay, "mohwvr.wheel", "MOHW VR steering wheel", &g_wheelHandle);
+        }
+        MOHW_LOG(kLogFile, "CreateOverlay(mohwvr.wheel) err=%d handle=%llu", wheelErr,
+                  static_cast<unsigned long long>(g_wheelHandle));
+        if (wheelErr != 0)
+            g_wheelHandle = 0;
         g_sightEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);
         g_sightReady.store(true, std::memory_order_release);
         std::thread(SightThreadProc).detach();

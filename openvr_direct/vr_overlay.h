@@ -18,4 +18,10 @@ bool InitVrOverlay(void* overlay, int trackingUniverse);
 // or hides them (visible false, or each dot's own setting off).
 void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientation, const float headPos[3]);
 
+// Submit thread, every input update in the driving missions: the steering wheel (openvr_direct/vr_steering.cpp) -- a
+// ring of radius and thickness (metres) at centre, in the plane of right / up (tracking space, unit vectors, up = to
+// its top), turned by angle (radians, + = clockwise as the driver sees it), drawn at opacity (0..1); or hidden.
+void UpdateWheelOverlay(bool visible, const Vec3& centre, const Vec3& right, const Vec3& up, float angle, float radius,
+                        float thickness, float opacity);
+
 } // namespace mohw::openvr_direct

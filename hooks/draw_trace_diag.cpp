@@ -7,6 +7,10 @@
 #include "companion_bridge.h"
 #include "camera_matrix_test_hook.h"
 #include "projection_aspect_hook.h"
+#include "aiming_controller_hook.h"
+#include "driving_camera_hook.h"
+#include "../sdk/mohw_offsets.h"
+#include "../sdk/d3d_util.h"
 
 #include <windows.h>
 #include <atomic>
@@ -130,7 +134,8 @@ bool OnTraceThread()
 
 void EnsureUiSnapshotTex(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& bbDesc)
 {
-    if (g_uiSnapshotTex && g_uiSnapshotW == bbDesc.Width && g_uiSnapshotH == bbDesc.Height && g_uiSnapshotFmt == bbDesc.Format)
+    if (g_uiSnapshotTex && g_uiSnapshotW == bbDesc.Width && g_uiSnapshotH == bbDesc.Height && g_uiSnapshotFmt == bbDesc.Format &&
+        TextureOnDevice(g_uiSnapshotTex, device))
         return;
     if (g_uiSnapshotTex)
     {
@@ -162,17 +167,75 @@ void EnsureUiSnapshotTex(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& bbDes
 // forward (moved by HudOffsetX/Y) and sized HudScale of the eye's real field of view, so the HUD stays out towards the
 // corners. Projected into this eye with its real tangents (the eye image maps linearly onto them) and its eye offset:
 // image x = (t - eyeOffset/HudDepth - centre) / halfWidth, eyeOffset = the rendering eye offset * HudIpdScale (so the
-// HUD's IPD follows the world's). Vertically the rectangle is centred on the image (both eyes share the vertical
-// frustum).
+// HUD's IPD follows the world's). Vertically it is centred on head forward too (2026-09-30): the vertical frustum is
+// as lopsided as the horizontal one (Quest 3: 44 deg up, 55 down), so the image's middle is ~13 deg below forward --
+// centred there, the reticle (the rectangle's centre) sat that far below the game's aim.
 // A frame whose whole final pass is 2D: a pre-rendered movie, a menu or a loading screen. In gameplay draw 1 of the
 // final pass is the 3D world composite (kept full-frame, its IPD comes from the camera) and only the draws after it are
 // placed; in a 2D frame draw 1 is itself 2D (the movie frame, the menu background), so it's placed too and the whole
 // frame becomes one head-locked screen whose eye copies fuse. Told apart by whether the world camera got the true
 // per-eye frustum recently (hooks/projection_aspect_hook.cpp).
+// The in-game (pause) menu: drawn over a still-rendering world, in the same final-pass draw numbers the reticle and the
+// objective markers use in play, so those special cases must switch off while it is up. Told apart by the simulation:
+// AimingController::Update runs every ~33 ms tick in play and (expected, being verified live 2026-09-30 -- every change
+// is logged to mohwvr_hudlayers.log) stops while paused. Also true wherever else the simulation stops, which is fine:
+// the reticle and markers aren't meaningful then either.
+// DISABLED 2026-09-30 (kPauseDetectionEnabled): the user saw HUD items briefly show unplaced in each eye before
+// correcting, and asked to switch it off for now. Still computed and logged (so its transitions can be matched against
+// such moments), but always reports "not paused".
+constexpr bool kPauseDetectionEnabled = true;
+
+bool IsSimulationPaused()
+{
+    constexpr unsigned long long kPausedAfterMs = 300;
+    // Driving missions (game\MOHWD.exe): no aim updates there; the game's committed view stopping changing instead
+    // (hooks/driving_camera_hook.h DrivingSimulationPaused).
+    unsigned long long last = g_drivingExe ? GetDrivingViewChangedMs() : GetLastAimingUpdateMs();
+    unsigned long long now = GetTickCount64();
+    bool paused = last != 0 && now - last > kPausedAfterMs;
+    static bool lastPaused = false; // render thread only
+    if (paused != lastPaused)
+    {
+        lastPaused = paused;
+        MOHW_LOG("mohwvr_hudlayers.log", "simulation %s (%s %llu ms ago, final-pass draw %d)%s",
+                  paused ? "PAUSED" : "RUNNING again", g_drivingExe ? "view change" : "aim update", now - last,
+                  g_backbufferDrawCount + 1,
+                  kPauseDetectionEnabled ? "" : " -- detection disabled, no effect");
+    }
+    return kPauseDetectionEnabled && paused;
+}
+
+// The main menu (2026-09-30): it renders a real 3D scene behind the menu, at gameplay-like camera rates (4,857/s), so
+// the rate test calls it 3D -- but it doesn't get the per-eye camera (the frustum match jumps between many camera
+// objects), so its background had no IPD. There is no player then: no aim update and no first-person body for a while,
+// which in play only happens in cutscenes and loads. Then the whole frame is placed like a movie.
+bool NoPlayerForAWhile()
+{
+    constexpr unsigned long long kNoPlayerMs = 3000;
+    unsigned long long now = GetTickCount64();
+    unsigned long long lastAim = GetLastAimingUpdateMs();
+    bool noAim = lastAim == 0 || now - lastAim > kNoPlayerMs;
+    static unsigned long long bodyLastSeenMs = 0; // render thread only
+    if (IsPlayerSkeletonLoaded())
+        bodyLastSeenMs = now;
+    bool noBody = bodyLastSeenMs == 0 || now - bodyLastSeenMs > kNoPlayerMs;
+    return noAim && noBody;
+}
+
 bool Is2DFrame()
 {
     constexpr unsigned kWorldRecentMs = 200; // rate window, see WorldRenderedRecently
-    return !WorldRenderedRecently(kWorldRecentMs);
+    // Driving missions (game\MOHWD.exe): no world-camera rate is measured there; a frame is a real per-eye view while
+    // the driving camera hook gives the main view its stereo, and the whole-frame floating screen otherwise.
+    bool twoD = g_drivingExe ? !DrivingStereoActive() : (!WorldRenderedRecently(kWorldRecentMs) || NoPlayerForAWhile());
+    static bool lastTwoD = false; // render thread only
+    if (twoD != lastTwoD)
+    {
+        lastTwoD = twoD;
+        MOHW_LOG("mohwvr_hudlayers.log", "whole-frame 2D placement %s%s", twoD ? "ON" : "off",
+                  twoD && WorldRenderedRecently(kWorldRecentMs) ? " (no player: main menu)" : "");
+    }
+    return twoD;
 }
 
 void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s, bool keepAspect);
@@ -231,7 +294,8 @@ void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float
     float centreTan = tanf(offsetXDeg * kDegToRad) - eyeX / depth;
     float ndcLeft = (centreTan - rectHalfW - centreX) / halfW;
     float ndcRight = (centreTan + rectHalfW - centreX) / halfW;
-    float ndcUpShift = tanf(offsetYDeg * kDegToRad) / halfH;
+    float centreY = (tU + tD) * 0.5f; // the image middle's tangent (tD is negative); 0 = head forward
+    float ndcUpShift = (tanf(offsetYDeg * kDegToRad) - centreY) / halfH;
     float heightFraction = rectHalfH / halfH;
 
     D3D11_VIEWPORT vp{};
@@ -278,6 +342,7 @@ void MaybeSnapshotUi(ID3D11DeviceContext* ctx)
 }
 
 bool g_capturingPass = false; // render thread: this final pass is being logged (markers pass capture, below)
+bool g_markerBlockStarted = false; // render thread: this pass has reached its first marker draw (BeforeBackbufferDraw)
 void MaybeStartPassCapture();
 
 void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv)
@@ -306,15 +371,25 @@ void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTar
         return isBb;
     }() : false;
     g_backbufferDrawCount = 0;
+    g_markerBlockStarted = false;
     if (g_curTargetIsBackbuffer)
+    {
+        IsSimulationPaused(); // logs each change, whether or not anything below asks
         MaybeStartPassCapture();
+    }
     else
         g_capturingPass = false;
     g_origOM(ctx, n, rtvs, dsv);
 }
 
+// Whether this frame's final pass into the backbuffer has drawn anything yet -- the last thing in a frame, so a camera
+// rebuild after it belongs to the NEXT frame (hooks/driving_camera_hook.cpp, 2026-10-14). Reset at Present.
+std::atomic<bool> g_finalPassStarted{false};
+
 void CountDraw(ID3D11DeviceContext* ctx, UINT verts)
 {
+    if (g_curTargetIsBackbuffer)
+        g_finalPassStarted.store(true, std::memory_order_relaxed);
     if (OnTraceThread())
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -332,14 +407,53 @@ void CountDraw(ID3D11DeviceContext* ctx, UINT verts)
 constexpr int kReticleFirstDraw = 2;
 constexpr int kReticleLastDraw = 7;
 
-bool ShouldSkipAsReticle()
+// The texture a final-pass draw samples (PS slot 0): its size and format identify the element type (captured
+// 2026-09-30, mohwvr_hudlayers.log): reticle 128x64, weapon display 256x64, D-pad display 32x32, objective markers
+// 512x128, friendly markers 16x32 -- the icons BC3 (format 77); text is the 1024x1024 R8 font atlas. Draw numbers
+// aren't usable: they shift with what the HUD shows, and the reticle isn't always drawn.
+constexpr UINT kFormatBC3 = 77; // DXGI_FORMAT_BC3_UNORM
+
+bool GetDrawTexture(ID3D11DeviceContext* ctx, UINT* width, UINT* height, UINT* format)
+{
+    ID3D11ShaderResourceView* srv = nullptr;
+    ctx->PSGetShaderResources(0, 1, &srv);
+    if (!srv)
+        return false;
+    bool ok = false;
+    ID3D11Resource* res = nullptr;
+    srv->GetResource(&res);
+    if (res)
+    {
+        ID3D11Texture2D* tex = nullptr;
+        if (SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex)
+        {
+            D3D11_TEXTURE2D_DESC d{};
+            tex->GetDesc(&d);
+            *width = d.Width;
+            *height = d.Height;
+            *format = d.Format;
+            ok = true;
+            tex->Release();
+        }
+        res->Release();
+    }
+    srv->Release();
+    return ok;
+}
+
+bool ShouldSkipAsReticle(ID3D11DeviceContext* ctx)
 {
     // Only while the controller aims (the weapon drive): with it off, shots follow the game's own aim again and the
-    // reticle is needed to see it.
+    // reticle is needed to see it. And not while paused: the in-game menu uses the same draw numbers.
     if (!g_curTargetIsBackbuffer || !GetHideReticle() || !GetWeaponDriveEnabled())
         return false;
     int next = g_backbufferDrawCount + 1; // the number this draw will get
-    return next >= kReticleFirstDraw && next <= kReticleLastDraw && IsPlayerSkeletonLoaded();
+    if (next < kReticleFirstDraw || next > kReticleLastDraw || !IsPlayerSkeletonLoaded() || IsSimulationPaused())
+        return false;
+    // The reticle's own texture: when it isn't drawn (live: a pass starting with the 256x64 weapon display), these
+    // draw numbers are other HUD elements and must stay.
+    UINT w = 0, h = 0, format = 0;
+    return GetDrawTexture(ctx, &w, &h, &format) && w == 128 && h == 64 && format == kFormatBC3;
 }
 
 // ---- In-world objective markers (2026-09-29) -----------------------------------------------------------------------
@@ -422,28 +536,82 @@ void LogPassDraw(ID3D11DeviceContext* ctx, UINT count, bool indexed, bool skippe
     MOHW_LOG(kHudLayerLog, "  draw %d %s count=%u VS=%p PS=%p tex=%p %ux%u fmt=%u viewport=(%.0f,%.0f %.0fx%.0f)%s",
               g_backbufferDrawCount + 1, indexed ? "indexed" : "plain", count, static_cast<void*>(vs),
               static_cast<void*>(ps), texPtr, texW, texH, texFormat, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height,
-              skipped ? " (skipped: reticle)" : "");
+              skipped ? " (skipped)" : "");
     if (vs)
         vs->Release();
     if (ps)
         ps->Release();
 }
 
-// Before each final-pass draw: the full-frame test, then the capture.
+// Live debugging (DebugHideDraw): one draw number of the final pass is skipped, in gameplay only, to see which element
+// it is. Still counted, like the reticle skip. Not while paused: everything hidden comes back for the in-game menu.
+bool IsDebugHiddenDraw()
+{
+    int hide = GetDebugHideDraw();
+    return hide > 0 && g_curTargetIsBackbuffer && g_backbufferDrawCount + 1 == hide && !Is2DFrame() &&
+           !IsSimulationPaused();
+}
+
+void SetFullFrameViewport(ID3D11DeviceContext* ctx, const D3D11_TEXTURE2D_DESC& bbDesc)
+{
+    D3D11_VIEWPORT vp{};
+    vp.Width = static_cast<float>(bbDesc.Width);
+    vp.Height = static_cast<float>(bbDesc.Height);
+    vp.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &vp);
+}
+
+// The in-world markers' textures (see GetDrawTexture): objective 512x128, friendly 16x32.
+bool IsMarkerTexture(UINT w, UINT h, UINT format)
+{
+    return format == kFormatBC3 && ((w == 512 && h == 128) || (w == 16 && h == 32));
+}
+
+// Before each final-pass draw: the markers' full frame, then the capture.
+// MARKERS IN THE WORLD (MarkersInWorld, default on): the game already places the markers per eye on their targets
+// (live: right with HUD placement off), and draws them after every HUD element (reticle, weapon display, D-pad
+// display). So from the first draw that uses a marker texture to the end of the pass the full frame is restored, and
+// the HUD before it keeps its rectangle. With it off, the manual range (FullFrameFromDraw..ToDraw) applies instead.
+// Neither while paused: the in-game menu belongs in the HUD rectangle whole.
 void BeforeBackbufferDraw(ID3D11DeviceContext* ctx, UINT count, bool indexed, bool skipped)
 {
     if (!g_curTargetIsBackbuffer || !g_backbuffer)
         return;
-    int from = GetFullFrameFromDraw();
-    if (from > 0 && g_backbufferDrawCount + 1 == from && !Is2DFrame())
+    int next = g_backbufferDrawCount + 1;
+    if (next >= 2 && GetHudPlacementEnabled() && !Is2DFrame() && !IsSimulationPaused())
     {
         D3D11_TEXTURE2D_DESC bbDesc{};
-        g_backbuffer->GetDesc(&bbDesc);
-        D3D11_VIEWPORT vp{};
-        vp.Width = static_cast<float>(bbDesc.Width);
-        vp.Height = static_cast<float>(bbDesc.Height);
-        vp.MaxDepth = 1.0f;
-        ctx->RSSetViewports(1, &vp);
+        if (GetMarkersInWorld())
+        {
+            UINT w = 0, h = 0, format = 0;
+            if (!g_markerBlockStarted && GetDrawTexture(ctx, &w, &h, &format) && IsMarkerTexture(w, h, format))
+            {
+                g_markerBlockStarted = true;
+                g_backbuffer->GetDesc(&bbDesc);
+                SetFullFrameViewport(ctx, bbDesc);
+                static int lines = 0;
+                if (lines < 12)
+                {
+                    ++lines;
+                    MOHW_LOG(kHudLayerLog, "markers: full frame from draw %d (first marker texture %ux%u)", next, w, h);
+                }
+            }
+        }
+        else
+        {
+            int from = GetFullFrameFromDraw();
+            int to = GetFullFrameToDraw();
+            if (from > 0 && next == from)
+            {
+                g_backbuffer->GetDesc(&bbDesc);
+                SetFullFrameViewport(ctx, bbDesc);
+            }
+            else if (from > 0 && to >= from && next == to + 1)
+            {
+                g_backbuffer->GetDesc(&bbDesc);
+                PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height, GetHudScale(), false); // back to the HUD rectangle
+            }
+        }
     }
     if (g_capturingPass && g_captureDrawsLeft > 0)
     {
@@ -455,7 +623,7 @@ void BeforeBackbufferDraw(ID3D11DeviceContext* ctx, UINT count, bool indexed, bo
 void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT s, INT b)
 {
     MaybePlaceWhole2DFrame(c);
-    bool skip = ShouldSkipAsReticle();
+    bool skip = ShouldSkipAsReticle(c) || IsDebugHiddenDraw();
     BeforeBackbufferDraw(c, n, true, skip);
     if (!skip)
         g_origDrawIndexed(c, n, s, b);
@@ -464,7 +632,7 @@ void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT s, 
 void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
 {
     MaybePlaceWhole2DFrame(c);
-    bool skip = ShouldSkipAsReticle();
+    bool skip = ShouldSkipAsReticle(c) || IsDebugHiddenDraw();
     BeforeBackbufferDraw(c, n, false, skip);
     if (!skip)
         g_origDraw(c, n, s);
@@ -638,6 +806,11 @@ void DrawTraceNoteDraw(ID3D11DeviceContext* context, unsigned indexCount)
     CountDraw(context, indexCount);
 }
 
+bool FinalPassStartedThisFrame()
+{
+    return g_finalPassStarted.load(std::memory_order_relaxed);
+}
+
 ID3D11Texture2D* GetUiSnapshotTexture()
 {
     return g_uiSnapshotTex;
@@ -649,6 +822,7 @@ void DrawTraceOnPresent(ID3D11Device* device, ID3D11Texture2D* backbuffer)
         return; // A/B test -- see kEnabled's declaration comment
     InstallOnce(device);
     g_backbuffer = backbuffer;
+    g_finalPassStarted.store(false, std::memory_order_relaxed); // the next frame starts
 
     // POLLING TABLE DISABLED (2026-09-25), PERFORMANCE TEST -- see present_hook.cpp's identical comment. This
     // disables the Scroll Lock arm-a-trace trigger; g_armed can be hardcoded to true directly if this capture is

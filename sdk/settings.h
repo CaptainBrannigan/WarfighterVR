@@ -193,10 +193,54 @@ float GetHudScale();
 // Size of the head-locked screen a whole-2D frame (pre-rendered movie, menu, loading screen) is drawn into, as a
 // fraction of the eye's view; same depth/IPD/offset rules as the HUD. MenuScreenScale, default 0.75.
 float GetMenuScreenScale();
-// Markers test (hooks/draw_trace_diag.cpp): from this draw number of the final 2D pass on, the full frame is restored
-// instead of the HUD rectangle, to see whether the in-world objective markers are already placed per eye by the game.
-// 0 = off. FullFrameFromDraw.
+// In-world markers (objective, friendly) keep the full frame instead of the HUD rectangle -- the game already places
+// them per eye -- from the pass's first draw with a marker texture to its end (hooks/draw_trace_diag.cpp).
+// MarkersInWorld, default on.
+bool GetMarkersInWorld();
+
+// Driving missions (game\MOHWD.exe, hooks/driving_camera_hook.cpp): which camera through UpdateMatrices gets head
+// look by hand -- 0 = auto (GetDrivingHeadLookAuto), 1.. = by call rate, busiest first (logged to mohwvr_drivingcamera.log). Session only, not saved.
+// DrivingHeadLookInvert flips the head rotation, in case the axis mapping is backwards.
+int GetDrivingCameraIndex();
+// End of the manual range (views ranked GetDrivingCameraIndex()..this get head look and stereo); 0 = only the "from"
+// view. Session only, not saved.
+int GetDrivingCameraIndexTo();
+bool GetDrivingHeadLookInvert();
+// Head look at the camera source (MOHWD.exe CommitViewTransform, hooks/driving_camera_hook.cpp CAMERA SOURCE), when no
+// manual range is set. DrivingHeadLookAuto, default on.
+bool GetDrivingHeadLookAuto();
+// Head yaw as right-stick look in the driving missions (hooks/driving_camera_hook.h GetDrivingStickLook): the head yaw
+// at full deflection, degrees (0 = yaw by render only, as before), and the game's stick deadzone to skip over.
+// DrivingStickLookRange (90), DrivingStickDeadzone (0.25).
+float GetDrivingStickLookRangeDeg();
+float GetDrivingStickDeadzone();
+// Stereo in the driving missions (hooks/driving_camera_hook.cpp): the view gets the per-eye shift and true
+// frustum and the frame is shown full-view; off = the whole-frame floating screen. DrivingStereo, default on.
+bool GetDrivingStereo();
+// Driving stereo: the committed view gets the next frame's eye, frustum and shift (swaps the eyes). Live 2026-10-14 the
+// commit lands in the frame it is presented in, so leave this off. Ini key DrivingGameThreadNextEye, default off.
+bool GetDrivingLateNextEye();
+// Steering wheel in the driving missions (openvr_direct/vr_steering.cpp): while a grip is held, the hand turns a virtual
+// wheel fixed in the room; its turn, over DrivingWheelLock degrees for full lock, goes out as left-stick X.
+// DrivingSteeringWheel, default on.
+bool GetDrivingSteeringWheel();
+float GetDrivingWheelLockDeg();
+// The wheel's centre from the head as it was at the last recenter (forward / below / right, metres, along that heading),
+// and its tilt: the top leaning away from the driver, degrees. DrivingWheelForward / Down / Right / Tilt.
+void GetDrivingWheelPlacement(float* forward, float* down, float* right, float* tiltDeg);
+// The drawn wheel (openvr_direct/vr_overlay.cpp UpdateWheelOverlay): rim radius and thickness, metres, and opacity
+// (0 = not drawn). Looks only -- steering goes by the hand's angle around the centre. DrivingWheelRadius / Thickness /
+// Opacity.
+void GetDrivingWheelLook(float* radius, float* thickness, float* opacity);
+// The manual alternative, used while MarkersInWorld is off: from this draw number of the final 2D pass on, the full
+// frame is restored instead of the HUD rectangle. 0 = off. FullFrameFromDraw.
 int GetFullFrameFromDraw();
+// The last draw of that full-frame range (the HUD rectangle resumes after it); 0 = to the end of the pass.
+// FullFrameToDraw.
+int GetFullFrameToDraw();
+// Live debugging: this draw number of the final 2D pass is not drawn, to see which element it is. 0 = off.
+// DebugHideDraw.
+int GetDebugHideDraw();
 // Hides the game's screen-centre reticle (draws 2..7 of the frame's final backbuffer pass, gameplay only). Menus draw
 // into the same pass, so while it's on an in-game (pause) menu can lose the elements at those draw positions.
 // HideReticle, default on.
@@ -262,6 +306,15 @@ bool GetDotsOnlyWithGrip();
 // A grip double-tap holds that hand's bumper (left LB, right RB) for the second press (openvr_direct/vr_input.cpp).
 // GripDoubleTapBumpers, default on.
 bool GetGripDoubleTapBumpers();
+
+// Controller aim offset (sdk/motion_controller_aim.h ApplyControllerAimOffset), degrees in the controller's own frame:
+// + up, + right. Turns the shots and the aim-ray dot, not the gun (and so not the optic dot). ControllerAimUp /
+// ControllerAimRight, default 0: the aim comes straight from the controller's rotation, this is for an edge case.
+void GetControllerAimOffsetDeg(float* up, float* right);
+
+// How much of the weapons' sway reaches the view and the bullet while aiming down sights (hooks/weapon_sway_patch.cpp):
+// 0 = none, 1 = the game's own. AdsSwayScale, default 0.
+float GetAdsSwayScale();
 float GetSightZeroDistance();
 float GetSightDotSizeDeg();
 

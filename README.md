@@ -23,6 +23,10 @@ Copy into the game's install folder, next to `MOHW.exe`:
 - `dxgi.dll` from [Releases](../../releases) (or build it yourself, see [DEVELOPMENT.md](DEVELOPMENT.md)).
 - `openvr_api.dll`, copied from `<Steam>\steamapps\common\SteamVR\bin\win32\openvr_api.dll`.
 
+Also copy `dxgi.dll` into the `game` subfolder (next to `game\MOHWD.exe`). The game runs its driving missions in that
+separate executable; with the copy there, those missions get stereo and head look too (see
+[Driving missions](#driving-missions)). Settings and logs stay in the main folder.
+
 Start SteamVR, then launch the game normally. The mod creates `mohwvr_settings.ini` and its SteamVR action and
 binding files next to the DLL on first launch. Settings are changed from inside the headset (see
 [Settings menu](#settings-menu)).
@@ -71,6 +75,37 @@ newer version of the mod until you switch back to the defaults (or add the new a
 - **Sight dots:** an optic dot fixed to the gun (zero it with its height and windage settings) and an aim-ray dot
   along the controller's line, each red or green.
 
+### Driving missions
+The game runs its driving missions in a separate executable (`game\MOHWD.exe`, see [Installing](#installing)); the
+mod covers it too.
+- Stereo at each eye's real field of view, with head pitch and roll. Head yaw turns the game's own vehicle camera
+  (as right-stick look, up to the game's limit), so the view is never cut off where you look.
+- The in-game menu shows in the HUD panel over the 3D world, as in the rest of the game, and head yaw and the wheel
+  stay off the sticks while it's up.
+
+#### Steering wheel
+Steer with your hands on a virtual wheel instead of the thumbstick.
+
+- **Grab:** hold a grip, with your hand on or near the rim. Your hand's position around the wheel's centre turns the
+  wheel (top = straight ahead, clockwise = right), so move your hand round the rim as you would on a real wheel.
+- **Two hands:** grip with both and the wheel turns by the average of the two hands' movement. Grabbing or letting go
+  with either hand never makes the wheel jump, so you can steer hand over hand.
+- **Let go** with both hands and the wheel snaps back to centre; the thumbstick steers again.
+- **Full lock** is a hard stop at the "Wheel turn for full lock" angle (90 degrees by default): turning past it does
+  nothing more, and turning back takes effect straight away.
+- **Where it is:** fixed in your room, not to your head. It's set from where your head is at the start of the
+  mission and at every recenter, so sit as you want to drive and recenter. Its distance forward, height below your
+  eyes, sideways offset and tilt are adjustable and move it live.
+- **Seeing it:** drawn as a grey rim with an orange marker at its top that turns with it, so you can see how far it's
+  turned. Radius, thickness and opacity are adjustable (opacity 0 hides it; the radius is only the drawing, steering
+  works anywhere around the centre). It's hidden in the menu and on loading screens.
+- The turn goes to the game as the left stick, so the game's own steering response applies. If small turns don't
+  register, raise "Stick deadzone compensation".
+- In the driving missions the grips only steer: holsters and two-handed aiming are off there. Grip double-tap still
+  gives LB / RB.
+
+All of it is in the settings menu's **Driving** section; "Steering wheel (hold grip)" switches it off.
+
 ### Controls
 The controllers drive a virtual Xbox gamepad, so the game itself maps buttons to actions in every context (on foot,
 vehicles, the Apache, menus). Default Touch layout:
@@ -85,7 +120,7 @@ vehicles, the Apache, menus). Default Touch layout:
 | Other-hand trigger | LT | Aim down sights (brake in vehicles) |
 | Double-press X / Y / B / A | D-pad left / up / right / down | Items and gadgets |
 | Long-press Y | Start | Pause menu |
-| Grips | - | Holsters, two-handed grip |
+| Grips | - | Holsters, two-handed grip; the steering wheel in driving missions |
 | Double-tap left / right grip | LB / RB | (setting: "Grip double-tap = LB / RB") |
 
 Buttons that also have a double press (A, B, X) register a hold after 0.3 s, and a tap just after the double-press
@@ -98,15 +133,16 @@ own SteamVR action, listed as "Keyboard: ...", alongside "Gamepad: ..." for the 
 ### Settings menu
 Open the SteamVR dashboard in the headset and select the **MOHW VR** tab. Every setting is there and applies
 immediately: head look, view (IPD, world scale, smoothing), controls (turn speed, stick deadzone, two-handed grab,
-shot spread, fire as mouse or triggers), hands (left-handed, holsters, sight dots), weapon grip, HUD, and holster
-positions and actions. There is also a Recenter button.
+shot spread, fire as mouse or triggers), hands (left-handed, holsters, sight dots), weapon grip, HUD, holster
+positions and actions, and the driving missions (head look, stereo, steering wheel). There is also a Recenter button.
 
 ## Known issues
 
 - **Objectives where you shoot something that isn't a soldier** (a target, a device) only count the game's own aim,
-  not the controller's. Until the objective is done, turn off **Head aim** and **Gun + shots follow controller**
-  (Numpad .) in the settings, and aim with the right stick (it then pitches as well as turns): the shots then go
-  where the game aims and the reticle comes back. Turn both on again afterwards.
+  not the controller's. Until the objective is done, turn off **Gun + shots follow controller** (Numpad .) in the
+  settings and aim with your head (head look can stay on): the shots then go where the game aims, at the reticle,
+  which comes back while it is off. Turn it on again afterwards. With Head aim off as well, the right stick pitches
+  as well as turns.
 - Pre-rendered movies, menus and loading screens: the switch to a floating screen is new and may not apply to every
   movie yet.
 - Mission markers are shifted along with the HUD instead of staying on their targets.
