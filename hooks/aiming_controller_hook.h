@@ -94,6 +94,11 @@ float GetHeadYawOffset();
 // belongs to the simulation, so it should stop while the game is paused (the in-game menu) although the world keeps
 // rendering -- hooks/draw_trace_diag.cpp's IsSimulationPaused uses that to tell the menu from gameplay.
 unsigned long long GetLastAimingUpdateMs();
+// Any thread: whether the player's own aim is running (an AimingController::Update in the last 300 ms). False while
+// the game is paused, and while the player controls something else -- the robot-control section (2026-10-16): the
+// robot has its own controls and the soldier's aim stops. Head look, head position, the stick's pitch removal, the
+// render-pose stamp and the laser all belong to the soldier's aim.
+bool IsPlayerAimActive();
 // HMD position (XR local space, meters) captured at the last recenter -- the origin head-position tracking measures from.
 bool GetHeadAimPositionOrigin(float out[3]);
 

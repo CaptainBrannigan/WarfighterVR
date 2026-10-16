@@ -277,12 +277,26 @@ const Zone* FindZone(const Vec3& handPos, const float headPos[3])
     return best;
 }
 
+// The off hand's point for two-handed aiming: its position only (2026-10-16, the user's call: the secondary grip
+// ignores the hand's rotation). The palm (grip pose) when bound -- the tip, the hand pose's own position, swings
+// around the wrist when the hand turns, which moved the aim; the tip otherwise.
+Vec3 OffHandPoint(const HandInput& off)
+{
+    if (!off.havePalm)
+        return Column(off.pose, 3);
+    Vec3 p{};
+    p.x = off.palm[0];
+    p.y = off.palm[1];
+    p.z = off.palm[2];
+    return p;
+}
+
 // Whether the off hand is on the weapon: within TwoHandGrabRadius of the line running forward from the weapon hand,
 // 5 cm to TwoHandReach along it.
 bool OnBarrel(const HandInput& weapon, const HandInput& off, float* outAlong, float* outPerp)
 {
     Vec3 forward = VecScale(Column(weapon.pose, 2), -1.0f);
-    Vec3 toOff = VecSub(Column(off.pose, 3), Column(weapon.pose, 3));
+    Vec3 toOff = VecSub(OffHandPoint(off), Column(weapon.pose, 3));
     float along = VecDot(toOff, forward);
     Vec3 perp = VecSub(toOff, VecScale(forward, along));
     float perpDist = sqrtf(VecDot(perp, perp));
@@ -317,7 +331,8 @@ bool GunFrame(const Vec3& forward, const HandInput& weapon, Vec3* rightAxis, Vec
 bool AimAtOffHand(const HandInput& weapon, const HandInput& off, Quat* out)
 {
     Vec3 weaponPos = Column(weapon.pose, 3);
-    Vec3 forward = VecSub(Column(off.pose, 3), weaponPos);
+    Vec3 offPoint = OffHandPoint(off); // position only: the off hand's rotation plays no part
+    Vec3 forward = VecSub(offPoint, weaponPos);
     if (sqrtf(VecDot(forward, forward)) < 0.08f || !Normalize(&forward))
         return false;
     Vec3 rightAxis, up, back;
@@ -330,7 +345,7 @@ bool AimAtOffHand(const HandInput& weapon, const HandInput& off, Quat* out)
     GetSecondaryGripOffset(&offsetRight, &offsetUp);
     if (offsetRight != 0.0f || offsetUp != 0.0f)
     {
-        Vec3 anchor = VecAdd(Column(off.pose, 3), VecAdd(VecScale(rightAxis, offsetRight), VecScale(up, offsetUp)));
+        Vec3 anchor = VecAdd(offPoint, VecAdd(VecScale(rightAxis, offsetRight), VecScale(up, offsetUp)));
         forward = VecSub(anchor, weaponPos);
         if (sqrtf(VecDot(forward, forward)) < 0.08f || !Normalize(&forward) ||
             !GunFrame(forward, weapon, &rightAxis, &up, &back))

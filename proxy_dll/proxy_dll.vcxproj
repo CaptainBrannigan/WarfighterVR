@@ -136,6 +136,7 @@
     <ClInclude Include="..\sdk\vr_math.h" />
     <ClInclude Include="..\sdk\motion_controller_aim.h" />
     <ClInclude Include="..\sdk\settings.h" />
+    <ClInclude Include="..\sdk\default_settings.h" />
     <ClInclude Include="..\hooks\present_hook.h" />
     <ClInclude Include="..\hooks\constantbuffer_hook.h" />
     <ClInclude Include="..\hooks\companion_bridge.h" />

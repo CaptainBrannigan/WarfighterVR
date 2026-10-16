@@ -5,8 +5,8 @@ of its own. This mod is a proxy `dxgi.dll` that hooks the game's rendering and i
 from inside the game: stereo rendering at the headset's real field of view, head-tracked look and movement, motion
 controllers for aiming, a gun held in your hand, body holsters, and an in-headset settings menu.
 
-**Status: 1.0, a hobby reverse-engineering project.** It's playable, but not every part of the game has been
-covered yet; see [Known issues](#known-issues).
+**Status: Beta, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
+hasn't been played all the way through yet; see [Known issues](#known-issues).
 
 ## Requirements
 
@@ -28,8 +28,10 @@ separate executable; with the copy there, those missions get stereo and head loo
 [Driving missions](#driving-missions)). Settings and logs stay in the main folder.
 
 Start SteamVR, then launch the game normally. The mod creates `mohwvr_settings.ini` and its SteamVR action and
-binding files next to the DLL on first launch. Settings are changed from inside the headset (see
-[Settings menu](#settings-menu)).
+binding files next to the DLL on first launch. The settings start from the author's own tuned values (including the
+weapon profiles made so far, see [Weapon profiles](#motion-controllers)); an existing `mohwvr_settings.ini` is kept, and
+only gains the built-in weapon profiles for weapons it has none for. Settings are changed from inside the headset
+(see [Settings menu](#settings-menu)).
 
 **No headset, no mod:** the mod only switches on once it has connected to a headset through SteamVR. Without one the
 game runs completely unmodified (nothing is hooked), so you can leave the DLL installed and play flat. The mod never
@@ -38,7 +40,9 @@ running and the mod switches on then, and stays on until you quit.
 
 **Controller bindings:** in SteamVR's controller bindings for the game, pick **"MOHW VR defaults"**. If you
 previously saved your own binding for the game, SteamVR keeps using that copy and won't pick up new actions from a
-newer version of the mod until you switch back to the defaults (or add the new actions to your copy).
+newer version of the mod until you switch back to the defaults (or add the new actions to your copy). New in the
+Beta: "Left / Right hand position for two-handed grip", bound to the Grip pose; without it two-handed aim uses the
+controller's tip instead of your palm.
 
 ## Features
 
@@ -52,7 +56,8 @@ newer version of the mod until you switch back to the defaults (or add the new a
 - **HUD:** moved into a head-locked panel that fuses in both eyes, sized to the corners of your view, with adjustable
   scale, depth, IPD and offset. The screen-centre reticle is hidden by default (you aim with the controller).
 - **In-world markers** (nametags, objective, grenade and vehicle icons) stay on their targets in both eyes while the
-  HUD is in its panel; ones outside the panel are pinned to its edge, like the game's own off-screen arrows.
+  HUD is in its panel (in the driving missions too); ones outside the panel are pinned to its edge, like the game's
+  own off-screen arrows.
 - Pre-rendered movies, menus and loading screens are shown as a floating screen (see [Known issues](#known-issues)).
 
 ### Head look
@@ -66,7 +71,11 @@ newer version of the mod until you switch back to the defaults (or add the new a
 - **The gun follows your hand** (on by default, Numpad . or "Gun + shots follow controller" toggles), with adjustable
   grip offset and rotation. Turning it off also hands the shots back to the game's own aim (see
   [Known issues](#known-issues)).
-- **Two-handed aiming:** grip with your other hand on the barrel to aim along the line between your hands.
+- **Hand calibration** (all weapons): "Hand offset right / up / forward" and "Hand rotation pitch / yaw / roll" in
+  the Hands settings move and turn the hand itself before anything uses it -- the gun, the laser and shots, the dots,
+  holsters and two-handed aim -- mirrored for the left hand. Per-weapon settings come on top.
+- **Two-handed aiming:** grip with your other hand on the barrel to aim along the line between your hands. Only the
+  other hand's position counts (its palm, the SteamVR grip pose), so turning that hand doesn't move the aim.
 - **Left-handed mode.**
 - **Body holsters:** press grip with a hand at a body position to trigger an action. That hand also takes the weapon
   if the action is a weapon.
@@ -95,7 +104,9 @@ newer version of the mod until you switch back to the defaults (or add the new a
   (two-handed) grip offset and the laser / beam start are kept per weapon
   and switch automatically with the weapon in your hand (picked-up weapons included). The settings menu's "Weapon
   profile: <weapon>" section edits the weapon you're holding; a weapon you haven't set up yet starts from the default
-  values, which are also used when no weapon is held.
+  values, which are also used when no weapon is held. The mod ships with profiles for the weapons used so far (AK-103,
+  AKM, OBR, AKS-74U, PKP, HK45C, MP7, TAC-300). The campaign hasn't been played all the way through yet, so later
+  weapons have no profile and use the defaults until you set them up.
 
 ### Driving missions
 The game runs its driving missions in a separate executable (`game\MOHWD.exe`, see [Installing](#installing)); the
@@ -160,6 +171,20 @@ positions and actions, and the driving missions (head look, stereo, steering whe
 
 ## Known issues
 
+This is a Beta. The rough edges known so far:
+
+- **Hit detection doesn't always follow the shots.** The tracer and the impact go where the laser dot is, but the
+  game's own hit check sometimes disagrees -- possibly because it still treats the shot as leaving from the player
+  rather than from your hand.
+- **The steering wheel with both hands** is janky in its default setup; one-handed steering works fairly well.
+- **The gun's bones aren't centred on its grip**, so how a gun sits in your hand is always a little off, even after
+  tuning its profile.
+- **Shore Leave's sniping section** is wonky: the inconsistent hit detection above, and the game force-hiding the
+  weapon mesh there.
+- **Not every weapon has a profile yet** (the campaign hasn't been played all the way through); those use the default
+  grip until you set them up.
+- **The robot-control section** shows the robot's camera head-locked (no head look on it yet); the right stick
+  looks around.
 - **Objectives where you shoot something that isn't a soldier** (a target, a device) only count the game's own aim,
   not the controller's. Until the objective is done, turn off **Gun + shots follow controller** (Numpad .) in the
   settings and aim with your head (head look can stay on): the shots then go where the game aims, at the reticle,

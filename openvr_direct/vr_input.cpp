@@ -12,6 +12,7 @@
 
 #include <windows.h>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -128,6 +129,8 @@ std::string BuildActionManifest()
   "actions": [
     { "name": "/actions/main/in/RightHandAim", "type": "pose" },
     { "name": "/actions/main/in/LeftHandAim", "type": "pose" },
+    { "name": "/actions/main/in/RightHandPalm", "type": "pose" },
+    { "name": "/actions/main/in/LeftHandPalm", "type": "pose" },
     { "name": "/actions/main/in/FireRight", "type": "boolean" },
     { "name": "/actions/main/in/FireLeft", "type": "boolean" },
     { "name": "/actions/main/in/GripRight", "type": "vector1" },
@@ -150,6 +153,8 @@ std::string BuildActionManifest()
       "/actions/main": "Gameplay",
       "/actions/main/in/RightHandAim": "Right hand aim",
       "/actions/main/in/LeftHandAim": "Left hand aim",
+      "/actions/main/in/RightHandPalm": "Right hand position for two-handed grip - bind to Grip",
+      "/actions/main/in/LeftHandPalm": "Left hand position for two-handed grip - bind to Grip",
       "/actions/main/in/FireRight": "Fire - right hand",
       "/actions/main/in/FireLeft": "Fire - left hand",
       "/actions/main/in/GripRight": "Grip - right hand (pull): holsters, two-handed, double-tap RB",
@@ -243,7 +248,9 @@ std::string BuildTouchBindings()
     "/actions/main": {
       "poses": [
         { "output": "/actions/main/in/RightHandAim", "path": "/user/hand/right/pose/tip" },
-        { "output": "/actions/main/in/LeftHandAim", "path": "/user/hand/left/pose/tip" }
+        { "output": "/actions/main/in/LeftHandAim", "path": "/user/hand/left/pose/tip" },
+        { "output": "/actions/main/in/RightHandPalm", "path": "/user/hand/right/pose/grip" },
+        { "output": "/actions/main/in/LeftHandPalm", "path": "/user/hand/left/pose/grip" }
       ],
       "sources": [
 )";
@@ -327,6 +334,9 @@ PFN_GetPoseActionDataForNextFrame g_getPose = nullptr;
 uint64_t g_mainSet = 0;
 uint64_t g_rightAimAction = 0;
 uint64_t g_leftAimAction = 0;
+// The hands' grip poses (the palm), for the off hand's position in two-handed aiming (vr_hands.h HandInput::palm).
+// Unbound in a saved binding made before 2026-10-16: the tip pose's position is used then.
+uint64_t g_palmAction[2] = {0, 0};
 uint64_t g_fireAction[2] = {0, 0}; // [kLeftHand], [kRightHand]
 uint64_t g_gripAction[2] = {0, 0};
 uint64_t g_recenterAction = 0;
@@ -422,6 +432,41 @@ bool ReadHandPose(uint64_t action, PoseActionData* data)
     return err == 0 && data->active && data->pose.poseIsValid;
 }
 
+// GLOBAL HAND OFFSET (2026-10-16, sdk/settings.h GetHandOffset): the hand's pose moved and turned in its own frame,
+// pose' = pose * offset, before anything reads it. Rotation: yaw about the hand's up, then pitch about the new right,
+// then roll about the new back (+ pitch up, + yaw right, + roll right). Mirrored for the left hand: right, yaw and
+// roll negated. m: columns 0-2 = the hand's right / up / back in tracking space, column 3 = position.
+void ApplyHandOffset(int hand, float m[3][4])
+{
+    float pos[3], rot[3];
+    GetHandOffset(pos, rot);
+    if (pos[0] == 0.0f && pos[1] == 0.0f && pos[2] == 0.0f && rot[0] == 0.0f && rot[1] == 0.0f && rot[2] == 0.0f)
+        return;
+    bool left = hand == kLeftHand;
+    const float kRad = 3.14159265f / 180.0f;
+    float local[3] = {left ? -pos[0] : pos[0], pos[1], -pos[2]}; // x right, y up, z back
+    float pitch = rot[0] * kRad, yaw = -(left ? -rot[1] : rot[1]) * kRad, roll = -(left ? -rot[2] : rot[2]) * kRad;
+    float cp = cosf(pitch), sp = sinf(pitch), cy = cosf(yaw), sy = sinf(yaw), cr = cosf(roll), sr = sinf(roll);
+    const float ry[3][3] = {{cy, 0, sy}, {0, 1, 0}, {-sy, 0, cy}};
+    const float rx[3][3] = {{1, 0, 0}, {0, cp, -sp}, {0, sp, cp}};
+    const float rz[3][3] = {{cr, -sr, 0}, {sr, cr, 0}, {0, 0, 1}};
+    float ryx[3][3], r[3][3];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            ryx[i][j] = ry[i][0] * rx[0][j] + ry[i][1] * rx[1][j] + ry[i][2] * rx[2][j];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            r[i][j] = ryx[i][0] * rz[0][j] + ryx[i][1] * rz[1][j] + ryx[i][2] * rz[2][j];
+    float old[3][4];
+    memcpy(old, m, sizeof(old));
+    for (int row = 0; row < 3; ++row)
+    {
+        for (int j = 0; j < 3; ++j)
+            m[row][j] = old[row][0] * r[0][j] + old[row][1] * r[1][j] + old[row][2] * r[2][j];
+        m[row][3] = old[row][3] + old[row][0] * local[0] + old[row][1] * local[1] + old[row][2] * local[2];
+    }
+}
+
 // Publishes one hand's pose, or marks it untracked. aimSlot = the "right controller" slot (the weapon hand, which the
 // shot and gun hooks read); otherwise the "left" (off hand) slot. orientationOverride replaces the pose's own
 // orientation.
@@ -499,6 +544,9 @@ bool InitVrInput(void* input, int trackingUniverse)
     bool ok = GetNamedHandle(getSetHandle, "/actions/main", &g_mainSet);
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/RightHandAim", &g_rightAimAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/LeftHandAim", &g_leftAimAction) && ok;
+    // Optional (an unbound one only means the tip's position is used), so not part of ok.
+    GetNamedHandle(getActionHandle, "/actions/main/in/LeftHandPalm", &g_palmAction[kLeftHand]);
+    GetNamedHandle(getActionHandle, "/actions/main/in/RightHandPalm", &g_palmAction[kRightHand]);
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/FireLeft", &g_fireAction[kLeftHand]) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/FireRight", &g_fireAction[kRightHand]) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/GripLeft", &g_gripAction[kLeftHand]) && ok;
@@ -549,7 +597,13 @@ void UpdateVrInput()
     for (int h = 0; h < 2; ++h)
     {
         hands[h].tracked = ReadHandPose(poseActions[h], &poses[h]);
+        if (hands[h].tracked)
+            ApplyHandOffset(h, poses[h].pose.deviceToAbsoluteTracking); // everything downstream reads poses / hands
         memcpy(hands[h].pose, poses[h].pose.deviceToAbsoluteTracking, sizeof(hands[h].pose));
+        PoseActionData palm{};
+        hands[h].havePalm = g_palmAction[h] && ReadHandPose(g_palmAction[h], &palm);
+        for (int k = 0; k < 3; ++k)
+            hands[h].palm[k] = palm.pose.deviceToAbsoluteTracking[k][3];
         DigitalActionData fire{};
         AnalogActionData gripPull{};
         bool gripReadOk =
@@ -594,8 +648,10 @@ void UpdateVrInput()
                            poses[weaponHand].pose.deviceToAbsoluteTracking[2][3]};
         bool gripOk = !GetDotsOnlyWithGrip() || result.weaponGripped;
         // No dots with the weapon attachment off: shots follow the game's aim then, not the controller.
-        UpdateSightDot(hands[weaponHand].tracked && haveHead && gripOk && GetWeaponDriveEnabled() && !g_drivingExe, origin,
-                       aimQ, headPos);
+        // Nor while the soldier's aim isn't running (the robot-control section, menus): there's no gun to aim then.
+        UpdateSightDot(hands[weaponHand].tracked && haveHead && gripOk && GetWeaponDriveEnabled() && !g_drivingExe &&
+                           IsPlayerAimActive(),
+                       origin, aimQ, headPos);
     }
 
     AnalogActionData move{}, turn{};

@@ -1,5 +1,6 @@
 #include "laser_raycast.h"
 
+#include "aiming_controller_hook.h"
 #include "bullet_raycast_redirect_hook.h"
 #include "render_pose_stamp.h"
 #include "weapon_identity.h"
@@ -185,7 +186,7 @@ void LaserCaptureGameCamera(const float* gameTransform)
 void LaserOnCommit(const float* renderTransform)
 {
     if (g_drivingExe || !renderTransform || (!GetSightDotEnabled() && !GetLaserBeamEnabled()) ||
-        !GetWeaponDriveEnabled())
+        !GetWeaponDriveEnabled() || !IsPlayerAimActive()) // the soldier's gun only (not the robot's camera, menus)
         return;
     if (++g_frame < GetLaserRaycastEveryFrames())
         return;

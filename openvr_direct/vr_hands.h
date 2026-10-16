@@ -18,6 +18,10 @@ struct HandInput
 {
     bool tracked = false;
     float pose[3][4] = {}; // tracking space: columns 0-2 right/up/back, column 3 position
+    // The grip pose's position (the palm), when bound: where the hand is, independent of how it's turned -- the tip
+    // (pose's position) swings with the wrist. The off hand's position in two-handed aiming (2026-10-16).
+    bool havePalm = false;
+    float palm[3] = {};
     bool grip = false;
     bool trigger = false;
 };

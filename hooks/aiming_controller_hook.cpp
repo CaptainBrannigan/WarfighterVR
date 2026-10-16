@@ -733,6 +733,13 @@ unsigned long long GetLastAimingUpdateMs()
     return g_lastUpdateMs.load(std::memory_order_relaxed);
 }
 
+bool IsPlayerAimActive()
+{
+    constexpr unsigned long long kActiveWithinMs = 300; // the update runs every ~33 ms tick
+    unsigned long long last = g_lastUpdateMs.load(std::memory_order_relaxed);
+    return last != 0 && GetTickCount64() - last <= kActiveWithinMs;
+}
+
 float GetHeadYawOffset()
 {
     return g_headYawOffset.load(std::memory_order_relaxed);

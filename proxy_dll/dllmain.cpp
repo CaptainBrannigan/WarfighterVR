@@ -87,6 +87,9 @@ void InstallDrivingHooks()
     // Head look and stereo at the camera source -- see hooks/driving_camera_hook.h.
     if (!mohw::InstallDrivingCameraHook())
         MOHW_LOG(kLogFile, "InstallDrivingCameraHook FAILED -- see mohwvr_drivingcamera.log");
+    // The in-world markers (the driving levels' target marker) projected into the HUD rectangle, as in MOHW.exe.
+    if (!mohw::InstallMarkerProjectionHook())
+        MOHW_LOG(kLogFile, "InstallMarkerProjectionHook FAILED -- see mohwvr_marker.log");
 }
 
 // The main game: every hook and the mod's threads. Run by the master switch once a headset is detected -- normally
@@ -181,8 +184,14 @@ void EnsureInitialized()
             mohw::g_drivingExe = true;
             MOHW_LOG(kLogFile, "running in the driving missions' executable (%s)", exePath);
             mohw::LoadSettings();
-            // MASTER SWITCH: nothing is hooked until a headset is detected -- see hooks/master_switch.h.
-            mohw::StartMasterSwitch(&InstallDrivingHooks);
+            // MASTER SWITCH: nothing is hooked until a headset is detected -- see hooks/master_switch.h. Not before the
+            // game is up (2026-10-16): live, MOHWD.exe crashed at startup in its own window procedure, on the
+            // WM_NCHITTEST a new window gets under the cursor, reading a still-null object (+0x60) -- the switch's
+            // VR connection, overlays and dummy D3D device were running alongside the game creating its window,
+            // which widened that gap (before the switch, the connection only started at the first frame). It is
+            // always started from MOHW.exe with the headset already connected; its first seconds are a loading screen.
+            constexpr unsigned kDrivingStartDelayMs = 5000;
+            mohw::StartMasterSwitch(&InstallDrivingHooks, kDrivingStartDelayMs);
             return;
         }
 

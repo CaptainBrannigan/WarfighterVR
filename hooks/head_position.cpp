@@ -72,7 +72,9 @@ void ApplyHeadPosition(void* transformPtr)
     // priority than the others: this poll ran once PER EYE per frame, not just once per Present.
     // PollToggle();
     g_lastPosValid.store(false, std::memory_order_relaxed); // set again below only if this frame actually applied an offset
-    if (!transformPtr || !GetHeadPositionEnabled() || !GetHeadAimEnabled())
+    // Not while the soldier's aim isn't running (the robot-control section, menus): the offset is turned into the
+    // world by the head-look mapping, which is stale then, and that camera isn't the soldier's head anyway.
+    if (!transformPtr || !GetHeadPositionEnabled() || !GetHeadAimEnabled() || !IsPlayerAimActive())
         return;
 
     float origin[3] = {0, 0, 0};

@@ -14,7 +14,19 @@ namespace mohw {
 namespace {
 
 constexpr const char* kLogFile = "mohwvr_marker.log";
-constexpr uint32_t kSentinelAddress = 0x27A8320u; // the value written to both outputs when |w| ~ 0
+// Per executable (image base 0x400000): the projection, and the value it writes to both outputs when |w| ~ 0.
+// MOHW.exe: sdk/mohw_offsets.h OFFSET_HUDICON_PROJECT. MOHWD.exe (the driving missions, 2026-10-16): the same
+// function found by its code bytes (one match; only caller FUN_0128d920, which reads ScreenSafeAreaWidth like
+// MOHW.exe's FUN_016ab1c0), instruction for instruction the same, its sentinel load at 0x0128B809.
+constexpr uintptr_t kMohwSentinel = 0x27A8320u;
+constexpr uintptr_t kMohwdProject = 0x128B670u;
+constexpr uintptr_t kMohwdSentinel = 0x230B6E8u;
+uintptr_t g_sentinelAddress = 0;
+
+uintptr_t InThisExe(uintptr_t staticAddress)
+{
+    return reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr)) - 0x400000u + staticAddress;
+}
 
 using ProjectFn = uint32_t(__stdcall*)(const float* local, const float* transform, const float* viewProj, float halfX,
                                        float halfY, float* out);
@@ -25,7 +37,7 @@ bool ReadSentinel(float* out)
 {
     __try
     {
-        *out = *Offset<const float*>(kSentinelAddress);
+        *out = *reinterpret_cast<const float*>(g_sentinelAddress);
         return true;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
@@ -79,7 +91,7 @@ bool PrologueMatches(const uint8_t* p)
 
 bool InstallMarkerProjectionHook()
 {
-    if (g_moduleBase == 0 || !g_buildVerified)
+    if (!g_drivingExe && (g_moduleBase == 0 || !g_buildVerified))
     {
         MOHW_LOG(kLogFile, "InstallMarkerProjectionHook: module base not resolved / build not verified yet -- refusing");
         return false;
@@ -90,7 +102,8 @@ bool InstallMarkerProjectionHook()
         MOHW_LOG(kLogFile, "MH_Initialize FAILED: %s", MH_StatusToString(initStatus));
         return false;
     }
-    void* target = Offset<void*>(OFFSET_HUDICON_PROJECT);
+    void* target = reinterpret_cast<void*>(InThisExe(g_drivingExe ? kMohwdProject : OFFSET_HUDICON_PROJECT));
+    g_sentinelAddress = InThisExe(g_drivingExe ? kMohwdSentinel : kMohwSentinel);
     if (!PrologueMatches(static_cast<const uint8_t*>(target)))
     {
         MOHW_LOG(kLogFile, "marker projection @ %p: unexpected bytes -- not hooking", target);

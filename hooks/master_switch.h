@@ -8,8 +8,9 @@
 namespace mohw {
 
 // dllmain, once, after the module/build checks and LoadSettings. installHooks: installs every hook and starts the
-// mod's threads (called on the switch's thread, at most once, with the VR connection already up).
-void StartMasterSwitch(void (*installHooks)());
+// mod's threads (called on the switch's thread, at most once, with the VR connection already up). startDelayMs: how
+// long to wait before the first check (the driving missions' executable, see dllmain.cpp).
+void StartMasterSwitch(void (*installHooks)(), unsigned startDelayMs = 0);
 
 // Any thread: whether the mod has switched on.
 bool IsModActive();

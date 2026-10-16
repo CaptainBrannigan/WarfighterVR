@@ -98,7 +98,10 @@ void ComputeRenderPoseStamp(void* transformPtr)
     float raw[12]{};
     mohwvr::ipc::HeadPoseBlock pose{};
     float zeroYaw = 0, zeroPitch = 0, baseYaw = 0, basePitch = 0;
-    if (transformPtr && GetHeadAimEnabled() && SehReadFloats12(transformPtr, raw) &&
+    // Only while the soldier's aim runs: the reconstruction inverts its head-look mapping. Without it (the robot-control
+    // section, menus) the camera isn't following the head, and a stamp rebuilt from the stale mapping sat 7-11 deg off
+    // the head (live 2026-10-16), so SteamVR shifted each frame by that and showed its edges. No stamp = the live pose.
+    if (transformPtr && GetHeadAimEnabled() && IsPlayerAimActive() && SehReadFloats12(transformPtr, raw) &&
         GetHeadAimMapping(&zeroYaw, &zeroPitch, &baseYaw, &basePitch) && GetHeadPose(&pose))
     {
         Vec3 fwd{raw[8], raw[9], raw[10]};

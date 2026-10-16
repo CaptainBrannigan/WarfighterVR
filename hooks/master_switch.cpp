@@ -36,8 +36,13 @@ bool IsSteamVrRunning()
 // (the wireless driver counts as present) -- every hook went in and changed flat play (arms hidden, pitch locked,
 // weapon offset). The connection only succeeds with a headset there (otherwise VR_Init fails, 215
 // Driver_WirelessHmdNotConnected), and it has to be made anyway.
-void SwitchThreadProc(void (*installHooks)())
+void SwitchThreadProc(void (*installHooks)(), unsigned startDelayMs)
 {
+    if (startDelayMs > 0)
+    {
+        MOHW_LOG(kLogFile, "waiting %u ms before the first check", startDelayMs);
+        Sleep(startDelayMs);
+    }
     bool loggedNoServer = false, loggedNoHeadset = false;
     for (;;)
     {
@@ -74,9 +79,9 @@ void SwitchThreadProc(void (*installHooks)())
 
 } // namespace
 
-void StartMasterSwitch(void (*installHooks)())
+void StartMasterSwitch(void (*installHooks)(), unsigned startDelayMs)
 {
-    std::thread(SwitchThreadProc, installHooks).detach();
+    std::thread(SwitchThreadProc, installHooks, startDelayMs).detach();
 }
 
 bool IsModActive()

@@ -184,6 +184,11 @@ float GetVrStickFullDeflection();
 // TwoHandGrabRadius of the line running forward from the right hand, 5 cm to TwoHandReach along it. Meters, ini-only.
 float GetTwoHandGrabRadius();
 float GetTwoHandReach();
+// Global hand calibration (2026-10-16): each hand's pose is moved by position {right, up, forward} (m) and turned by
+// rotation {pitch + up, yaw + right, roll + right} (deg), in the controller's own frame, before anything uses it --
+// the gun, the laser and shots, the dots, holsters, two-handed aim (openvr_direct/vr_input.cpp). Mirrored for the left
+// hand. HandOffsetRight/Up/Forward, HandOffsetPitch/Yaw/Roll, default 0.
+void GetHandOffset(float position[3], float rotationDeg[3]);
 // Secondary grip offset (per weapon, SetWeaponProfile): where the off hand holds relative to the barrel line, metres
 // in the gun's frame (+ right, + up). The two-handed aim targets the off hand's point moved by it, so a hand below the
 // bore (a vertical foregrip) doesn't tilt the gun. SecondaryGripRight / SecondaryGripUp, default 0.

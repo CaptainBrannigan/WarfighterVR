@@ -7,7 +7,8 @@
 // its 0..1 frame position is mapped into the rectangle, u' = (u - left) / width, so that after the rectangle's
 // viewport the marker lands exactly where the world point is. The game's own off-screen handling then works in the
 // rectangle: markers outside it are pinned to its edge like the game's edge arrows. Only while the HUD is being
-// placed over the 3D world (not in movies / menus, not with placement off).
+// placed over the 3D world (not in movies / menus, not with placement off). Both executables: MOHW.exe and the
+// driving missions' MOHWD.exe (the same function at its own address, see the .cpp).
 
 namespace mohw {
 

@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "default_settings.h"
 
 #include "logging.h" // reuses LogFilePath()'s "next to the DLL" resolution
 
@@ -143,6 +144,13 @@ std::atomic<float> g_vrTurnSpeed{kDefaultVrTurnSpeed};
 std::atomic<float> g_vrStickFullDeflection{kDefaultVrStickFullDeflection};
 std::atomic<float> g_twoHandGrabRadius{kDefaultTwoHandGrabRadius};
 std::atomic<float> g_twoHandReach{kDefaultTwoHandReach};
+// Global hand calibration (2026-10-16), applied to each hand's pose before anything uses it (openvr_direct/vr_input.cpp
+// ApplyHandOffset): position right / up / forward (m) and rotation pitch / yaw / roll (deg) in the controller's frame,
+// mirrored for the left hand.
+std::atomic<float> g_handOffsetPos[3] = {{0.0f}, {0.0f}, {0.0f}};
+std::atomic<float> g_handOffsetRotDeg[3] = {{0.0f}, {0.0f}, {0.0f}};
+constexpr const char* kHandOffsetPosKeys[3] = {"HandOffsetRight", "HandOffsetUp", "HandOffsetForward"};
+constexpr const char* kHandOffsetRotKeys[3] = {"HandOffsetPitch", "HandOffsetYaw", "HandOffsetRoll"};
 // Secondary grip offset (per weapon): where the off hand holds relative to the barrel line, in the gun's frame, metres
 // -- the two-handed aim targets the off hand's point moved by it (openvr_direct/vr_hands.cpp AimAtOffHand).
 std::atomic<float> g_secondaryGripRight{0.0f};
@@ -360,6 +368,11 @@ void WriteSettingsFileLocked()
     fprintf(f, "VrStickFullDeflection=%.4f\n", g_vrStickFullDeflection.load(std::memory_order_relaxed));
     fprintf(f, "TwoHandGrabRadius=%.4f\n", g_twoHandGrabRadius.load(std::memory_order_relaxed));
     fprintf(f, "TwoHandReach=%.4f\n", g_twoHandReach.load(std::memory_order_relaxed));
+    for (int i = 0; i < 3; ++i)
+    {
+        fprintf(f, "%s=%.4f\n", kHandOffsetPosKeys[i], g_handOffsetPos[i].load(std::memory_order_relaxed));
+        fprintf(f, "%s=%.2f\n", kHandOffsetRotKeys[i], g_handOffsetRotDeg[i].load(std::memory_order_relaxed));
+    }
     fprintf(f, "SecondaryGripRight=%.4f\n", DefaultProfileValue(&g_secondaryGripRight));
     fprintf(f, "SecondaryGripUp=%.4f\n", DefaultProfileValue(&g_secondaryGripUp));
     fprintf(f, "HudPlacementEnabled=%d\n", g_hudPlacementEnabled.load(std::memory_order_relaxed) ? 1 : 0);
@@ -522,13 +535,24 @@ void LoadSettings()
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "r") != 0 || !f)
     {
-        MOHW_LOG(kLogFile,
-                  "LoadSettings: %s not found, creating with defaults (FovScale=%.2f IpdScale=%.2f "
-                  "HeadAimEnabled=%d HeadAimSensitivity=%.2f)",
-                  path.c_str(), kDefaultFovScale, kDefaultIpdScale, kDefaultHeadAimEnabled ? 1 : 0,
-                  kDefaultHeadAimSensitivity);
-        WriteSettingsFileLocked();
-        return;
+        // First launch: start from the built-in defaults (sdk/default_settings.h), written out and read like any ini.
+        FILE* out = nullptr;
+        if (fopen_s(&out, path.c_str(), "w") == 0 && out)
+        {
+            fputs(kBuiltInSettings, out);
+            fclose(out);
+        }
+        if (fopen_s(&f, path.c_str(), "r") != 0 || !f)
+        {
+            MOHW_LOG(kLogFile,
+                      "LoadSettings: %s not found, creating with defaults (FovScale=%.2f IpdScale=%.2f "
+                      "HeadAimEnabled=%d HeadAimSensitivity=%.2f)",
+                      path.c_str(), kDefaultFovScale, kDefaultIpdScale, kDefaultHeadAimEnabled ? 1 : 0,
+                      kDefaultHeadAimSensitivity);
+            WriteSettingsFileLocked();
+            return;
+        }
+        MOHW_LOG(kLogFile, "LoadSettings: %s not found, created from the built-in defaults", path.c_str());
     }
 
     std::vector<std::string> profileLines;
@@ -705,6 +729,22 @@ void LoadSettings()
             g_twoHandGrabRadius.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "TwoHandReach", &value))
             g_twoHandReach.store(value, std::memory_order_relaxed);
+        else if ([&] {
+                     for (int i = 0; i < 3; ++i)
+                     {
+                         std::atomic<float>* fields[2] = {&g_handOffsetPos[i], &g_handOffsetRotDeg[i]};
+                         const char* keys[2] = {kHandOffsetPosKeys[i], kHandOffsetRotKeys[i]};
+                         for (int k = 0; k < 2; ++k)
+                             if (ParseFloatSetting(line, keys[k], &value))
+                             {
+                                 fields[k]->store(value, std::memory_order_relaxed);
+                                 return true;
+                             }
+                     }
+                     return false;
+                 }())
+        {
+        }
         else if (ParseFloatSetting(line, "SecondaryGripRight", &value))
             g_secondaryGripRight.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SecondaryGripUp", &value))
@@ -735,6 +775,23 @@ void LoadSettings()
     g_weaponProfiles.clear();
     for (const std::string& profileLine : profileLines)
         ParseWeaponProfileLine(profileLine);
+    // The built-in weapon profiles (sdk/default_settings.h) for weapons this ini has none for -- an older ini gets the
+    // profiles tuned since. Kept in memory; written out with the next save.
+    int builtInAdded = 0;
+    for (const char* p = kBuiltInSettings; *p;)
+    {
+        const char* end = strchr(p, '\n');
+        std::string line = end ? std::string(p, end) : std::string(p);
+        p = end ? end + 1 : p + line.size();
+        static const char kPrefix[] = "WeaponProfile=";
+        if (line.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0)
+            continue;
+        std::string key = line.substr(sizeof(kPrefix) - 1, line.find('|') - (sizeof(kPrefix) - 1));
+        if (!key.empty() && g_weaponProfiles.find(key) == g_weaponProfiles.end() && ParseWeaponProfileLine(line))
+            ++builtInAdded;
+    }
+    if (builtInAdded > 0)
+        MOHW_LOG(kLogFile, "LoadSettings: %d built-in weapon profile(s) added", builtInAdded);
 
     MOHW_LOG(kLogFile,
               "LoadSettings: loaded from %s -- FovScale=%.2f IpdScale=%.2f HeadAimEnabled=%d HeadAimSensitivity=%.2f "
@@ -1021,6 +1078,15 @@ float GetTwoHandGrabRadius()
 float GetTwoHandReach()
 {
     return g_twoHandReach.load(std::memory_order_relaxed);
+}
+
+void GetHandOffset(float position[3], float rotationDeg[3])
+{
+    for (int i = 0; i < 3; ++i)
+    {
+        position[i] = g_handOffsetPos[i].load(std::memory_order_relaxed);
+        rotationDeg[i] = g_handOffsetRotDeg[i].load(std::memory_order_relaxed);
+    }
 }
 
 void GetSecondaryGripOffset(float* right, float* up)
@@ -1361,6 +1427,12 @@ const MenuEntry kMenu[] = {
     {"Hands", "Hold grip to keep weapon", &g_holsterHoldToKeep, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Holster size", nullptr, &g_holsterRadius, 0.05f, 0.4f, 0.01f, 2, "m"},
     {"Hands", "Holster height offset (+ lower)", nullptr, &g_holsterDrop, -0.4f, 0.4f, 0.01f, 2, "m"},
+    {"Hands", "Hand offset right (all weapons)", nullptr, &g_handOffsetPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Hands", "Hand offset up", nullptr, &g_handOffsetPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Hands", "Hand offset forward", nullptr, &g_handOffsetPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Hands", "Hand rotation pitch (+ up)", nullptr, &g_handOffsetRotDeg[0], -45.0f, 45.0f, 0.5f, 1, "deg"},
+    {"Hands", "Hand rotation yaw (+ right)", nullptr, &g_handOffsetRotDeg[1], -45.0f, 45.0f, 0.5f, 1, "deg"},
+    {"Hands", "Hand rotation roll (+ right)", nullptr, &g_handOffsetRotDeg[2], -45.0f, 45.0f, 0.5f, 1, "deg"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach X (each side)", nullptr, &g_holsterPos[0][0], 0.0f, 0.6f, 0.01f, 2, "m"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach Y", nullptr, &g_holsterPos[0][1], -1.2f, 0.3f, 0.01f, 2, "m"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach Z", nullptr, &g_holsterPos[0][2], -0.5f, 0.6f, 0.01f, 2, "m"},

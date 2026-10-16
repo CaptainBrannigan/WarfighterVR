@@ -209,17 +209,36 @@ bool IsSimulationPaused()
 // the rate test calls it 3D -- but it doesn't get the per-eye camera (the frustum match jumps between many camera
 // objects), so its background had no IPD. There is no player then: no aim update and no first-person body for a while,
 // which in play only happens in cutscenes and loads. Then the whole frame is placed like a movie.
-bool NoPlayerForAWhile()
+// IN A LEVEL (2026-10-16): the robot-control section has no aim update and no first-person body either (the robot has
+// its own controls), and after 3 s it turned into a floating screen per eye. It isn't the main menu: the main menu is
+// only reached before any play or through a loading screen. So the player having aimed since the last stretch of
+// 2D-only frames (over 1 s: a loading screen, a movie) counts as being in a level, and that is never the main menu.
+// world = this frame's WorldRenderedRecently, passed in so the 2D stretches are seen every frame.
+bool NoPlayerForAWhile(bool world)
 {
     constexpr unsigned long long kNoPlayerMs = 3000;
+    constexpr unsigned long long kLevelEndsAfter2DMs = 1000;
     unsigned long long now = GetTickCount64();
+    static bool inLevel = false;              // render thread only
+    static unsigned long long twoDSinceMs = 0; // render thread only
+    if (IsPlayerAimActive())
+        inLevel = true;
+    if (world)
+        twoDSinceMs = 0;
+    else if (twoDSinceMs == 0)
+        twoDSinceMs = now;
+    else if (inLevel && now - twoDSinceMs > kLevelEndsAfter2DMs)
+    {
+        inLevel = false;
+        MOHW_LOG("mohwvr_hudlayers.log", "left the level (2D-only frames for %llu ms)", now - twoDSinceMs);
+    }
     unsigned long long lastAim = GetLastAimingUpdateMs();
     bool noAim = lastAim == 0 || now - lastAim > kNoPlayerMs;
     static unsigned long long bodyLastSeenMs = 0; // render thread only
     if (IsPlayerSkeletonLoaded())
         bodyLastSeenMs = now;
     bool noBody = bodyLastSeenMs == 0 || now - bodyLastSeenMs > kNoPlayerMs;
-    return noAim && noBody;
+    return noAim && noBody && !inLevel;
 }
 
 bool Is2DFrame()
@@ -227,7 +246,15 @@ bool Is2DFrame()
     constexpr unsigned kWorldRecentMs = 200; // rate window, see WorldRenderedRecently
     // Driving missions (game\MOHWD.exe): no world-camera rate is measured there; a frame is a real per-eye view while
     // the driving camera hook gives the main view its stereo, and the whole-frame floating screen otherwise.
-    bool twoD = g_drivingExe ? !DrivingStereoActive() : (!WorldRenderedRecently(kWorldRecentMs) || NoPlayerForAWhile());
+    bool twoD = false;
+    if (g_drivingExe)
+        twoD = !DrivingStereoActive();
+    else
+    {
+        bool world = WorldRenderedRecently(kWorldRecentMs);
+        bool noPlayer = NoPlayerForAWhile(world); // every frame, so its level tracking sees the 2D stretches
+        twoD = !world || noPlayer;
+    }
     static bool lastTwoD = false; // render thread only
     if (twoD != lastTwoD)
     {
