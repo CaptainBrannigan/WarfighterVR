@@ -6,6 +6,7 @@
 #include "../sdk/mohw_common.h"
 #include "../sdk/vr_math.h"
 #include "../sdk/motion_controller_aim.h"
+#include "laser_raycast.h"
 
 #include <windows.h>
 #include <cmath>
@@ -98,6 +99,8 @@ struct ThisCallTrampoline
             return result;
         }
 
+        LaserNoteShotDirection(direction.x, direction.y, direction.z); // hooks/laser_raycast.h: the camera's forward sign
+
         Vec3 controllerDir;
         static ShotSpreadRemover spreadRemover; // game thread only
         if (!GetControllerAimDirection(direction, &controllerDir, &spreadRemover))
@@ -119,6 +122,22 @@ struct ThisCallTrampoline
         bool fromHand = GetControllerOriginOffset(&handOffset);
         Vec3 newOrigin = fromHand ? origin + handOffset : origin;
         Vec3 newEnd = newOrigin + controllerDir * rayLength;
+        // SHOTS FOLLOW THE LASER (2026-10-15): aimed from the hand at the laser's point (hooks/laser_raycast.h -- its
+        // hit, or its end), so a shot lands on the dot, whatever small difference the shot's own origin or the
+        // spread mapping would otherwise leave. Without a running laser, the controller's direction as before.
+        float laserPoint[3];
+        bool onLaser = GetLaserAimPoint(laserPoint);
+        if (onLaser)
+        {
+            Vec3 toPoint{laserPoint[0] - newOrigin.x, laserPoint[1] - newOrigin.y, laserPoint[2] - newOrigin.z};
+            float toPointLength = sqrtf(toPoint.Dot(toPoint));
+            // Only a point AHEAD along the controller: a laser cast that went wrong (live 2026-10-15 18:17, one cast
+            // behind the player) must not turn the shot around -- the controller's direction then, like the tracer.
+            if (toPointLength > 0.05f && toPoint.Dot(controllerDir) > 0.0f)
+                newEnd = newOrigin + toPoint * (rayLength / toPointLength);
+            else
+                onLaser = false;
+        }
 
         originPtr[0] = newOrigin.x;
         originPtr[1] = newOrigin.y;
@@ -129,9 +148,10 @@ struct ThisCallTrampoline
 
         MOHW_LOG(kLogFile,
                    "call #%d: origin={%.3f,%.3f,%.3f} -> %s{%.3f,%.3f,%.3f} original end={%.3f,%.3f,%.3f} "
-                   "controller-redirected end={%.3f,%.3f,%.3f} (candidateCount before=%d)",
+                   "%s-redirected end={%.3f,%.3f,%.3f} (candidateCount before=%d)",
                    n, origin.x, origin.y, origin.z, fromHand ? "hand " : "unchanged ", newOrigin.x, newOrigin.y,
-                   newOrigin.z, end.x, end.y, end.z, newEnd.x, newEnd.y, newEnd.z, countBefore);
+                   newOrigin.z, end.x, end.y, end.z, onLaser ? "laser" : "controller", newEnd.x, newEnd.y, newEnd.z,
+                   countBefore);
         float yawOffset = 0.0f, pitchOffset = 0.0f;
         bool locked = spreadRemover.Get(&yawOffset, &pitchOffset);
         const char* status = !GetRemoveShotSpread()            ? "kept (RemoveShotSpread off)"

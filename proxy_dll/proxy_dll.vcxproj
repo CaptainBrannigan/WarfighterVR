@@ -96,6 +96,9 @@
     <ClCompile Include="..\hooks\aiming_controller_hook.cpp" />
     <ClCompile Include="..\hooks\xinput_hook.cpp" />
     <ClCompile Include="..\hooks\weapon_sway_patch.cpp" />
+    <ClCompile Include="..\hooks\weapon_identity.cpp" />
+    <ClCompile Include="..\hooks\master_switch.cpp" />
+    <ClCompile Include="..\hooks\laser_raycast.cpp" />
     <ClCompile Include="..\hooks\driving_camera_hook.cpp" />
     <ClCompile Include="..\hooks\fov_scale_hook.cpp" />
     <ClCompile Include="..\hooks\eye_matched_fov.cpp" />
@@ -140,6 +143,9 @@
     <ClInclude Include="..\hooks\aiming_controller_hook.h" />
     <ClInclude Include="..\hooks\xinput_hook.h" />
     <ClInclude Include="..\hooks\weapon_sway_patch.h" />
+    <ClInclude Include="..\hooks\weapon_identity.h" />
+    <ClInclude Include="..\hooks\master_switch.h" />
+    <ClInclude Include="..\hooks\laser_raycast.h" />
     <ClInclude Include="..\hooks\driving_camera_hook.h" />
     <ClInclude Include="..\hooks\fov_scale_hook.h" />
     <ClInclude Include="..\hooks\eye_matched_fov.h" />

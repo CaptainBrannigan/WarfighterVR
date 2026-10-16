@@ -28,7 +28,6 @@ namespace {
 constexpr const char* kLogFile = "mohwvr_openvr_direct.log";
 
 // Minimal OpenVR C-ABI surface, loaded dynamically -- see openvr_direct.h's top comment for why (DRM).
-using PFN_VR_IsHmdPresent = bool(__cdecl*)();
 using PFN_VR_InitInternal2 = uint32_t(__cdecl*)(int* peError, int eApplicationType, const char* pStartupInfo);
 using PFN_VR_GetGenericInterface = void*(__cdecl*)(const char* pchInterfaceVersion, int* peError);
 using PFN_VR_IsInterfaceVersionValid = bool(__cdecl*)(const char* pchInterfaceVersion);
@@ -297,59 +296,54 @@ bool EnsurePersistentEyeTexture(ID3D11Device* device, ID3D11Texture2D*& tex, UIN
     return true;
 }
 
-void ConnectThreadProc()
+// One connection attempt (TryConnectOpenVrDirect): NotNow = no headset this time, try again later (the state goes back
+// to NotStarted); Failed = connected to SteamVR but something it needs is missing, don't retry.
+ConnectResult ConnectAttempt()
 {
     // The main game folder, where the SteamVR-current copy was placed -- also from the driving missions'
-    // game\MOHWD.exe (LogFilePath resolves its game\ folder to the main one), so one copy serves both.
-    char path[MAX_PATH] = {};
-    strcpy_s(path, LogFilePath("openvr_api.dll").c_str());
-
-    MOHW_LOG(kLogFile, "loading %s ...", path);
-    HMODULE h = LoadLibraryA(path);
+    // game\MOHWD.exe (LogFilePath resolves its game\ folder to the main one), so one copy serves both. Loaded once.
+    static HMODULE h = nullptr;
     if (!h)
     {
-        MOHW_LOG(kLogFile, "LoadLibraryA FAILED, GetLastError=%lu", GetLastError());
-        g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
-        return;
+        char path[MAX_PATH] = {};
+        strcpy_s(path, LogFilePath("openvr_api.dll").c_str());
+        MOHW_LOG(kLogFile, "loading %s ...", path);
+        h = LoadLibraryA(path);
+        if (!h)
+        {
+            MOHW_LOG(kLogFile, "LoadLibraryA FAILED, GetLastError=%lu", GetLastError());
+            return ConnectResult::Failed;
+        }
     }
 
-    auto isHmdPresent = reinterpret_cast<PFN_VR_IsHmdPresent>(GetProcAddress(h, "VR_IsHmdPresent"));
     auto initInternal2 = reinterpret_cast<PFN_VR_InitInternal2>(GetProcAddress(h, "VR_InitInternal2"));
     auto getGenericInterface = reinterpret_cast<PFN_VR_GetGenericInterface>(GetProcAddress(h, "VR_GetGenericInterface"));
     auto isInterfaceVersionValid =
         reinterpret_cast<PFN_VR_IsInterfaceVersionValid>(GetProcAddress(h, "VR_IsInterfaceVersionValid"));
-    if (!isHmdPresent || !initInternal2 || !getGenericInterface || !isInterfaceVersionValid)
+    if (!initInternal2 || !getGenericInterface || !isInterfaceVersionValid)
     {
         MOHW_LOG(kLogFile, "GetProcAddress FAILED for one or more exports");
-        g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
-        return;
+        return ConnectResult::Failed;
     }
 
-    bool hmdPresent = isHmdPresent();
-    MOHW_LOG(kLogFile, "VR_IsHmdPresent() = %d", hmdPresent);
-    if (!hmdPresent)
-    {
-        // Skip VR_InitInternal2 entirely when no headset present -- confirmed live it starts/talks to SteamVR
-        // regardless (standard OpenVR behavior), which stalled the game well before the main menu with SteamVR
-        // running headless. Every eye-matched/true-frustum code path already degrades gracefully when
-        // GetHmdView() never returns real data, same as it does before this thread finishes either way.
-        MOHW_LOG(kLogFile, "no HMD present -- skipping VR_InitInternal2 entirely, game renders normally");
-        g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
-        return;
-    }
-
-    MOHW_LOG(kLogFile,
-              "calling VR_InitInternal2() -- confirmed to sometimes hang indefinitely; this is a background thread "
-              "specifically so that can never freeze the game...");
+    // No VR_IsHmdPresent first (removed 2026-10-16): it loads SteamVR's client and the headset drivers INTO this
+    // process to ask them directly. Live, the game hung at startup with no window, every thread waiting, and the log
+    // stopped right here, while SteamVR's Steam Link driver was failing ("NVENC: Invalid Level", fatal, 3 s later).
+    // It was no filter anyway (it said yes with no headset: the wireless driver counts as present). The init below
+    // goes to the running vrserver over IPC and is the real test.
+    // Only ever called with SteamVR already running (hooks/master_switch.cpp), so this never launches it.
     int err = kInitError_None;
     uint32_t token = initInternal2(&err, kAppType_Scene, nullptr);
-    MOHW_LOG(kLogFile, "VR_InitInternal2() returned token=%u err=%d", token, err);
     if (err != kInitError_None)
     {
-        MOHW_LOG(kLogFile, "init FAILED, err=%d -- staying disconnected, game renders normally", err);
-        g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
-        return;
+        static int lastErr = 0;
+        if (err != lastErr)
+            MOHW_LOG(kLogFile, "VR_InitInternal2() err=%d -- no headset connected yet", err);
+        lastErr = err;
+        return ConnectResult::NotNow;
     }
+    MOHW_LOG(kLogFile, "VR_InitInternal2() returned token=%u -- connected", token);
+    g_state.store(static_cast<int>(ConnectState::Connecting), std::memory_order_relaxed);
 
     bool ifaceOk = isInterfaceVersionValid("IVRSystem_026");
     MOHW_LOG(kLogFile, "IVRSystem_026 valid = %d", ifaceOk);
@@ -408,7 +402,7 @@ void ConnectThreadProc()
     if (!compositor)
     {
         g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
-        return;
+        return ConnectResult::Failed;
     }
 
     void** vtable = *reinterpret_cast<void***>(compositor);
@@ -433,6 +427,7 @@ void ConnectThreadProc()
 
     MOHW_LOG(kLogFile, "CONNECTED -- game thread will start the separate-device SubmitThreadProc on its first call");
     g_state.store(static_cast<int>(ConnectState::Connected), std::memory_order_release);
+    return ConnectResult::Connected;
 }
 
 // Re-opens tex (and its keyed mutex) on g_ownDevice from sharedHandle whenever generationAtomic has moved
@@ -721,16 +716,11 @@ void SubmitThreadProc()
 // only when connected, i.e. when it's worth copying eye textures at all.
 bool PrepareForUpdate(ID3D11Device* device)
 {
+    // The connection is made by the master switch (hooks/master_switch.h) before any hook is installed, so it's
+    // normally up by the first call here.
     int state = g_state.load(std::memory_order_acquire);
-    if (state == static_cast<int>(ConnectState::NotStarted))
-    {
-        g_state.store(static_cast<int>(ConnectState::Connecting), std::memory_order_relaxed);
-        MOHW_LOG(kLogFile, "starting background connect attempt");
-        std::thread(ConnectThreadProc).detach();
-        return false;
-    }
     if (state != static_cast<int>(ConnectState::Connected))
-        return false; // still connecting or failed -- game keeps rendering normally either way
+        return false; // failed -- game keeps rendering normally
 
     // One-time: create the separate device (see the design comment near g_leftTex) on the SAME adapter as the
     // game's device, then start SubmitThreadProc. Done here (not in ConnectThreadProc) because finding the
@@ -873,6 +863,13 @@ bool IsPairPublishEnabled()
 bool IsOpenVrDirectConnected()
 {
     return g_state.load(std::memory_order_acquire) == static_cast<int>(ConnectState::Connected);
+}
+
+ConnectResult TryConnectOpenVrDirect()
+{
+    if (g_state.load(std::memory_order_acquire) == static_cast<int>(ConnectState::Connected))
+        return ConnectResult::Connected;
+    return ConnectAttempt();
 }
 
 float GetDetectedDisplayFrequencyHz()

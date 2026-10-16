@@ -11,6 +11,7 @@
 #include "eye_matched_fov.h"
 #include "render_pose_stamp.h"
 #include "head_position.h"
+#include "laser_raycast.h"
 
 #include <windows.h>
 #include <cmath>
@@ -541,6 +542,8 @@ struct ThisCallTrampoline
         bool applied = false;
         if (param2 != nullptr)
         {
+            // The laser (hooks/laser_raycast.h) needs the game's own camera, before anything below changes it.
+            LaserCaptureGameCamera(static_cast<const float*>(param2));
             // SWAP POINT (2026-09-20): the eye-matched method (hooks/eye_matched_fov.cpp)
             // sets fovY from the headset's real per-eye frustum. The old method is
             // ApplyFovScale(param2) (FovScale multiplier, still defined above) -- swap back
@@ -554,9 +557,12 @@ struct ThisCallTrampoline
             ApplyHeadRoll(param2); // additive on top of the native yaw/pitch sync, see its own comment
             // EXPERIMENTAL head position (hooks/head_position.h): moves the camera translation by the real head delta since recenter.
             ApplyHeadPosition(param2);
-            ApplyEyeOffset(param2);
-            // EXPERIMENTAL render-pose stamp (hooks/render_pose_stamp.h): the camera rotation is final here.
+            // EXPERIMENTAL render-pose stamp (hooks/render_pose_stamp.h): the camera rotation is final here (the eye
+            // offset below only moves it). Before the laser, which casts through this stamp.
             ComputeRenderPoseStamp(param2);
+            // The laser: cast through the camera as rendered for the centre eye (hooks/laser_raycast.h).
+            LaserOnCommit(static_cast<const float*>(param2));
+            ApplyEyeOffset(param2);
         }
 
         LogIfDue(param2, applied);

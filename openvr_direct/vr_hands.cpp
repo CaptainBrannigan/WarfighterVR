@@ -293,26 +293,49 @@ bool OnBarrel(const HandInput& weapon, const HandInput& off, float* outAlong, fl
 
 // The weapon hand's orientation aimed at the off hand, keeping the weapon hand's up (so twisting it still rolls the
 // gun). False if the hands are too close to give a direction.
-bool AimAtOffHand(const HandInput& weapon, const HandInput& off, Quat* out)
+// The gun's frame for a forward direction, keeping the weapon hand's up: right, up, back (unit). False if degenerate.
+bool GunFrame(const Vec3& forward, const HandInput& weapon, Vec3* rightAxis, Vec3* up, Vec3* back)
 {
-    Vec3 forward = VecSub(Column(off.pose, 3), Column(weapon.pose, 3));
-    if (sqrtf(VecDot(forward, forward)) < 0.08f || !Normalize(&forward))
-        return false;
-    Vec3 back = VecScale(forward, -1.0f);
-    Vec3 up = Column(weapon.pose, 1);
-    up = VecSub(up, VecScale(forward, VecDot(up, forward)));
-    if (!Normalize(&up))
+    *back = VecScale(forward, -1.0f);
+    *up = Column(weapon.pose, 1);
+    *up = VecSub(*up, VecScale(forward, VecDot(*up, forward)));
+    if (!Normalize(up))
     {
-        up = Vec3{};
-        up.y = 1.0f;
-        up = VecSub(up, VecScale(forward, VecDot(up, forward)));
-        if (!Normalize(&up))
+        *up = Vec3{};
+        up->y = 1.0f;
+        *up = VecSub(*up, VecScale(forward, VecDot(*up, forward)));
+        if (!Normalize(up))
             return false;
     }
-    Vec3 rightAxis = Cross(up, back);
-    if (!Normalize(&rightAxis))
+    *rightAxis = Cross(*up, *back);
+    if (!Normalize(rightAxis))
         return false;
-    up = Cross(back, rightAxis);
+    *up = Cross(*back, *rightAxis);
+    return true;
+}
+
+bool AimAtOffHand(const HandInput& weapon, const HandInput& off, Quat* out)
+{
+    Vec3 weaponPos = Column(weapon.pose, 3);
+    Vec3 forward = VecSub(Column(off.pose, 3), weaponPos);
+    if (sqrtf(VecDot(forward, forward)) < 0.08f || !Normalize(&forward))
+        return false;
+    Vec3 rightAxis, up, back;
+    if (!GunFrame(forward, weapon, &rightAxis, &up, &back))
+        return false;
+    // SECONDARY GRIP OFFSET (per weapon, 2026-10-15): the off hand rarely sits on the barrel line (a vertical foregrip
+    // holds it below, a handguard grip beside), which tilted the aim. Aim at its point moved by the offset in the gun's
+    // frame instead, then rebuild the frame for that line.
+    float offsetRight = 0.0f, offsetUp = 0.0f;
+    GetSecondaryGripOffset(&offsetRight, &offsetUp);
+    if (offsetRight != 0.0f || offsetUp != 0.0f)
+    {
+        Vec3 anchor = VecAdd(Column(off.pose, 3), VecAdd(VecScale(rightAxis, offsetRight), VecScale(up, offsetUp)));
+        forward = VecSub(anchor, weaponPos);
+        if (sqrtf(VecDot(forward, forward)) < 0.08f || !Normalize(&forward) ||
+            !GunFrame(forward, weapon, &rightAxis, &up, &back))
+            return false;
+    }
     float m[3][4] = {};
     const Vec3* cols[3] = {&rightAxis, &up, &back};
     for (int c = 0; c < 3; ++c)

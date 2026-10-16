@@ -31,6 +31,11 @@ Start SteamVR, then launch the game normally. The mod creates `mohwvr_settings.i
 binding files next to the DLL on first launch. Settings are changed from inside the headset (see
 [Settings menu](#settings-menu)).
 
+**No headset, no mod:** the mod only switches on once it has connected to a headset through SteamVR. Without one the
+game runs completely unmodified (nothing is hooked), so you can leave the DLL installed and play flat. The mod never
+starts SteamVR itself. It keeps checking every few seconds: start SteamVR and connect a headset while the game is
+running and the mod switches on then, and stays on until you quit.
+
 **Controller bindings:** in SteamVR's controller bindings for the game, pick **"MOHW VR defaults"**. If you
 previously saved your own binding for the game, SteamVR keeps using that copy and won't pick up new actions from a
 newer version of the mod until you switch back to the defaults (or add the new actions to your copy).
@@ -72,8 +77,23 @@ newer version of the mod until you switch back to the defaults (or add the new a
   | Either shoulder | Melee |
 
   Zone positions, size and actions are all adjustable; actions can be any of the game's keyboard actions.
-- **Sight dots:** an optic dot fixed to the gun (zero it with its height and windage settings) and an aim-ray dot
-  along the controller's line, each red or green.
+- **Laser:** a dot exactly on the line the shots take, with no offset of its own, sitting on the first surface that
+  line hits (found with the game's own collision, so it lands on walls, cover and enemies at the right depth), with a
+  semi-transparent beam in the same colour from your hand to it. Shots and tracers are aimed at the dot, so they land
+  where it sits. A per-weapon "Laser start" moves the laser's beginning out to the muzzle so the gun can't block it,
+  and "Beam start right / up" move where the drawn beam starts (purely visual, e.g. a laser module beside the barrel;
+  the dot stays on the shot line). Beam on/off, opacity and width, the max range, and how often the raycast runs
+  (every N frames) are in the settings menu.
+- **Optic dot:** fixed to the gun like a sight -- zero it against the laser with its height and windage settings. Each
+  dot red or green.
+- **Peek and lean:** hold LB ("Gamepad: LB" in the SteamVR bindings, or a left-grip double-tap held on the second
+  press) and push the move stick: analog lean left / right and peek up / down, as on a gamepad. Turn off the game's
+  own **Auto ADS** option to lean without aiming down sights (with it on, a full lean aims down sights by itself).
+- **Weapon profiles:** the grip offset and rotation, the optic zero, the controller aim offset, the secondary
+  (two-handed) grip offset and the laser / beam start are kept per weapon
+  and switch automatically with the weapon in your hand (picked-up weapons included). The settings menu's "Weapon
+  profile: <weapon>" section edits the weapon you're holding; a weapon you haven't set up yet starts from the default
+  values, which are also used when no weapon is held.
 
 ### Driving missions
 The game runs its driving missions in a separate executable (`game\MOHWD.exe`, see [Installing](#installing)); the

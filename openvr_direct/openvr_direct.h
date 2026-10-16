@@ -55,6 +55,18 @@ bool IsPairPublishEnabled();
 
 bool IsOpenVrDirectConnected();
 
+// The master switch's thread (hooks/master_switch.h), with SteamVR already running: one attempt at the connection --
+// VR_Init, the headset's frustum, compositor, controllers, dashboard tab. Blocking (VR_Init has been seen to hang, so
+// never on a game thread). NotNow: no headset connected this time (VR_Init failed, e.g. 215 Driver_WirelessHmdNotConnected
+// -- VR_IsHmdPresent alone said yes with no headset), try again later. Failed: don't retry.
+enum class ConnectResult
+{
+    Connected,
+    NotNow,
+    Failed,
+};
+ConnectResult TryConnectOpenVrDirect();
+
 // The HMD's real display refresh rate, queried live via IVRSystem::GetFloatTrackedDeviceProperty
 // (Prop_DisplayFrequency_Float) once connected -- see openvr_direct.cpp's g_detectedDisplayFrequencyHz comment.
 // Returns 0.0f if not yet known (not connected, or the query failed/returned an implausible value).

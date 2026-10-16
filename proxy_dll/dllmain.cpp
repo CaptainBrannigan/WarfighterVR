@@ -27,6 +27,8 @@
 #include "../hooks/aiming_controller_hook.h"
 #include "../hooks/xinput_hook.h"
 #include "../hooks/weapon_sway_patch.h"
+#include "../hooks/weapon_identity.h"
+#include "../hooks/master_switch.h"
 #include "../hooks/fov_scale_hook.h"
 #include "../hooks/projection_aspect_hook.h"
 #include "../hooks/alternating_eye.h"
@@ -73,6 +75,81 @@ HMODULE RealDxgiModule()
     return hReal;
 }
 
+// The driving missions' executable: only the build-independent hooks plus its own camera hook. Run by the master switch
+// (hooks/master_switch.h) once a headset is detected.
+void InstallDrivingHooks()
+{
+    if (!mohw::InstallPresentHook())
+        MOHW_LOG(kLogFile, "InstallPresentHook FAILED -- see mohwvr_present.log");
+    if (!mohw::InstallXInputHook())
+        MOHW_LOG(kLogFile, "InstallXInputHook FAILED -- see mohwvr_xinput.log");
+    // Head look and stereo at the camera source -- see hooks/driving_camera_hook.h.
+    if (!mohw::InstallDrivingCameraHook())
+        MOHW_LOG(kLogFile, "InstallDrivingCameraHook FAILED -- see mohwvr_drivingcamera.log");
+}
+
+// The main game: every hook and the mod's threads. Run by the master switch once a headset is detected -- normally
+// right at startup, otherwise whenever one connects (MinHook patches a running game safely: it suspends the other
+// threads while it writes).
+void InstallGameHooks()
+{
+    if (!mohw::InstallPresentHook())
+        MOHW_LOG(kLogFile, "InstallPresentHook FAILED -- see mohwvr_present.log");
+
+    // RETIRED 2026-09-28: the constant-buffer hook (bone-buffer detection + the bone-hide test) and the
+    // engine-function diagnostic hook are no longer installed. The bone-hide test was superseded by the viewmodel
+    // instance hide (camera_matrix_test_hook.cpp); what was left was pure overhead -- six hooks on hot D3D calls
+    // (Map/Unmap/UpdateSubresource/DrawIndexed/VS+PSSetConstantBuffers), the same kind of whole-frame hook cost
+    // that caused the 2026-09-22 ghosting regression -- plus hotkeys colliding with gameplay (End = the holsters'
+    // melee key, Delete, Numpad 0/1/2/8/9/+/-/*//). Code kept for reference; the Remove* calls below are no-ops.
+    constexpr bool kLegacyBoneHooksEnabled = false;
+    if (kLegacyBoneHooksEnabled)
+    {
+        if (!mohw::InstallConstantBufferHook())
+            MOHW_LOG(kLogFile, "InstallConstantBufferHook FAILED -- see mohwvr_cbscan.log");
+        if (!mohw::InstallEngineFunctionHook())
+            MOHW_LOG(kLogFile, "InstallEngineFunctionHook FAILED -- see mohwvr_enginefn.log");
+    }
+
+    if (!mohw::InstallFovScaleHook())
+        MOHW_LOG(kLogFile, "InstallFovScaleHook FAILED -- see mohwvr_fovscale.log");
+
+    // Vertical-only FOV for the inner-edge view mode: changes the projection aspect inside the engine's matrix
+    // rebuild (see hooks/projection_aspect_hook.h). Inert unless eye_matched_fov.cpp activates it.
+    if (!mohw::InstallProjectionAspectHook())
+        MOHW_LOG(kLogFile, "InstallProjectionAspectHook FAILED -- see mohwvr_fovscale.log");
+
+    // Head-aim itself defaults OFF (sdk/settings.h, F12 to enable).
+    if (!mohw::InstallAimingControllerHook())
+        MOHW_LOG(kLogFile, "InstallAimingControllerHook FAILED -- see mohwvr_aimingcontroller.log");
+
+    // VR thumbsticks presented to the game as XInput controller 0 (see hooks/xinput_hook.h).
+    if (!mohw::InstallXInputHook())
+        MOHW_LOG(kLogFile, "InstallXInputHook FAILED -- see mohwvr_xinput.log");
+
+    // Cosmetic bullet-travel/impact-VFX redirect to the right motion controller's live aim direction --
+    // the visual feedback channel alongside InstallFireCandidateRedirectHook's actual hit-scan redirect.
+    if (!mohw::InstallBulletRaycastRedirectHook())
+        MOHW_LOG(kLogFile, "InstallBulletRaycastRedirectHook FAILED -- see mohwvr_bulletraycast.log");
+
+    // Redirects the real hit-scan/damage raycast to the right motion controller's live aim direction --
+    // see hooks/fire_candidate_redirect_hook.cpp and sdk/mohw_offsets.h's OFFSET_FIRECANDIDATE comment.
+    if (!mohw::InstallFireCandidateRedirectHook())
+        MOHW_LOG(kLogFile, "InstallFireCandidateRedirectHook FAILED -- see mohwvr_firecandidate.log");
+
+    // IsPlayerSkeletonLoaded() (consumed via camera_matrix_test_hook.h) needs this hook installed.
+    if (!mohw::InstallCameraMatrixTestHook())
+        MOHW_LOG(kLogFile, "InstallCameraMatrixTestHook FAILED -- see mohwvr_cameramatrix.log");
+
+    // ADS sway: scales the weapons' zoomed sway (GunSwayData) by AdsSwayScale -- see hooks/weapon_sway_patch.h.
+    mohw::StartWeaponSwayPatch();
+    // (Which weapon is equipped -- hooks/weapon_identity.h -- is resolved from the AimingController hook.)
+
+    // Companion-bridge pose/view overrides and openvr_direct's own connection are driven from
+    // present_hook.cpp's Present hook instead of here -- they need the game's real D3D11 device and
+    // swapchain, which aren't available yet at this point in initialization.
+}
+
 // Deliberately NOT done from DllMain: MinHook allocates/patches executable
 // memory near the target address, and doing that under loader lock (i.e.
 // still inside DLL_PROCESS_ATTACH) is a known deadlock risk. Instead this
@@ -88,10 +165,8 @@ void EnsureInitialized()
 
         // DRIVING MISSIONS (2026-10-14): MOHW.exe hands the driving levels to game\MOHWD.exe ("-exeSwap -returnExe
         // ... -level ..."), a different build where none of the game offsets apply. With a copy of this DLL next to
-        // it, only the build-independent parts run: the SteamVR connection, the whole frame shown as a floating
-        // screen (draw_trace_diag's whole-frame placement -- no world camera rate is measured there, so every frame
-        // counts as 2D), and the controllers as the virtual gamepad. Plus a one-time dump of its decrypted code, to
-        // see how much of the main build's hooks could be ported by signature.
+        // it, only the build-independent parts run (the SteamVR connection, the virtual gamepad) plus that build's
+        // own camera hook (InstallDrivingHooks).
         char exePath[MAX_PATH] = {};
         GetModuleFileNameA(nullptr, exePath, MAX_PATH);
         const char* exeName = strrchr(exePath, '\\');
@@ -99,15 +174,10 @@ void EnsureInitialized()
         if (_stricmp(exeName, "MOHWD.exe") == 0)
         {
             mohw::g_drivingExe = true;
-            MOHW_LOG(kLogFile, "running in the driving missions' executable (%s): theater mode -- no game hooks", exePath);
+            MOHW_LOG(kLogFile, "running in the driving missions' executable (%s)", exePath);
             mohw::LoadSettings();
-            if (!mohw::InstallPresentHook())
-                MOHW_LOG(kLogFile, "InstallPresentHook FAILED -- see mohwvr_present.log");
-            if (!mohw::InstallXInputHook())
-                MOHW_LOG(kLogFile, "InstallXInputHook FAILED -- see mohwvr_xinput.log");
-            // Head look on a camera picked in the dashboard (DrivingCamera) -- see hooks/driving_camera_hook.h.
-            if (!mohw::InstallDrivingCameraHook())
-                MOHW_LOG(kLogFile, "InstallDrivingCameraHook FAILED -- see mohwvr_drivingcamera.log");
+            // MASTER SWITCH: nothing is hooked until a headset is detected -- see hooks/master_switch.h.
+            mohw::StartMasterSwitch(&InstallDrivingHooks);
             return;
         }
 
@@ -135,60 +205,9 @@ void EnsureInitialized()
         // that reads them installs -- see sdk/settings.h.
         mohw::LoadSettings();
 
-        if (!mohw::InstallPresentHook())
-            MOHW_LOG(kLogFile, "InstallPresentHook FAILED -- see mohwvr_present.log");
-
-        // RETIRED 2026-09-28: the constant-buffer hook (bone-buffer detection + the bone-hide test) and the
-        // engine-function diagnostic hook are no longer installed. The bone-hide test was superseded by the viewmodel
-        // instance hide (camera_matrix_test_hook.cpp); what was left was pure overhead -- six hooks on hot D3D calls
-        // (Map/Unmap/UpdateSubresource/DrawIndexed/VS+PSSetConstantBuffers), the same kind of whole-frame hook cost
-        // that caused the 2026-09-22 ghosting regression -- plus hotkeys colliding with gameplay (End = the holsters'
-        // melee key, Delete, Numpad 0/1/2/8/9/+/-/*//). Code kept for reference; the Remove* calls below are no-ops.
-        constexpr bool kLegacyBoneHooksEnabled = false;
-        if (kLegacyBoneHooksEnabled)
-        {
-            if (!mohw::InstallConstantBufferHook())
-                MOHW_LOG(kLogFile, "InstallConstantBufferHook FAILED -- see mohwvr_cbscan.log");
-            if (!mohw::InstallEngineFunctionHook())
-                MOHW_LOG(kLogFile, "InstallEngineFunctionHook FAILED -- see mohwvr_enginefn.log");
-        }
-
-        if (!mohw::InstallFovScaleHook())
-            MOHW_LOG(kLogFile, "InstallFovScaleHook FAILED -- see mohwvr_fovscale.log");
-
-        // Vertical-only FOV for the inner-edge view mode: changes the projection aspect inside the engine's matrix
-        // rebuild (see hooks/projection_aspect_hook.h). Inert unless eye_matched_fov.cpp activates it.
-        if (!mohw::InstallProjectionAspectHook())
-            MOHW_LOG(kLogFile, "InstallProjectionAspectHook FAILED -- see mohwvr_fovscale.log");
-
-        // Head-aim itself defaults OFF (sdk/settings.h, F12 to enable).
-        if (!mohw::InstallAimingControllerHook())
-            MOHW_LOG(kLogFile, "InstallAimingControllerHook FAILED -- see mohwvr_aimingcontroller.log");
-
-        // VR thumbsticks presented to the game as XInput controller 0 (see hooks/xinput_hook.h).
-        if (!mohw::InstallXInputHook())
-            MOHW_LOG(kLogFile, "InstallXInputHook FAILED -- see mohwvr_xinput.log");
-
-        // Cosmetic bullet-travel/impact-VFX redirect to the right motion controller's live aim direction --
-        // the visual feedback channel alongside InstallFireCandidateRedirectHook's actual hit-scan redirect.
-        if (!mohw::InstallBulletRaycastRedirectHook())
-            MOHW_LOG(kLogFile, "InstallBulletRaycastRedirectHook FAILED -- see mohwvr_bulletraycast.log");
-
-        // Redirects the real hit-scan/damage raycast to the right motion controller's live aim direction --
-        // see hooks/fire_candidate_redirect_hook.cpp and sdk/mohw_offsets.h's OFFSET_FIRECANDIDATE comment.
-        if (!mohw::InstallFireCandidateRedirectHook())
-            MOHW_LOG(kLogFile, "InstallFireCandidateRedirectHook FAILED -- see mohwvr_firecandidate.log");
-
-        // IsPlayerSkeletonLoaded() (consumed via camera_matrix_test_hook.h) needs this hook installed.
-        if (!mohw::InstallCameraMatrixTestHook())
-            MOHW_LOG(kLogFile, "InstallCameraMatrixTestHook FAILED -- see mohwvr_cameramatrix.log");
-
-        // ADS sway: scales the weapons' zoomed sway (GunSwayData) by AdsSwayScale -- see hooks/weapon_sway_patch.h.
-        mohw::StartWeaponSwayPatch();
-
-        // Companion-bridge pose/view overrides and openvr_direct's own connection are driven from
-        // present_hook.cpp's Present hook instead of here -- they need the game's real D3D11 device and
-        // swapchain, which aren't available yet at this point in initialization.
+        // MASTER SWITCH: nothing is hooked until a headset is detected; then InstallGameHooks runs, for the rest of
+        // the session -- see hooks/master_switch.h.
+        mohw::StartMasterSwitch(&InstallGameHooks);
     });
 }
 

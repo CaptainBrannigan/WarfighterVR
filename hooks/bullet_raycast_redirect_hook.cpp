@@ -7,6 +7,7 @@
 #include "../sdk/vr_math.h"
 #include "../sdk/motion_controller_aim.h"
 #include "../openvr_direct/vr_input.h"
+#include "laser_raycast.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -40,7 +41,7 @@ constexpr const char* kTargetIdent = "BulletEntity updateTransformSync";
 // OFFSET_GAMEWORLD_RAYCAST comment): __thiscall, param_1 (ECX) = the
 // GameWorld singleton. hits/excluded are opaque (RayCastHit/fixed_vector
 // aren't reversed yet) -- passed through untouched as void*.
-using GameWorldRayCastFn = bool(__thiscall*)(void* param1, const char* ident, int rayCastTest, Vec3* start,
+using GameWorldRayCastFn = unsigned int(__thiscall*)(void* param1, const char* ident, int rayCastTest, Vec3* start,
                                                 Vec3* end, void* hits, unsigned int maxHitCount,
                                                 unsigned int materialFlags, unsigned int flags, void* excluded);
 
@@ -161,7 +162,7 @@ void LogOtherRaycast(const char* ident, const Vec3* start, const Vec3* end, uint
 // (verified via static_assert below).
 struct ThisCallTrampoline
 {
-    bool Hooked(const char* ident, int rayCastTest, Vec3* start, Vec3* end, void* hits, unsigned int maxHitCount,
+    unsigned int Hooked(const char* ident, int rayCastTest, Vec3* start, Vec3* end, void* hits, unsigned int maxHitCount,
                  unsigned int materialFlags, unsigned int flags, void* excluded)
     {
         void* param1 = this;
@@ -209,6 +210,16 @@ struct ThisCallTrampoline
         }
 
         Vec3 newEnd = origin + controllerDir * segLength;
+        // The tracer follows the shot to the laser's point (hooks/laser_raycast.h), while that point is still ahead of
+        // the bullet; once it's reached (or behind), the controller's direction carries on.
+        float laserPoint[3];
+        if (GetLaserAimPoint(laserPoint))
+        {
+            Vec3 toPoint{laserPoint[0] - origin.x, laserPoint[1] - origin.y, laserPoint[2] - origin.z};
+            float toPointLength = sqrtf(toPoint.Dot(toPoint));
+            if (toPointLength > 0.5f && toPoint.Dot(controllerDir) > 0.0f)
+                newEnd = origin + toPoint * (segLength / toPointLength);
+        }
 
         // Deliberately NOT restored after the call -- end represents the
         // bullet's actual new position this tick, and should persist so
@@ -221,10 +232,16 @@ struct ThisCallTrampoline
                    n, origin.x, origin.y, origin.z, originalEnd.x, originalEnd.y, originalEnd.z, newEnd.x, newEnd.y,
                    newEnd.z);
 
-        bool result = g_originalRayCast(param1, ident, rayCastTest, start, end, hits, maxHitCount, materialFlags,
+        unsigned int result = g_originalRayCast(param1, ident, rayCastTest, start, end, hits, maxHitCount, materialFlags,
                                           flags, excluded);
 
-        MOHW_LOG(kLogFile, "call #%d: RayCast returned %s", n, result ? "true (hit)" : "false (no hit)");
+        MOHW_LOG(kLogFile, "call #%d: RayCast returned %u hit(s)", n, result);
+        if (result > 0) // ground truth for the laser (hooks/laser_raycast.h)
+        {
+            float segStart[3] = {start->x, start->y, start->z};
+            float segEnd[3] = {end->x, end->y, end->z};
+            LaserNoteBulletHits(hits, result, segStart, segEnd);
+        }
 
         return result;
     }
@@ -278,6 +295,13 @@ bool InstallBulletRaycastRedirectHook()
                "will have its per-tick segment redirected to the right motion controller's live aim direction",
                g_hookAddress, kTargetIdent);
     return true;
+}
+
+void* GetGameWorldRayCastOriginal()
+{
+    if (g_originalRayCast)
+        return reinterpret_cast<void*>(g_originalRayCast);
+    return g_moduleBase ? Offset<void*>(OFFSET_GAMEWORLD_RAYCAST) : nullptr;
 }
 
 void RemoveBulletRaycastRedirectHook()

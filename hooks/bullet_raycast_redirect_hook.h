@@ -37,4 +37,8 @@ namespace mohw {
 bool InstallBulletRaycastRedirectHook();
 void RemoveBulletRaycastRedirectHook();
 
+// GameWorld::RayCast without this hook in the way (the trampoline once hooked, the function itself otherwise), for the
+// mod's own raycasts (hooks/laser_raycast.cpp). It returns the number of hits written (EAX), not a bool.
+void* GetGameWorldRayCastOriginal();
+
 } // namespace mohw

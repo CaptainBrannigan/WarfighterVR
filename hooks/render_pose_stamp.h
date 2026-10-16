@@ -26,6 +26,12 @@ void PublishRenderPoseForEye(bool rightEye);
 // fresh stamp exists for this eye; callers should fall back to the plain live HMD pose in that case.
 bool GetPendingRenderPoseStamp(bool rightEye, float outQuat[4], float outPos[3], bool* outPosValid);
 
+// Same thread, right after ComputeRenderPoseStamp (the CommitViewTransform hook): the stamp just computed for the frame
+// being committed -- the head pose this frame will be shown as rendered from. False when there's none (stamping off,
+// head aim off, ...): the frame is shown with the live head pose then. hooks/laser_raycast.cpp casts through it so the
+// laser's hit is where the dot is drawn.
+bool GetCommittedFrameRenderPose(float outQuat[4], float outPos[3], bool* outPosValid);
+
 // Debug toggle (NUMPAD4, default ON) to isolate whether the pose-stamping mechanism itself is the source
 // of a live-observed faint single-frame ghost during head turns under openvr_direct's classic-OpenVR
 // Submit_TextureWithPose port -- when off, GetPendingRenderPoseStamp always returns false so

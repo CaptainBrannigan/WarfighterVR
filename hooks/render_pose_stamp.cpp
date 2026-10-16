@@ -225,6 +225,21 @@ void PublishRenderPoseForEye(bool rightEye)
     g_block->ready = 1;
 }
 
+bool GetCommittedFrameRenderPose(float outQuat[4], float outPos[3], bool* outPosValid)
+{
+    if (!g_stampDebugEnabled.load(std::memory_order_relaxed))
+        return false;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_pendingValid)
+        return false;
+    for (int i = 0; i < 4; ++i)
+        outQuat[i] = g_pendingQuat[i];
+    for (int i = 0; i < 3; ++i)
+        outPos[i] = g_pendingPos[i];
+    *outPosValid = g_pendingPosValid;
+    return true;
+}
+
 bool GetPendingRenderPoseStamp(bool rightEye, float outQuat[4], float outPos[3], bool* outPosValid)
 {
     if (!g_stampDebugEnabled.load(std::memory_order_relaxed))

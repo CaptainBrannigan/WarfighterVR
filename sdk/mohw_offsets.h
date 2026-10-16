@@ -534,6 +534,27 @@
 //   unsigned int materialFlags, unsigned int flags,
 //   eastl::fixed_vector<fb::PhysicsEntityBase const*, 8, 0>* excluded)
 #define OFFSET_GAMEWORLD_RAYCAST 0x7ACBF0u
+// (2026-10-15) It returns the number of hits written, not a bool (FUN_01684790 loops i < return value). RayCastHit is
+// 0x40 bytes: +0x00 position (Vec4), +0x10 normal, +0x24 an object whose +0x08 flags mark hits to skip (0x8000000);
+// callers zero each hit and set +0x28/+0x2C to -1 first. `excluded` is {begin, end, capacityEnd} over a fixed array of
+// physics entities.
+// The GameWorld instance RayCast is called on: a static pointer (FUN_01684790 "ClientSupportActionWeapon::
+// getTargetPosition" and "SoldierAimingEnvironment::Target::checkNoObstruction" both load ECX from it).
+#define OFFSET_GAMEWORLD_INSTANCE_PTR 0x2AC5FE0u
+
+// Peek and lean (2026-10-15, static: Ghidra on MOHW_dump_SCY.exe). FUN_00965f20 = the soldier's peek-and-lean update,
+// __thiscall(soldier, EntryInput state) -- soldier+0x14 = its SoldierEntityData (reflection: +0x178
+// PeekAndLeanAutoADSThreshold, +0x17C PeekAndLeanAutoADSCancelThreshold, +0x180 PeekAndLeanSuctionDistance, +0x190
+// PeekAndLeanMaxPeekThreshold, +0x1A0 PeekAndLeanStanceData = per stance {PeekDistanceUp, PeekDistanceDown,
+// LeanDistance, BlendSpeed}). Active while input concept 0x2A (ConceptPeekAndLean, pad LB) or 0x3E / 0x44 (PC peek
+// left / right, digital +-1) is held. The pad version takes the move stick (axes 0 / 1) as peek / lean, analog, zeroes
+// the move axes and writes the result to axes 7 / 8. Once the stick's length passes the AutoADS threshold it presses
+// zoom itself (concept 0xD) -- unless the "AutoADS" option (FUN_0087f390 on [0x02AC8DE8]+0x110, default 1) is off:
+//   009661D9  TEST AL,AL
+//   009661DB  JZ 0x00966200   (74 23)  -> the option off: [soldier+0x608] (auto-ADS active) = 0, no zoom press
+// Not patched: that option is the game's own "Auto ADS" setting (saved in Documents\MOHW\settings\PROF_SAVE_body as
+// AutoADS), so turning it off in the game's options gives the analog lean without ADS. (EB 23 here would force it.)
+#define OFFSET_PEEKLEAN_AUTOADS_JZ 0x9661DBu
 
 // --- NOT YET RE-VERIFIED against this build (carried over from the older,
 // mismatched-image-size header; do not dereference until confirmed) ---

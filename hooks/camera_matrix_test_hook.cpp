@@ -278,7 +278,7 @@ bool IsBodyBatch(const unsigned char* b)
 // SEH-safe: a NUL-terminated printable string of at least 5 characters at p, copied to out.
 bool ReadPrintableString(uintptr_t p, char* out, int outSize)
 {
-    if (p < 0x10000 || p > 0x7FFF0000)
+    if (p < 0x10000 || p > 0xFFFF0000u) // large-address-aware: strings can be above 2 GB too
         return false;
     __try
     {
@@ -305,7 +305,7 @@ bool ReadPrintableString(uintptr_t p, char* out, int outSize)
 // SEH-safe: appends strings found at obj's first 32 dwords (and, depth 2, at the objects those point to).
 void ProbeNames(uintptr_t obj, int depth, char* out, size_t outSize, int* found)
 {
-    if (obj < 0x10000 || obj > 0x7FFF0000 || *found >= 6)
+    if (obj < 0x10000 || obj > 0xFFFF0000u || *found >= 6) // large-address-aware: the heap is above 2 GB too
         return;
     for (int i = 0; i < 32 && *found < 6; ++i)
     {

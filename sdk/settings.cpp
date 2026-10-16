@@ -8,8 +8,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <mutex>
+#include <vector>
 
 namespace mohw {
 namespace {
@@ -80,7 +82,7 @@ constexpr float kDefaultHolsterRadius = 0.15f;    // meters
 constexpr float kDefaultHolsterDrop = 0.0f;       // meters, + moves every zone down
 constexpr bool kDefaultSightDotEnabled = true;
 constexpr bool kDefaultDotsOnlyWithGrip = false; // true = both dots only while the weapon grip is on
-constexpr float kDefaultSightZeroDistance = 25.0f; // meters
+constexpr float kDefaultSightZeroDistance = 600.0f; // meters: the laser's max range
 constexpr float kDefaultSightDotSizeDeg = 0.35f;
 // Optic dot: at the weapon hand, raised by OpticHeight (the zero) and moved by OpticWindageOffset / OpticDistance, meters
 // in the hand's own frame. Dot colours: red, or green when the ...Green toggle is on.
@@ -90,9 +92,6 @@ constexpr float kDefaultOpticWindage = 0.0f;  // + = dot right
 constexpr float kDefaultOpticDistance = 0.0f; // + = dot forward of the hand
 constexpr bool kDefaultOpticDotGreen = false;
 constexpr bool kDefaultRayDotGreen = true;
-// Aim ray dot angular correction, degrees from the controller's forward: the shot-spread remover isn't always exact.
-constexpr float kDefaultRayDotElevationDeg = 0.0f; // + = up
-constexpr float kDefaultRayDotWindageDeg = 0.0f;   // + = right
 // Holster zone -> game action (a GstKeyBinding.infantry concept name from the game's profile; empty = unassigned).
 const char* const kHolsterZoneKeys[kHolsterZoneCount] = {"HolsterStomach", "HolsterHip", "HolsterChest",
                                                          "HolsterLeftShoulder", "HolsterRightShoulder"};
@@ -144,6 +143,10 @@ std::atomic<float> g_vrTurnSpeed{kDefaultVrTurnSpeed};
 std::atomic<float> g_vrStickFullDeflection{kDefaultVrStickFullDeflection};
 std::atomic<float> g_twoHandGrabRadius{kDefaultTwoHandGrabRadius};
 std::atomic<float> g_twoHandReach{kDefaultTwoHandReach};
+// Secondary grip offset (per weapon): where the off hand holds relative to the barrel line, in the gun's frame, metres
+// -- the two-handed aim targets the off hand's point moved by it (openvr_direct/vr_hands.cpp AimAtOffHand).
+std::atomic<float> g_secondaryGripRight{0.0f};
+std::atomic<float> g_secondaryGripUp{0.0f};
 std::atomic<bool> g_hudPlacementEnabled{kDefaultHudPlacementEnabled};
 std::atomic<bool> g_hideReticle{kDefaultHideReticle};
 // Body batch parts hidden while the gun follows the controller (hooks/camera_matrix_test_hook.cpp). Default = parts 2
@@ -203,8 +206,15 @@ std::atomic<float> g_opticWindage{kDefaultOpticWindage};
 std::atomic<float> g_opticDistance{kDefaultOpticDistance};
 std::atomic<bool> g_opticDotGreen{kDefaultOpticDotGreen};
 std::atomic<bool> g_rayDotGreen{kDefaultRayDotGreen};
-std::atomic<float> g_rayDotElevationDeg{kDefaultRayDotElevationDeg};
-std::atomic<float> g_rayDotWindageDeg{kDefaultRayDotWindageDeg};
+// Laser (hooks/laser_raycast.cpp, openvr_direct/vr_overlay.cpp): the aim-ray dot at the first surface the shot line hits,
+// and a beam from the hand to it.
+std::atomic<bool> g_laserBeamEnabled{true};
+std::atomic<float> g_laserBeamOpacity{0.35f};
+std::atomic<float> g_laserBeamWidthMm{4.0f};
+std::atomic<float> g_laserRaycastEveryFrames{1.0f}; // the game raycast every N rendered frames
+std::atomic<float> g_laserStartMeters{0.15f};       // per weapon: where the laser begins, forward of the hand (the muzzle)
+std::atomic<float> g_laserBeamStartRight{0.0f};     // per weapon: the drawn beam's start, right of the shot line
+std::atomic<float> g_laserBeamStartUp{0.0f};        // per weapon: the drawn beam's start, above the shot line
 std::atomic<float> g_holsterPos[kHolsterZoneCount][3] = {
     {kDefaultHolsterPos[0][0], kDefaultHolsterPos[0][1], kDefaultHolsterPos[0][2]},
     {kDefaultHolsterPos[1][0], kDefaultHolsterPos[1][1], kDefaultHolsterPos[1][2]},
@@ -232,8 +242,94 @@ std::string SettingsFilePath()
     return LogFilePath("mohwvr_settings.ini"); // same "next to the DLL" resolution logging.h already uses
 }
 
+// ---- Weapon profiles (2026-10-15) ----------------------------------------------------------------------------------
+// The settings below are per weapon: they switch with the equipped weapon (SetWeaponProfile, from
+// hooks/weapon_identity.cpp), and the menu rows edit the equipped weapon's profile. A weapon with no profile yet starts
+// from the DEFAULT profile -- the ini's own keys for these settings -- which is also what applies while no weapon is
+// identified (menus, the driving missions). A weapon's profile is only stored once it differs from the default. Saved
+// as one "WeaponProfile=<blueprint name>|v0|v1|..." line per weapon, values in kProfileFields order. All guarded by
+// g_fileMutex.
+std::atomic<float>* const kProfileFields[] = {
+    &g_weaponGripRight, &g_weaponGripUp,  &g_weaponGripBack,  &g_weaponGripPitchDeg,  &g_weaponGripYawDeg,
+    &g_weaponGripRollDeg, &g_opticHeight, &g_opticWindage,    &g_opticDistance,       &g_controllerAimUpDeg,
+    &g_controllerAimRightDeg,
+    // Appended 2026-10-15 (lines saved before take the default for these).
+    &g_secondaryGripRight, &g_secondaryGripUp, &g_laserStartMeters,
+    &g_laserBeamStartRight, &g_laserBeamStartUp,
+};
+constexpr int kProfileFieldCount = static_cast<int>(sizeof(kProfileFields) / sizeof(kProfileFields[0]));
+struct WeaponProfile
+{
+    float v[kProfileFieldCount] = {};
+};
+std::map<std::string, WeaponProfile> g_weaponProfiles;
+WeaponProfile g_defaultProfile;
+std::string g_profileKey; // whose values the settings hold now; "" = the default profile
+
+// The menu's title for the profile rows, "Weapon profile: <weapon>": two buffers, the pointer swapped once the new
+// title is written (the overlay keeps the group pointer while drawing).
+const char kProfileGroup[] = "Weapon profile";
+char g_profileTitleBuffers[2][96] = {"Weapon profile: default (no weapon)", ""};
+std::atomic<const char*> g_profileTitle{g_profileTitleBuffers[0]};
+
+WeaponProfile ReadProfileFields()
+{
+    WeaponProfile p;
+    for (int i = 0; i < kProfileFieldCount; ++i)
+        p.v[i] = kProfileFields[i]->load(std::memory_order_relaxed);
+    return p;
+}
+
+// The settings' current values back into the profile they belong to.
+void CaptureProfileLocked()
+{
+    WeaponProfile now = ReadProfileFields();
+    if (g_profileKey.empty())
+    {
+        g_defaultProfile = now;
+        return;
+    }
+    auto it = g_weaponProfiles.find(g_profileKey);
+    if (it != g_weaponProfiles.end())
+        it->second = now;
+    else if (memcmp(now.v, g_defaultProfile.v, sizeof(now.v)) != 0)
+        g_weaponProfiles[g_profileKey] = now;
+}
+
+// What the ini's own key for a profile setting holds: the default profile's value.
+float DefaultProfileValue(const std::atomic<float>* field)
+{
+    for (int i = 0; i < kProfileFieldCount; ++i)
+        if (kProfileFields[i] == field)
+            return g_defaultProfile.v[i];
+    return field->load(std::memory_order_relaxed);
+}
+
+// "WeaponProfile=<key>|v0|v1|..." -> g_weaponProfiles. Missing values take the default's.
+bool ParseWeaponProfileLine(const std::string& line)
+{
+    static const char kPrefix[] = "WeaponProfile=";
+    if (line.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0)
+        return false;
+    std::string rest = line.substr(sizeof(kPrefix) - 1);
+    size_t bar = rest.find('|');
+    std::string key = rest.substr(0, bar);
+    if (key.empty())
+        return true;
+    WeaponProfile p = g_defaultProfile;
+    for (int i = 0; i < kProfileFieldCount && bar != std::string::npos; ++i)
+    {
+        size_t next = rest.find('|', bar + 1);
+        p.v[i] = static_cast<float>(atof(rest.substr(bar + 1, next - bar - 1).c_str()));
+        bar = next;
+    }
+    g_weaponProfiles[key] = p;
+    return true;
+}
+
 void WriteSettingsFileLocked()
 {
+    CaptureProfileLocked(); // the default keys and the profile lines below take the latest edits
     std::string path = SettingsFilePath();
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "w") != 0 || !f)
@@ -267,6 +363,8 @@ void WriteSettingsFileLocked()
     fprintf(f, "VrStickFullDeflection=%.4f\n", g_vrStickFullDeflection.load(std::memory_order_relaxed));
     fprintf(f, "TwoHandGrabRadius=%.4f\n", g_twoHandGrabRadius.load(std::memory_order_relaxed));
     fprintf(f, "TwoHandReach=%.4f\n", g_twoHandReach.load(std::memory_order_relaxed));
+    fprintf(f, "SecondaryGripRight=%.4f\n", DefaultProfileValue(&g_secondaryGripRight));
+    fprintf(f, "SecondaryGripUp=%.4f\n", DefaultProfileValue(&g_secondaryGripUp));
     fprintf(f, "HudPlacementEnabled=%d\n", g_hudPlacementEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HideReticle=%d\n", g_hideReticle.load(std::memory_order_relaxed) ? 1 : 0);
     for (int i = 0, n = BodyPartRowCount(); i < n; ++i)
@@ -297,8 +395,9 @@ void WriteSettingsFileLocked()
     fprintf(f, "HudOffsetX=%.4f\n", g_hudOffsetXDeg.load(std::memory_order_relaxed));
     fprintf(f, "HudOffsetY=%.4f\n", g_hudOffsetYDeg.load(std::memory_order_relaxed));
     fprintf(f, "RemoveShotSpread=%d\n", g_removeShotSpread.load(std::memory_order_relaxed) ? 1 : 0);
-    fprintf(f, "ControllerAimUp=%.2f\n", g_controllerAimUpDeg.load(std::memory_order_relaxed));
-    fprintf(f, "ControllerAimRight=%.2f\n", g_controllerAimRightDeg.load(std::memory_order_relaxed));
+    // Per-weapon settings (weapon profiles): these keys hold the default profile.
+    fprintf(f, "ControllerAimUp=%.2f\n", DefaultProfileValue(&g_controllerAimUpDeg));
+    fprintf(f, "ControllerAimRight=%.2f\n", DefaultProfileValue(&g_controllerAimRightDeg));
     fprintf(f, "AdsSwayScale=%.2f\n", g_adsSwayScale.load(std::memory_order_relaxed));
     fprintf(f, "FireViaMouse=%d\n", g_fireViaMouse.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "LeftHanded=%d\n", g_leftHanded.load(std::memory_order_relaxed) ? 1 : 0);
@@ -323,19 +422,32 @@ void WriteSettingsFileLocked()
     fprintf(f, "SightZeroDistance=%.4f\n", g_sightZeroDistance.load(std::memory_order_relaxed));
     fprintf(f, "SightDotSize=%.4f\n", g_sightDotSizeDeg.load(std::memory_order_relaxed));
     fprintf(f, "OpticDotEnabled=%d\n", g_opticDotEnabled.load(std::memory_order_relaxed) ? 1 : 0);
-    fprintf(f, "OpticHeight=%.4f\n", g_opticHeight.load(std::memory_order_relaxed));
-    fprintf(f, "OpticWindageOffset=%.4f\n", g_opticWindage.load(std::memory_order_relaxed));
-    fprintf(f, "OpticDistance=%.4f\n", g_opticDistance.load(std::memory_order_relaxed));
+    fprintf(f, "OpticHeight=%.4f\n", DefaultProfileValue(&g_opticHeight));
+    fprintf(f, "OpticWindageOffset=%.4f\n", DefaultProfileValue(&g_opticWindage));
+    fprintf(f, "OpticDistance=%.4f\n", DefaultProfileValue(&g_opticDistance));
     fprintf(f, "OpticDotGreen=%d\n", g_opticDotGreen.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "RayDotGreen=%d\n", g_rayDotGreen.load(std::memory_order_relaxed) ? 1 : 0);
-    fprintf(f, "RayDotElevation=%.4f\n", g_rayDotElevationDeg.load(std::memory_order_relaxed));
-    fprintf(f, "RayDotWindage=%.4f\n", g_rayDotWindageDeg.load(std::memory_order_relaxed));
-    fprintf(f, "WeaponGripRight=%.4f\n", g_weaponGripRight.load(std::memory_order_relaxed));
-    fprintf(f, "WeaponGripUp=%.4f\n", g_weaponGripUp.load(std::memory_order_relaxed));
-    fprintf(f, "WeaponGripBack=%.4f\n", g_weaponGripBack.load(std::memory_order_relaxed));
-    fprintf(f, "WeaponGripPitch=%.4f\n", g_weaponGripPitchDeg.load(std::memory_order_relaxed));
-    fprintf(f, "WeaponGripYaw=%.4f\n", g_weaponGripYawDeg.load(std::memory_order_relaxed));
-    fprintf(f, "WeaponGripRoll=%.4f\n", g_weaponGripRollDeg.load(std::memory_order_relaxed));
+    fprintf(f, "LaserBeam=%d\n", g_laserBeamEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "LaserBeamOpacity=%.2f\n", g_laserBeamOpacity.load(std::memory_order_relaxed));
+    fprintf(f, "LaserBeamWidth=%.1f\n", g_laserBeamWidthMm.load(std::memory_order_relaxed));
+    fprintf(f, "LaserRaycastEveryFrames=%.0f\n", g_laserRaycastEveryFrames.load(std::memory_order_relaxed));
+    fprintf(f, "LaserStart=%.3f\n", DefaultProfileValue(&g_laserStartMeters));
+    fprintf(f, "LaserBeamStartRight=%.3f\n", DefaultProfileValue(&g_laserBeamStartRight));
+    fprintf(f, "LaserBeamStartUp=%.3f\n", DefaultProfileValue(&g_laserBeamStartUp));
+    fprintf(f, "WeaponGripRight=%.4f\n", DefaultProfileValue(&g_weaponGripRight));
+    fprintf(f, "WeaponGripUp=%.4f\n", DefaultProfileValue(&g_weaponGripUp));
+    fprintf(f, "WeaponGripBack=%.4f\n", DefaultProfileValue(&g_weaponGripBack));
+    fprintf(f, "WeaponGripPitch=%.4f\n", DefaultProfileValue(&g_weaponGripPitchDeg));
+    fprintf(f, "WeaponGripYaw=%.4f\n", DefaultProfileValue(&g_weaponGripYawDeg));
+    fprintf(f, "WeaponGripRoll=%.4f\n", DefaultProfileValue(&g_weaponGripRollDeg));
+    // Weapon profiles: grip right/up/back, grip pitch/yaw/roll, optic height/windage/forward, controller aim up/right.
+    for (const auto& profile : g_weaponProfiles)
+    {
+        fprintf(f, "WeaponProfile=%s", profile.first.c_str());
+        for (int i = 0; i < kProfileFieldCount; ++i)
+            fprintf(f, "|%.4f", profile.second.v[i]);
+        fprintf(f, "\n");
+    }
     fclose(f);
 }
 
@@ -425,7 +537,8 @@ void LoadSettings()
         return;
     }
 
-    char lineBuf[256];
+    std::vector<std::string> profileLines;
+    char lineBuf[512];
     while (fgets(lineBuf, sizeof(lineBuf), f))
     {
         std::string line(lineBuf);
@@ -563,10 +676,20 @@ void LoadSettings()
             g_opticDotGreen.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "RayDotGreen", &boolValue))
             g_rayDotGreen.store(boolValue, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "RayDotElevation", &value))
-            g_rayDotElevationDeg.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "RayDotWindage", &value))
-            g_rayDotWindageDeg.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "LaserBeam", &boolValue))
+            g_laserBeamEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "LaserBeamOpacity", &value))
+            g_laserBeamOpacity.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "LaserBeamWidth", &value))
+            g_laserBeamWidthMm.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "LaserRaycastEveryFrames", &value))
+            g_laserRaycastEveryFrames.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "LaserStart", &value))
+            g_laserStartMeters.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "LaserBeamStartRight", &value))
+            g_laserBeamStartRight.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "LaserBeamStartUp", &value))
+            g_laserBeamStartUp.store(value, std::memory_order_relaxed);
         else if ([&] {
                      std::string text;
                      for (int i = 0; i < kHolsterZoneCount; ++i)
@@ -594,6 +717,10 @@ void LoadSettings()
             g_twoHandGrabRadius.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "TwoHandReach", &value))
             g_twoHandReach.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "SecondaryGripRight", &value))
+            g_secondaryGripRight.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "SecondaryGripUp", &value))
+            g_secondaryGripUp.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "VrStickFullDeflection", &value))
             g_vrStickFullDeflection.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "VrTurnSpeed", &value))
@@ -610,8 +737,16 @@ void LoadSettings()
             g_weaponGripRollDeg.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "WeaponGripBack", &value))
             g_weaponGripBack.store(value, std::memory_order_relaxed);
+        else if (line.compare(0, 14, "WeaponProfile=") == 0)
+            profileLines.push_back(line); // after the loop, once the default profile is known
     }
     fclose(f);
+    // The ini's own values for the per-weapon settings are the default profile; then the weapons' own.
+    g_defaultProfile = ReadProfileFields();
+    g_profileKey.clear();
+    g_weaponProfiles.clear();
+    for (const std::string& profileLine : profileLines)
+        ParseWeaponProfileLine(profileLine);
 
     MOHW_LOG(kLogFile,
               "LoadSettings: loaded from %s -- FovScale=%.2f IpdScale=%.2f HeadAimEnabled=%d HeadAimSensitivity=%.2f "
@@ -900,6 +1035,12 @@ float GetTwoHandReach()
     return g_twoHandReach.load(std::memory_order_relaxed);
 }
 
+void GetSecondaryGripOffset(float* right, float* up)
+{
+    *right = g_secondaryGripRight.load(std::memory_order_relaxed);
+    *up = g_secondaryGripUp.load(std::memory_order_relaxed);
+}
+
 bool GetHudPlacementEnabled()
 {
     return g_hudPlacementEnabled.load(std::memory_order_relaxed);
@@ -1150,10 +1291,39 @@ bool GetRayDotGreen()
     return g_rayDotGreen.load(std::memory_order_relaxed);
 }
 
-void GetRayDotOffsetDeg(float* elevation, float* windage)
+bool GetLaserBeamEnabled()
 {
-    *elevation = g_rayDotElevationDeg.load(std::memory_order_relaxed);
-    *windage = g_rayDotWindageDeg.load(std::memory_order_relaxed);
+    return g_laserBeamEnabled.load(std::memory_order_relaxed);
+}
+
+float GetLaserBeamOpacity()
+{
+    float v = g_laserBeamOpacity.load(std::memory_order_relaxed);
+    return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+}
+
+float GetLaserBeamWidthMeters()
+{
+    float mm = g_laserBeamWidthMm.load(std::memory_order_relaxed);
+    return (mm < 0.5f ? 0.5f : mm) * 0.001f;
+}
+
+float GetLaserStartMeters()
+{
+    float v = g_laserStartMeters.load(std::memory_order_relaxed);
+    return v < 0.0f ? 0.0f : (v > 2.0f ? 2.0f : v);
+}
+
+void GetLaserBeamStartOffset(float* right, float* up)
+{
+    *right = g_laserBeamStartRight.load(std::memory_order_relaxed);
+    *up = g_laserBeamStartUp.load(std::memory_order_relaxed);
+}
+
+int GetLaserRaycastEveryFrames()
+{
+    int n = static_cast<int>(g_laserRaycastEveryFrames.load(std::memory_order_relaxed) + 0.5f);
+    return n < 1 ? 1 : (n > 30 ? 30 : n);
 }
 
 void GetWeaponGripOffset(float out[3])
@@ -1210,8 +1380,6 @@ const MenuEntry kMenu[] = {
     {"Controls", "Two-hand grab radius", nullptr, &g_twoHandGrabRadius, 0.05f, 0.5f, 0.01f, 2, "m"},
     {"Controls", "Two-hand reach", nullptr, &g_twoHandReach, 0.2f, 1.5f, 0.05f, 2, "m"},
     {"Controls", "Remove shot spread", &g_removeShotSpread, nullptr, 0, 0, 0, 0, ""},
-    {"Controls", "Controller aim offset up", nullptr, &g_controllerAimUpDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
-    {"Controls", "Controller aim offset right", nullptr, &g_controllerAimRightDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
     {"Controls", "ADS sway (0 = none, 1 = game's)", nullptr, &g_adsSwayScale, 0.0f, 1.0f, 0.05f, 2, "x"},
     {"Controls", "Fire / ADS as mouse (off = RT / LT)", &g_fireViaMouse, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "Grip double-tap = LB / RB", &g_gripDoubleTapBumpers, nullptr, 0, 0, 0, 0, ""},
@@ -1242,22 +1410,32 @@ const MenuEntry kMenu[] = {
     {"Hands", "Dots only with weapon grip", &g_dotsOnlyWithGrip, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Optic dot", &g_opticDotEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Optic dot green (off = red)", &g_opticDotGreen, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Optic zero / height (+ up)", nullptr, &g_opticHeight, -0.3f, 0.3f, 0.001f, 3, "m"},
-    {"Hands", "Optic windage (+ right)", nullptr, &g_opticWindage, -0.3f, 0.3f, 0.001f, 3, "m"},
-    {"Hands", "Optic forward (from the hand)", nullptr, &g_opticDistance, 0.0f, 300.0f, 0.01f, 2, "m"},
     {"Hands", "Aim ray dot", &g_sightDotEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Aim ray dot green (off = red)", &g_rayDotGreen, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Aim ray up (spread fix isn't exact)", nullptr, &g_rayDotElevationDeg, -5.0f, 5.0f, 0.05f, 2, "deg"},
-    {"Hands", "Aim ray right (spread fix isn't exact)", nullptr, &g_rayDotWindageDeg, -5.0f, 5.0f, 0.05f, 2, "deg"},
-    {"Hands", "Aim ray dot distance", nullptr, &g_sightZeroDistance, 1.0f, 300.0f, 1.0f, 0, "m"},
+    {"Hands", "Laser max range (dot when nothing's hit)", nullptr, &g_sightZeroDistance, 5.0f, 1000.0f, 5.0f, 0, "m"},
+    {"Hands", "Laser beam", &g_laserBeamEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Hands", "Laser beam opacity", nullptr, &g_laserBeamOpacity, 0.05f, 1.0f, 0.05f, 2, ""},
+    {"Hands", "Laser beam width", nullptr, &g_laserBeamWidthMm, 1.0f, 20.0f, 0.5f, 1, "mm"},
+    {"Hands", "Laser raycast every N frames", nullptr, &g_laserRaycastEveryFrames, 1.0f, 30.0f, 1.0f, 0, ""},
     {"Hands", "Dot size", nullptr, &g_sightDotSizeDeg, 0.05f, 2.0f, 0.05f, 2, "deg"},
     {"Weapon", "Gun + shots follow controller (Numpad .)", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Weapon", "Grip offset right", nullptr, &g_weaponGripRight, -0.5f, 0.5f, 0.005f, 3, "m"},
-    {"Weapon", "Grip offset up", nullptr, &g_weaponGripUp, -0.5f, 0.5f, 0.005f, 3, "m"},
-    {"Weapon", "Grip offset back", nullptr, &g_weaponGripBack, -1.0f, 0.5f, 0.005f, 3, "m"},
-    {"Weapon", "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {"Weapon", "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {"Weapon", "Grip roll", nullptr, &g_weaponGripRollDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon.
+    {kProfileGroup, "Grip offset right", nullptr, &g_weaponGripRight, -0.5f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Grip offset up", nullptr, &g_weaponGripUp, -0.5f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Grip offset back", nullptr, &g_weaponGripBack, -1.0f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kProfileGroup, "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kProfileGroup, "Grip roll", nullptr, &g_weaponGripRollDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kProfileGroup, "Optic zero / height (+ up)", nullptr, &g_opticHeight, -0.3f, 0.3f, 0.001f, 3, "m"},
+    {kProfileGroup, "Optic windage (+ right)", nullptr, &g_opticWindage, -0.3f, 0.3f, 0.001f, 3, "m"},
+    {kProfileGroup, "Optic forward (from the hand)", nullptr, &g_opticDistance, 0.0f, 300.0f, 0.01f, 2, "m"},
+    {kProfileGroup, "Controller aim offset up", nullptr, &g_controllerAimUpDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
+    {kProfileGroup, "Controller aim offset right", nullptr, &g_controllerAimRightDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
+    {kProfileGroup, "Secondary grip offset right", nullptr, &g_secondaryGripRight, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Secondary grip offset up", nullptr, &g_secondaryGripUp, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Laser start (forward of the hand)", nullptr, &g_laserStartMeters, 0.0f, 1.5f, 0.01f, 2, "m"},
+    {kProfileGroup, "Beam start right (visual)", nullptr, &g_laserBeamStartRight, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Beam start up (visual)", nullptr, &g_laserBeamStartUp, -0.3f, 0.3f, 0.005f, 3, "m"},
     {"Driving", "Head look", &g_drivingHeadLookAuto, nullptr, 0, 0, 0, 0, ""},
     {"Driving", "Invert head look", &g_drivingHeadLookInvert, nullptr, 0, 0, 0, 0, ""},
     {"Driving", "Stereo (full view)", &g_drivingStereo, nullptr, 0, 0, 0, 0, ""},
@@ -1333,7 +1511,7 @@ bool GetMenuSettingInfo(int index, MenuSettingInfo* out)
     if (index >= kMenuCount)
         return GetBodyPartMenuInfo(index - kMenuCount, out);
     const MenuEntry& e = kMenu[index];
-    out->group = e.group;
+    out->group = e.group == kProfileGroup ? g_profileTitle.load(std::memory_order_acquire) : e.group;
     out->label = e.label;
     out->isToggle = e.toggle != nullptr;
     out->isChoice = e.holsterZone >= 0;
@@ -1352,6 +1530,32 @@ bool GetMenuSettingInfo(int index, MenuSettingInfo* out)
         snprintf(out->text, sizeof(out->text), "%s", shown);
     }
     return true;
+}
+
+void SetWeaponProfile(const char* key, const char* display)
+{
+    std::string next = key ? key : "";
+    std::lock_guard<std::mutex> lock(g_fileMutex);
+    if (next == g_profileKey)
+        return;
+    CaptureProfileLocked(); // the outgoing weapon's edits (in memory; the file is written on the next edit)
+    g_profileKey = next;
+    auto it = next.empty() ? g_weaponProfiles.end() : g_weaponProfiles.find(next);
+    bool own = it != g_weaponProfiles.end();
+    const WeaponProfile& p = own ? it->second : g_defaultProfile;
+    for (int i = 0; i < kProfileFieldCount; ++i)
+        kProfileFields[i]->store(p.v[i], std::memory_order_relaxed);
+    // Title into the buffer not on show, then publish it.
+    const char* shown = g_profileTitle.load(std::memory_order_acquire);
+    char* buffer = shown == g_profileTitleBuffers[0] ? g_profileTitleBuffers[1] : g_profileTitleBuffers[0];
+    if (next.empty())
+        snprintf(buffer, sizeof(g_profileTitleBuffers[0]), "Weapon profile: default (no weapon)");
+    else
+        snprintf(buffer, sizeof(g_profileTitleBuffers[0]), "Weapon profile: %s%s", display && *display ? display : next.c_str(),
+                 own ? "" : " (from default)");
+    g_profileTitle.store(buffer, std::memory_order_release);
+    MOHW_LOG(kLogFile, "weapon profile: %s -> %s", next.empty() ? "default" : next.c_str(),
+              own ? "its own values" : "the default values");
 }
 
 void SetHolsterActionChoices(const std::vector<std::string>& actions)

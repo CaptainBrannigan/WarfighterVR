@@ -3,6 +3,7 @@
 #include "../sdk/logging.h"
 #include "../sdk/settings.h"
 #include "../hooks/aiming_controller_hook.h"
+#include "../hooks/laser_raycast.h"
 
 #include <windows.h>
 #include <cmath>
@@ -24,6 +25,7 @@ constexpr const char* kLogFile = "mohwvr_overlay.log";
 // IVROverlay_028 vtable slots, counted from openvr.h's class IVROverlay declaration order.
 constexpr int kCreateOverlayIndex = 1;
 constexpr int kSetOverlayFlagIndex = 11;
+constexpr int kSetOverlayTexelAspectIndex = 18; // between SetOverlayFlag (11) and SetOverlayWidthInMeters (22) in that order
 constexpr int kSetOverlayWidthInMetersIndex = 22;
 constexpr int kSetOverlayTransformAbsoluteIndex = 33;
 constexpr int kShowOverlayIndex = 43;
@@ -46,6 +48,7 @@ using PFN_SetOverlayFlag = int(__thiscall*)(void* self, uint64_t handle, int fla
 using PFN_CreateDashboardOverlay = int(__thiscall*)(void* self, const char* key, const char* name, uint64_t* mainHandle,
                                                     uint64_t* thumbnailHandle);
 using PFN_SetOverlayWidthInMeters = int(__thiscall*)(void* self, uint64_t handle, float meters);
+using PFN_SetOverlayTexelAspect = int(__thiscall*)(void* self, uint64_t handle, float texelAspect);
 using PFN_SetOverlayInputMethod = int(__thiscall*)(void* self, uint64_t handle, int method);
 using PFN_SetOverlayMouseScale = int(__thiscall*)(void* self, uint64_t handle, const float* scale);
 using PFN_SetOverlayRaw = int(__thiscall*)(void* self, uint64_t handle, void* buffer, uint32_t width, uint32_t height,
@@ -116,6 +119,7 @@ PFN_SetOverlayRaw g_setRaw = nullptr;
 PFN_PollNextOverlayEvent g_poll = nullptr;
 PFN_IsOverlayVisible g_isVisible = nullptr;
 PFN_SetOverlayWidthInMeters g_setWidth = nullptr;
+PFN_SetOverlayTexelAspect g_setTexelAspect = nullptr;
 PFN_SetOverlayTransformAbsolute g_setTransform = nullptr;
 PFN_ShowHideOverlay g_show = nullptr;
 PFN_ShowHideOverlay g_hide = nullptr;
@@ -502,12 +506,49 @@ struct SightState
     DotPlacement dots[kDotCount];
     float head[3] = {};
 };
+// The laser beam (2026-10-15): a thin strip from the hand to the aim-ray dot, in the dot's colour, turned about its own
+// length to face the head. OpenVR sizes an overlay by its width, the height following the texture's shape, so the
+// strip's thickness is set by the texel aspect (texels kBeamTexW x kBeamTexH, aspect = texH * length / (texW * width):
+// ~0.5-25 for 0.5-25 m beams).
+constexpr uint32_t kBeamTexW = 1024;
+constexpr uint32_t kBeamTexH = 4;
+struct BeamPlacement
+{
+    bool visible = false;
+    float m[12] = {};
+    float length = 0.0f; // metres
+    float width = 0.0f;  // metres
+    float opacity = 0.0f;
+    bool green = true;
+};
 std::mutex g_sightMutex;
 SightState g_sightState; // guarded by g_sightMutex
 WheelPlacement g_wheelState; // guarded by g_sightMutex
+BeamPlacement g_beamState;   // guarded by g_sightMutex
 HANDLE g_sightEvent = nullptr;
 uint64_t g_dotHandles[kDotCount] = {0, 0}; // written once before g_sightReady
 uint64_t g_wheelHandle = 0;                // written once before g_sightReady; 0 if it couldn't be created
+uint64_t g_beamHandle = 0;                 // likewise
+
+// The beam's texture: the dot's colour at the given opacity, its edges (the outer texel rows) softer.
+void UploadBeamTexture(uint64_t handle, bool green, float opacity)
+{
+    std::vector<uint8_t> rgba(kBeamTexW * kBeamTexH * 4);
+    const float rowAlpha[kBeamTexH] = {0.35f, 1.0f, 1.0f, 0.35f};
+    uint8_t r = green ? 40 : 255, g = green ? 255 : 30, b = green ? 60 : 30;
+    for (uint32_t y = 0; y < kBeamTexH; ++y)
+        for (uint32_t x = 0; x < kBeamTexW; ++x)
+        {
+            uint8_t* p = &rgba[(y * kBeamTexW + x) * 4];
+            p[0] = r;
+            p[1] = g;
+            p[2] = b;
+            p[3] = static_cast<uint8_t>(rowAlpha[y] * opacity * 255.0f);
+        }
+    std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+    int err = g_setRaw(g_overlay, handle, rgba.data(), kBeamTexW, kBeamTexH, 4);
+    MOHW_LOG(kLogFile, "beam texture (%s, opacity %.2f) err=%d", green ? "green" : "red", opacity, err);
+}
 
 // The wheel's texture: the rim (light grey) with the up marker (orange) at its top -- a stretch of rim plus a tab
 // reaching inwards, so the wheel's turn reads at a glance. Sized to the rim's outer edge; the overlay's width is
@@ -617,13 +658,47 @@ void SightThreadProc()
     bool shown[kDotCount] = {false, false};
     bool wheelShown = false;
     float wheelLook[3] = {-1.0f, -1.0f, -1.0f}; // radius, thickness, opacity of the uploaded texture
+    bool beamShown = false;
+    int beamGreen = -1;        // colour of the uploaded beam texture (-1 = none yet)
+    float beamOpacity = -1.0f; // its opacity
     for (;;)
     {
         WaitForSingleObject(g_sightEvent, 200);
         WheelPlacement wheel;
+        BeamPlacement beam;
         {
             std::lock_guard<std::mutex> lock(g_sightMutex);
             wheel = g_wheelState;
+            beam = g_beamState;
+        }
+        if (g_beamHandle != 0)
+        {
+            if (beam.visible)
+            {
+                if ((beam.green ? 1 : 0) != beamGreen || beam.opacity != beamOpacity)
+                {
+                    UploadBeamTexture(g_beamHandle, beam.green, beam.opacity);
+                    beamGreen = beam.green ? 1 : 0;
+                    beamOpacity = beam.opacity;
+                }
+                float aspect = static_cast<float>(kBeamTexH) * beam.length / (static_cast<float>(kBeamTexW) * beam.width);
+                std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+                g_setWidth(g_overlay, g_beamHandle, beam.length);
+                if (g_setTexelAspect)
+                    g_setTexelAspect(g_overlay, g_beamHandle, aspect);
+                g_setTransform(g_overlay, g_beamHandle, g_trackingUniverse, beam.m);
+                if (!beamShown)
+                {
+                    g_show(g_overlay, g_beamHandle);
+                    beamShown = true;
+                }
+            }
+            else if (beamShown)
+            {
+                std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+                g_hide(g_overlay, g_beamHandle);
+                beamShown = false;
+            }
         }
         if (g_wheelHandle != 0)
         {
@@ -705,24 +780,25 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
     float opticForward = GetOpticDistance();
     if (!(opticForward >= 0.0f))
         opticForward = 0.0f;
+    // The laser's distance: where the shot line first hits (hooks/laser_raycast.h), else the max range.
     float rayDistance = GetSightZeroDistance();
     if (!(rayDistance >= 0.5f))
         rayDistance = 25.0f;
+    float hitDistance = 0.0f;
+    if (GetLaserHitDistance(&hitDistance) && hitDistance > 0.05f && hitDistance < rayDistance)
+        rayDistance = hitDistance;
 
     // Offsets in the hand's own frame (x right, y up, -z forward), rotated into tracking space.
     Vec3 opticLocal{};
     opticLocal.x = windage;
     opticLocal.y = height;
     opticLocal.z = -opticForward;
-    // The aim ray dot: the hand's forward turned up by elevation and right by windage (degrees).
+    // The aim ray dot (the laser): exactly the shots' line -- the hand's forward turned by the controller aim offset, as
+    // the shots are (sdk/motion_controller_aim.h ApplyControllerAimOffset: yaw right, then pitch up, in the hand's
+    // frame). No offset of its own (2026-10-15, removed RayDotElevation / RayDotWindage): the optic dot is zeroed
+    // against it.
     float rayUpDeg = 0.0f, rayRightDeg = 0.0f;
-    GetRayDotOffsetDeg(&rayUpDeg, &rayRightDeg);
-    // Plus the controller aim offset, which turns the shots (sdk/motion_controller_aim.h ApplyControllerAimOffset), so
-    // the ray dot keeps showing where they go.
-    float aimUpDeg = 0.0f, aimRightDeg = 0.0f;
-    GetControllerAimOffsetDeg(&aimUpDeg, &aimRightDeg);
-    rayUpDeg += aimUpDeg;
-    rayRightDeg += aimRightDeg;
+    GetControllerAimOffsetDeg(&rayUpDeg, &rayRightDeg);
     const float kRad = 3.14159265f / 180.0f;
     float e = rayUpDeg * kRad, w = rayRightDeg * kRad;
     Vec3 rayLocal{};
@@ -749,9 +825,66 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
         float fromHead = sqrtf(dx * dx + dy * dy + dz * dz);
         dot.width = 2.0f * (fromHead > 0.05f ? fromHead : 0.05f) * halfTan;
     }
+
+    // The beam: from its start (LaserStart forward of the hand, the muzzle, moved by the beam start offset in the gun's
+    // frame -- purely visual) to the aim-ray dot, its flat side turned to the head (x along the beam, z towards the head).
+    BeamPlacement beam;
+    float beamForward = GetLaserStartMeters();
+    float beamRight = 0.0f, beamUp = 0.0f;
+    GetLaserBeamStartOffset(&beamRight, &beamUp);
+    Vec3 startLocal{};
+    startLocal.x = beamRight;
+    startLocal.y = beamUp;
+    startLocal.z = -beamForward;
+    Vec3 startOffset = QuatRotateVector(aimOrientation, startLocal);
+    Vec3 beamVec = VecSub(offsets[kDotRay], startOffset); // start -> dot
+    float beamLength = sqrtf(VecDot(beamVec, beamVec));
+    beam.visible = visible && GetLaserBeamEnabled() && g_beamHandle != 0 && rayDistance - beamForward > 0.05f &&
+                   beamLength > 0.05f;
+    if (beam.visible)
+    {
+        Vec3 x = VecScale(beamVec, 1.0f / beamLength);
+        Vec3 mid;
+        mid.x = origin[0] + startOffset.x + beamVec.x * 0.5f;
+        mid.y = origin[1] + startOffset.y + beamVec.y * 0.5f;
+        mid.z = origin[2] + startOffset.z + beamVec.z * 0.5f;
+        Vec3 toHead;
+        toHead.x = headPos[0] - mid.x;
+        toHead.y = headPos[1] - mid.y;
+        toHead.z = headPos[2] - mid.z;
+        Vec3 z = VecSub(toHead, VecScale(x, VecDot(toHead, x)));
+        float zLen = sqrtf(VecDot(z, z));
+        if (zLen < 1e-4f)
+        {
+            beam.visible = false; // looking straight down the beam
+        }
+        else
+        {
+            z = VecScale(z, 1.0f / zLen);
+            Vec3 y;
+            y.x = z.y * x.z - z.z * x.y;
+            y.y = z.z * x.x - z.x * x.z;
+            y.z = z.x * x.y - z.y * x.x;
+            const Vec3* axes[3] = {&x, &y, &z};
+            const float pos[3] = {mid.x, mid.y, mid.z};
+            for (int col = 0; col < 3; ++col)
+            {
+                beam.m[0 * 4 + col] = axes[col]->x;
+                beam.m[1 * 4 + col] = axes[col]->y;
+                beam.m[2 * 4 + col] = axes[col]->z;
+            }
+            for (int row = 0; row < 3; ++row)
+                beam.m[row * 4 + 3] = pos[row];
+            beam.length = beamLength;
+            beam.width = GetLaserBeamWidthMeters();
+            beam.opacity = GetLaserBeamOpacity();
+            beam.green = GetRayDotGreen();
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(g_sightMutex);
         g_sightState = s;
+        g_beamState = beam;
     }
     SetEvent(g_sightEvent);
 }
@@ -861,6 +994,17 @@ bool InitVrOverlay(void* overlay, int trackingUniverse)
                   static_cast<unsigned long long>(g_wheelHandle));
         if (wheelErr != 0)
             g_wheelHandle = 0;
+        // The laser beam: optional too.
+        g_setTexelAspect = reinterpret_cast<PFN_SetOverlayTexelAspect>(vtable[kSetOverlayTexelAspectIndex]);
+        int beamErr = 0;
+        {
+            std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+            beamErr = createOverlay(overlay, "mohwvr.beam", "MOHW VR laser beam", &g_beamHandle);
+        }
+        MOHW_LOG(kLogFile, "CreateOverlay(mohwvr.beam) err=%d handle=%llu", beamErr,
+                  static_cast<unsigned long long>(g_beamHandle));
+        if (beamErr != 0)
+            g_beamHandle = 0;
         g_sightEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);
         g_sightReady.store(true, std::memory_order_release);
         std::thread(SightThreadProc).detach();

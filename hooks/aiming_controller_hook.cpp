@@ -6,6 +6,7 @@
 #include "../sdk/vr_math.h"
 #include "../sdk/settings.h"
 #include "companion_bridge.h"
+#include "weapon_identity.h"
 
 #include <windows.h>
 #include <cmath>
@@ -508,6 +509,7 @@ struct ThisCallTrampoline
             LogYawChangeInsideUpdate(self, storedBefore, yawBefore, args.dwords, deviceAxesBefore);
 
         g_lastUpdateMs.store(GetTickCount64(), std::memory_order_relaxed);
+        NoteActiveAimingController(self); // hooks/weapon_identity.h: which weapon is equipped
         long long n = ++g_updateCalls;
         if (n == 1 || n % 300 == 0)
             MOHW_LOG(kLogFile, "AimingControllerUpdate #%lld", n);

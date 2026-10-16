@@ -184,6 +184,10 @@ float GetVrStickFullDeflection();
 // TwoHandGrabRadius of the line running forward from the right hand, 5 cm to TwoHandReach along it. Meters, ini-only.
 float GetTwoHandGrabRadius();
 float GetTwoHandReach();
+// Secondary grip offset (per weapon, SetWeaponProfile): where the off hand holds relative to the barrel line, metres
+// in the gun's frame (+ right, + up). The two-handed aim targets the off hand's point moved by it, so a hand below the
+// bore (a vertical foregrip) doesn't tilt the gun. SecondaryGripRight / SecondaryGripUp, default 0.
+void GetSecondaryGripOffset(float* right, float* up);
 
 // HUD placement (hooks/draw_trace_diag.cpp, true-frustum mode only): the game's full-screen HUD is drawn into HudScale
 // of each eye's real field of view (so it keeps to the corners), as one head-locked rectangle whose two eye copies
@@ -327,9 +331,21 @@ float GetOpticDistance();
 // Dot colours: green when on, red when off (OpticDotGreen default off, RayDotGreen default on).
 bool GetOpticDotGreen();
 bool GetRayDotGreen();
-// Aim ray dot correction, degrees from the controller's forward (+ up / + right): the shot-spread remover
-// (sdk/motion_controller_aim.h) isn't always exact. RayDotElevation / RayDotWindage.
-void GetRayDotOffsetDeg(float* elevation, float* windage);
+// The laser (hooks/laser_raycast.h): the aim-ray dot sits where the shot line first hits (or at SightZeroDistance, the
+// max range, when nothing is hit), and a beam in the dot's colour runs from the hand to it. LaserBeam (on),
+// LaserBeamOpacity (0.35), LaserBeamWidth (mm, 4), LaserRaycastEveryFrames (the game raycast every N rendered frames, 1).
+bool GetLaserBeamEnabled();
+float GetLaserBeamOpacity();
+float GetLaserBeamWidthMeters();
+int GetLaserRaycastEveryFrames();
+// Where the laser begins, metres forward of the hand along the shot line (per weapon: set it at the muzzle so the
+// laser can't hit the gun). The raycast starts there; the drawn beam starts that far forward too. LaserStart, default
+// 0.15.
+float GetLaserStartMeters();
+// The drawn beam's start, beside the shot line (per weapon, purely visual -- a laser module mounted off the bore): metres
+// in the gun's frame, + right / + up, at LaserStart forward. The beam runs from there to the dot, which stays on the
+// shot line. LaserBeamStartRight / LaserBeamStartUp, default 0.
+void GetLaserBeamStartOffset(float* right, float* up);
 
 // Menu table for the SteamVR dashboard tab (openvr_direct/vr_overlay.cpp): every setting a player can adjust, in
 // display order, grouped. AdjustMenuSetting flips a toggle (any nonzero steps) or moves a number by steps * step
@@ -354,9 +370,17 @@ void AdjustMenuSetting(int index, int steps);
 void SetHolsterActionChoices(const std::vector<std::string>& actions);
 
 // Where the right controller sits on the gun for the weapon drive (hooks/camera_matrix_test_hook.cpp), in the gun's
-// rest view: out = {right, up, back} in meters (forward is negative back). Ini-only (WeaponGripRight/Up/Back).
+// rest view: out = {right, up, back} in meters (forward is negative back). Per weapon (SetWeaponProfile).
 void GetWeaponGripOffset(float out[3]);
-// The gun's rotation relative to the controller: out = {pitch, yaw, roll} in degrees. Ini-only (WeaponGripPitch/Yaw/Roll).
+// The gun's rotation relative to the controller: out = {pitch, yaw, roll} in degrees. Per weapon (SetWeaponProfile).
 void GetWeaponGripRotationDeg(float out[3]);
+
+// WEAPON PROFILES (2026-10-15): the grip offset and rotation, the optic dot's zero (height / windage / forward), the
+// controller aim offset and the secondary grip offset are per weapon. Called with the equipped weapon's blueprint
+// name (hooks/weapon_identity.h; display = its short name for the menu), or nullptr when none is identified: the
+// settings switch to that weapon's
+// values -- a weapon without its own yet gets the default profile (the ini's keys for these settings) -- and the
+// menu's rows for them, titled "Weapon profile: <weapon>", edit that weapon's. Stored as WeaponProfile lines.
+void SetWeaponProfile(const char* key, const char* display);
 
 } // namespace mohw
