@@ -51,6 +51,8 @@ newer version of the mod until you switch back to the defaults (or add the new a
   keeps level when you tilt your head.
 - **HUD:** moved into a head-locked panel that fuses in both eyes, sized to the corners of your view, with adjustable
   scale, depth, IPD and offset. The screen-centre reticle is hidden by default (you aim with the controller).
+- **In-world markers** (nametags, objective, grenade and vehicle icons) stay on their targets in both eyes while the
+  HUD is in its panel; ones outside the panel are pinned to its edge, like the game's own off-screen arrows.
 - Pre-rendered movies, menus and loading screens are shown as a floating screen (see [Known issues](#known-issues)).
 
 ### Head look
@@ -165,7 +167,6 @@ positions and actions, and the driving missions (head look, stereo, steering whe
   as well as turns.
 - Pre-rendered movies, menus and loading screens: the switch to a floating screen is new and may not apply to every
   movie yet.
-- Mission markers are shifted along with the HUD instead of staying on their targets.
 - The sky and clouds have a small per-eye offset.
 - Scripted "breach" scenes lock the camera; head look can briefly fight them.
 - In-engine cutscenes are shown in 3D with head tracking, the same as gameplay.

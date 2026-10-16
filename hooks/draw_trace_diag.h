@@ -37,4 +37,9 @@ ID3D11Texture2D* GetUiSnapshotTexture();
 // belongs to the next frame -- see hooks/driving_camera_hook.cpp's late rebuilds.
 bool FinalPassStartedThisFrame();
 
+// Any thread: the HUD rectangle for the eye being rendered, as fractions of the frame {left, top, width, height}
+// (y down), while the HUD is being placed over the 3D world (not during whole 2D frames or with placement off).
+// hooks/marker_projection_hook.cpp maps the in-world markers into it.
+bool GetHudRectForMarkers(float rect[4]);
+
 } // namespace mohw

@@ -197,10 +197,6 @@ float GetHudScale();
 // Size of the head-locked screen a whole-2D frame (pre-rendered movie, menu, loading screen) is drawn into, as a
 // fraction of the eye's view; same depth/IPD/offset rules as the HUD. MenuScreenScale, default 0.75.
 float GetMenuScreenScale();
-// In-world markers (objective, friendly) keep the full frame instead of the HUD rectangle -- the game already places
-// them per eye -- from the pass's first draw with a marker texture to its end (hooks/draw_trace_diag.cpp).
-// MarkersInWorld, default on.
-bool GetMarkersInWorld();
 
 // Driving missions (game\MOHWD.exe, hooks/driving_camera_hook.cpp): which camera through UpdateMatrices gets head
 // look by hand -- 0 = auto (GetDrivingHeadLookAuto), 1.. = by call rate, busiest first (logged to mohwvr_drivingcamera.log). Session only, not saved.
@@ -236,12 +232,6 @@ void GetDrivingWheelPlacement(float* forward, float* down, float* right, float* 
 // (0 = not drawn). Looks only -- steering goes by the hand's angle around the centre. DrivingWheelRadius / Thickness /
 // Opacity.
 void GetDrivingWheelLook(float* radius, float* thickness, float* opacity);
-// The manual alternative, used while MarkersInWorld is off: from this draw number of the final 2D pass on, the full
-// frame is restored instead of the HUD rectangle. 0 = off. FullFrameFromDraw.
-int GetFullFrameFromDraw();
-// The last draw of that full-frame range (the HUD rectangle resumes after it); 0 = to the end of the pass.
-// FullFrameToDraw.
-int GetFullFrameToDraw();
 // Live debugging: this draw number of the final 2D pass is not drawn, to see which element it is. 0 = off.
 // DebugHideDraw.
 int GetDebugHideDraw();

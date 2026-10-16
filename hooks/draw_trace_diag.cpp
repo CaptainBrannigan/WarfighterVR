@@ -255,19 +255,21 @@ void MaybePlaceWhole2DFrame(ID3D11DeviceContext* ctx)
 // the view both ways squashed the movie horizontally. With keepAspect it has the image's own width:height instead,
 // as large as fits inside s of the view. Off (the HUD over the world), it stays s of the view both ways, out towards
 // the corners.
-void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s, bool keepAspect)
+// The placed rectangle for the eye being rendered, as fractions of the frame: left, top, width, height (y down).
+// Any thread (the marker projection hook asks from the game thread). False when there is no placement.
+bool ComputeHudRect(float s, bool keepAspect, UINT width, UINT height, float rect[4])
 {
     if (!GetHudPlacementEnabled())
-        return;
+        return false;
     mohwvr::ipc::HmdViewBlock hmd{};
     if (!GetHmdView(&hmd) || hmd.viewMode != mohwvr::ipc::kViewModeTrueFrustum)
-        return;
+        return false;
     int eye = IsRightEyeActive() ? 1 : 0;
     float tL = tanf(hmd.angleLeft[eye]), tR = tanf(hmd.angleRight[eye]);
     float tU = tanf(hmd.angleUp[eye]), tD = tanf(hmd.angleDown[eye]);
     float centreX = (tL + tR) * 0.5f, halfW = (tR - tL) * 0.5f, halfH = (tU - tD) * 0.5f;
     if (halfW < 0.05f || halfH < 0.05f)
-        return;
+        return false;
     // s: HudScale for the HUD over the 3D world, MenuScreenScale for a whole 2D frame (see Is2DFrame).
     if (!(s >= 0.2f && s <= 1.5f))
         s = 0.75f;
@@ -298,24 +300,38 @@ void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float
     float ndcUpShift = (tanf(offsetYDeg * kDegToRad) - centreY) / halfH;
     float heightFraction = rectHalfH / halfH;
 
+    rect[0] = (ndcLeft + 1.0f) * 0.5f;
+    rect[1] = (1.0f - heightFraction - ndcUpShift) * 0.5f;
+    rect[2] = (ndcRight - ndcLeft) * 0.5f;
+    rect[3] = heightFraction;
+    return rect[2] > 0.01f && rect[3] > 0.01f;
+}
+
+// When the HUD (not a whole 2D frame) was last placed: the marker projection only maps into the rectangle then.
+std::atomic<unsigned long long> g_hudPlacedMs{0};
+
+void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s, bool keepAspect)
+{
+    float rect[4];
+    if (!ComputeHudRect(s, keepAspect, width, height, rect))
+        return;
     D3D11_VIEWPORT vp{};
-    vp.TopLeftX = (ndcLeft + 1.0f) * 0.5f * static_cast<float>(width);
-    vp.Width = (ndcRight - ndcLeft) * 0.5f * static_cast<float>(width);
-    vp.TopLeftY = (1.0f - heightFraction - ndcUpShift) * 0.5f * static_cast<float>(height);
-    vp.Height = heightFraction * static_cast<float>(height);
+    vp.TopLeftX = rect[0] * static_cast<float>(width);
+    vp.Width = rect[2] * static_cast<float>(width);
+    vp.TopLeftY = rect[1] * static_cast<float>(height);
+    vp.Height = rect[3] * static_cast<float>(height);
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
     ctx->RSSetViewports(1, &vp);
+    if (!keepAspect)
+        g_hudPlacedMs.store(GetTickCount64(), std::memory_order_relaxed);
 
     static int lines = 0;
     if (lines < 6)
     {
         ++lines;
-        MOHW_LOG(kLogFile,
-                  "HUD placed for eye %d: viewport x=%.1f y=%.1f w=%.1f h=%.1f of %ux%u (scale %.2f, depth %.2f m, IPD x%.2f, "
-                  "offset %.1f/%.1f deg, tan L/R %.3f/%.3f)",
-                  eye, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, width, height, s, depth, ipdScale, offsetXDeg,
-                  offsetYDeg, tL, tR);
+        MOHW_LOG(kLogFile, "HUD placed for eye %d: viewport x=%.1f y=%.1f w=%.1f h=%.1f of %ux%u (scale %.2f)",
+                  IsRightEyeActive() ? 1 : 0, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, width, height, s);
     }
 }
 
@@ -342,7 +358,6 @@ void MaybeSnapshotUi(ID3D11DeviceContext* ctx)
 }
 
 bool g_capturingPass = false; // render thread: this final pass is being logged (markers pass capture, below)
-bool g_markerBlockStarted = false; // render thread: this pass has reached its first marker draw (BeforeBackbufferDraw)
 void MaybeStartPassCapture();
 
 void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv)
@@ -371,7 +386,6 @@ void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTar
         return isBb;
     }() : false;
     g_backbufferDrawCount = 0;
-    g_markerBlockStarted = false;
     if (g_curTargetIsBackbuffer)
     {
         IsSimulationPaused(); // logs each change, whether or not anything below asks
@@ -456,14 +470,10 @@ bool ShouldSkipAsReticle(ID3D11DeviceContext* ctx)
     return GetDrawTexture(ctx, &w, &h, &format) && w == 128 && h == 64 && format == kFormatBC3;
 }
 
-// ---- In-world objective markers (2026-09-29) -----------------------------------------------------------------------
-// The markers are 2D draws in the final pass like the HUD, so they get the HUD rectangle (scaled, shifted to HUD depth)
-// and leave their targets. Two tools to find their treatment:
-//  - FullFrameFromDraw (dashboard, 0 = off): from that draw number on, the full frame is restored. If a marker then
-//    sits on its target at its depth, the game already places markers per eye and they only need exempting.
-//  - A capture of every final-pass draw (both eyes) every kPassCaptureEveryMs in gameplay, to mohwvr_hudlayers.log:
-//    number, count, shaders, first texture and size -- to find a signature for marker draws, as the numbering shifts
-//    with HUD content.
+// ---- Final-pass capture (2026-09-29) -------------------------------------------------------------------------------
+// A capture of every final-pass draw (both eyes) every kPassCaptureEveryMs in gameplay, to mohwvr_hudlayers.log:
+// number, count, shaders, first texture and size, viewport. (Built to find a signature for the in-world markers'
+// draws; they are now projected into the HUD rectangle at the source instead, hooks/marker_projection_hook.h.)
 constexpr const char* kHudLayerLog = "mohwvr_hudlayers.log";
 constexpr unsigned long long kPassCaptureEveryMs = 15000;
 constexpr int kPassCaptureMaxPasses = 20; // captures, each kPassCaptureDraws draws
@@ -494,8 +504,8 @@ void MaybeStartPassCapture()
     ++g_passesCaptured;
     g_captureDrawsLeft = kPassCaptureDraws;
     g_capturingPass = true;
-    MOHW_LOG(kHudLayerLog, "CAPTURE %d: next %d backbuffer draws; HUD placement %s, full frame from draw %d",
-              g_passesCaptured, kPassCaptureDraws, GetHudPlacementEnabled() ? "on" : "off", GetFullFrameFromDraw());
+    MOHW_LOG(kHudLayerLog, "CAPTURE %d: next %d backbuffer draws; HUD placement %s", g_passesCaptured,
+              kPassCaptureDraws, GetHudPlacementEnabled() ? "on" : "off");
     MOHW_LOG(kHudLayerLog, " BIND (eye %d)", IsRightEyeActive() ? 1 : 0);
 }
 
@@ -552,67 +562,13 @@ bool IsDebugHiddenDraw()
            !IsSimulationPaused();
 }
 
-void SetFullFrameViewport(ID3D11DeviceContext* ctx, const D3D11_TEXTURE2D_DESC& bbDesc)
-{
-    D3D11_VIEWPORT vp{};
-    vp.Width = static_cast<float>(bbDesc.Width);
-    vp.Height = static_cast<float>(bbDesc.Height);
-    vp.MaxDepth = 1.0f;
-    ctx->RSSetViewports(1, &vp);
-}
-
-// The in-world markers' textures (see GetDrawTexture): objective 512x128, friendly 16x32.
-bool IsMarkerTexture(UINT w, UINT h, UINT format)
-{
-    return format == kFormatBC3 && ((w == 512 && h == 128) || (w == 16 && h == 32));
-}
-
-// Before each final-pass draw: the markers' full frame, then the capture.
-// MARKERS IN THE WORLD (MarkersInWorld, default on): the game already places the markers per eye on their targets
-// (live: right with HUD placement off), and draws them after every HUD element (reticle, weapon display, D-pad
-// display). So from the first draw that uses a marker texture to the end of the pass the full frame is restored, and
-// the HUD before it keeps its rectangle. With it off, the manual range (FullFrameFromDraw..ToDraw) applies instead.
-// Neither while paused: the in-game menu belongs in the HUD rectangle whole.
+// Before each final-pass draw: the capture. (The in-world markers used to get the full frame back here, by draw
+// number or by texture; replaced 2026-10-16 by projecting them into the HUD rectangle at the source,
+// hooks/marker_projection_hook.h, so the whole UI keeps one rectangle.)
 void BeforeBackbufferDraw(ID3D11DeviceContext* ctx, UINT count, bool indexed, bool skipped)
 {
     if (!g_curTargetIsBackbuffer || !g_backbuffer)
         return;
-    int next = g_backbufferDrawCount + 1;
-    if (next >= 2 && GetHudPlacementEnabled() && !Is2DFrame() && !IsSimulationPaused())
-    {
-        D3D11_TEXTURE2D_DESC bbDesc{};
-        if (GetMarkersInWorld())
-        {
-            UINT w = 0, h = 0, format = 0;
-            if (!g_markerBlockStarted && GetDrawTexture(ctx, &w, &h, &format) && IsMarkerTexture(w, h, format))
-            {
-                g_markerBlockStarted = true;
-                g_backbuffer->GetDesc(&bbDesc);
-                SetFullFrameViewport(ctx, bbDesc);
-                static int lines = 0;
-                if (lines < 12)
-                {
-                    ++lines;
-                    MOHW_LOG(kHudLayerLog, "markers: full frame from draw %d (first marker texture %ux%u)", next, w, h);
-                }
-            }
-        }
-        else
-        {
-            int from = GetFullFrameFromDraw();
-            int to = GetFullFrameToDraw();
-            if (from > 0 && next == from)
-            {
-                g_backbuffer->GetDesc(&bbDesc);
-                SetFullFrameViewport(ctx, bbDesc);
-            }
-            else if (from > 0 && to >= from && next == to + 1)
-            {
-                g_backbuffer->GetDesc(&bbDesc);
-                PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height, GetHudScale(), false); // back to the HUD rectangle
-            }
-        }
-    }
     if (g_capturingPass && g_captureDrawsLeft > 0)
     {
         --g_captureDrawsLeft;
@@ -809,6 +765,14 @@ void DrawTraceNoteDraw(ID3D11DeviceContext* context, unsigned indexCount)
 bool FinalPassStartedThisFrame()
 {
     return g_finalPassStarted.load(std::memory_order_relaxed);
+}
+
+bool GetHudRectForMarkers(float rect[4])
+{
+    unsigned long long placed = g_hudPlacedMs.load(std::memory_order_relaxed);
+    if (placed == 0 || GetTickCount64() - placed > 250) // the HUD isn't being placed (a 2D frame, placement off)
+        return false;
+    return ComputeHudRect(GetHudScale(), false, 0, 0, rect);
 }
 
 ID3D11Texture2D* GetUiSnapshotTexture()

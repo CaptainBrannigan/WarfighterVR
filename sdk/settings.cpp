@@ -177,9 +177,6 @@ std::atomic<float> g_drivingWheelTiltDeg{25.0f};  // top of the wheel leaning aw
 std::atomic<float> g_drivingWheelRadius{0.18f};   // drawn wheel (openvr_direct/vr_overlay.cpp): rim radius, metres
 std::atomic<float> g_drivingWheelThickness{0.03f}; // rim thickness, metres
 std::atomic<float> g_drivingWheelOpacity{0.6f};   // 0 = not drawn
-std::atomic<bool> g_markersInWorld{true}; // hooks/draw_trace_diag.cpp: markers keep the full frame, found by texture
-std::atomic<float> g_fullFrameFromDraw{0.0f};
-std::atomic<float> g_fullFrameToDraw{0.0f}; // last draw of the full-frame range; 0 = to the end of the pass
 std::atomic<float> g_debugHideDraw{0.0f};   // final-pass draw number not drawn, to see what it is; 0 = off
 std::atomic<float> g_hudOffsetXDeg{kDefaultHudOffsetXDeg};
 std::atomic<float> g_hudOffsetYDeg{kDefaultHudOffsetYDeg};
@@ -371,7 +368,6 @@ void WriteSettingsFileLocked()
         fprintf(f, "HideBodyPart%d=%d\n", i + 1, g_hideBodyPart[i].load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HudScale=%.4f\n", g_hudScale.load(std::memory_order_relaxed));
     fprintf(f, "MenuScreenScale=%.4f\n", g_menuScreenScale.load(std::memory_order_relaxed));
-    fprintf(f, "MarkersInWorld=%d\n", g_markersInWorld.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "DrivingHeadLookInvert=%d\n", g_drivingHeadLookInvert.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "DrivingHeadLookAuto=%d\n", g_drivingHeadLookAuto.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "DrivingStickLookRange=%.0f\n", g_drivingStickLookRangeDeg.load(std::memory_order_relaxed));
@@ -387,8 +383,6 @@ void WriteSettingsFileLocked()
     fprintf(f, "DrivingWheelRadius=%.2f\n", g_drivingWheelRadius.load(std::memory_order_relaxed));
     fprintf(f, "DrivingWheelThickness=%.3f\n", g_drivingWheelThickness.load(std::memory_order_relaxed));
     fprintf(f, "DrivingWheelOpacity=%.2f\n", g_drivingWheelOpacity.load(std::memory_order_relaxed));
-    fprintf(f, "FullFrameFromDraw=%.0f\n", g_fullFrameFromDraw.load(std::memory_order_relaxed));
-    fprintf(f, "FullFrameToDraw=%.0f\n", g_fullFrameToDraw.load(std::memory_order_relaxed));
     fprintf(f, "DebugHideDraw=%.0f\n", g_debugHideDraw.load(std::memory_order_relaxed));
     fprintf(f, "HudIpdScale=%.4f\n", g_hudIpdScale.load(std::memory_order_relaxed));
     fprintf(f, "HudDepth=%.4f\n", g_hudDepth.load(std::memory_order_relaxed));
@@ -618,12 +612,6 @@ void LoadSettings()
             g_drivingWheelThickness.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "DrivingWheelOpacity", &value))
             g_drivingWheelOpacity.store(value, std::memory_order_relaxed);
-        else if (ParseBoolSetting(line, "MarkersInWorld", &boolValue))
-            g_markersInWorld.store(boolValue, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "FullFrameFromDraw", &value))
-            g_fullFrameFromDraw.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "FullFrameToDraw", &value))
-            g_fullFrameToDraw.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "DebugHideDraw", &value))
             g_debugHideDraw.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HudOffsetX", &value))
@@ -1136,20 +1124,6 @@ void GetDrivingWheelLook(float* radius, float* thickness, float* opacity)
     *opacity = g_drivingWheelOpacity.load(std::memory_order_relaxed);
 }
 
-bool GetMarkersInWorld()
-{
-    return g_markersInWorld.load(std::memory_order_relaxed);
-}
-
-int GetFullFrameFromDraw()
-{
-    return static_cast<int>(g_fullFrameFromDraw.load(std::memory_order_relaxed) + 0.5f);
-}
-
-int GetFullFrameToDraw()
-{
-    return static_cast<int>(g_fullFrameToDraw.load(std::memory_order_relaxed) + 0.5f);
-}
 
 int GetDebugHideDraw()
 {
@@ -1455,9 +1429,6 @@ const MenuEntry kMenu[] = {
     {"Driving", "Debug: manual views to # (0 = only from)", nullptr, &g_drivingCameraIndexTo, 0.0f, 64.0f, 1.0f, 0, ""},
     {"HUD", "HUD placement", &g_hudPlacementEnabled, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "Menu / movie screen size", nullptr, &g_menuScreenScale, 0.3f, 1.2f, 0.01f, 2, "x"},
-    {"HUD", "Markers stay in the world (auto)", &g_markersInWorld, nullptr, 0, 0, 0, 0, ""},
-    {"HUD", "Manual markers: full frame from draw # (auto off)", nullptr, &g_fullFrameFromDraw, 0.0f, 128.0f, 1.0f, 0, ""},
-    {"HUD", "Manual markers: full frame to draw # (0 = end)", nullptr, &g_fullFrameToDraw, 0.0f, 128.0f, 1.0f, 0, ""},
     {"HUD", "Debug: hide draw # (0 off)", nullptr, &g_debugHideDraw, 0.0f, 128.0f, 1.0f, 0, ""},
     {"HUD", "Hide reticle (may clip pause-menu items)", &g_hideReticle, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "HUD scale", nullptr, &g_hudScale, 0.3f, 1.2f, 0.01f, 2, "x"},

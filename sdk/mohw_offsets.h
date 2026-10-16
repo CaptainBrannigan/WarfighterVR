@@ -556,6 +556,19 @@
 // AutoADS), so turning it off in the game's options gives the analog lean without ADS. (EB 23 here would force it.)
 #define OFFSET_PEEKLEAN_AUTOADS_JZ 0x9661DBu
 
+// HUD 3D icons (2026-10-16, Ghidra on MOHW_dump_SCY.exe + a live UpdateMatrices caller walk). The in-world markers
+// (nametags, objective / grenade / mine / vehicle icons; data MOHWIGHUD3dIconCompData) are placed by FUN_016ab1c0
+// __thiscall(component, icon, float screenOffset[2]), called once per icon from the icon types' updates
+// (FUN_016b7590, FUN_016b8de0, FUN_016b96d0, FUN_016bb130, ... all in 0x016AB000-0x016BC000). It takes a stack copy
+// of the current camera view (DAT_02AC8FD0 vfunc +0x8C, matrices rebuilt via UpdateMatrices), projects the icon with
+// the function below, converts to the UI stage (icon+0x2C4 / +0x2C8, the screen's 0..1 times the stage size), adds the
+// offset, then clamps off-screen icons to ScreenSafeAreaWidth/Height (edge flags +0x2CC / +0x2D0).
+// FUN_016a8f20 = the projection, __stdcall (RET 0x18), its only caller is FUN_016ab1c0:
+//   bool Project(const float local[3], const float transform[16], const float viewProj[16], float halfX, float halfY,
+//                float out[2])  -> out = {ndcX*halfX + halfX, halfY - ndcY*halfY} (0.5 / 0.5: the frame's 0..1, y down),
+//                                   returns w > 0 (in front); |w| ~ 0 writes a sentinel (DAT_027A8320) to both.
+#define OFFSET_HUDICON_PROJECT 0x16A8F20u
+
 // --- NOT YET RE-VERIFIED against this build (carried over from the older,
 // mismatched-image-size header; do not dereference until confirmed) ---
 #define OFFSET_TOSCREENFUNCTION_UNVERIFIED 0xECAAB0u

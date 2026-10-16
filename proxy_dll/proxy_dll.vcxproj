@@ -113,6 +113,7 @@
     <ClCompile Include="..\openvr_direct\vr_steering.cpp" />
     <ClCompile Include="..\hooks\alternating_eye.cpp" />
     <ClCompile Include="..\hooks\bullet_raycast_redirect_hook.cpp" />
+    <ClCompile Include="..\hooks\marker_projection_hook.cpp" />
     <ClCompile Include="..\hooks\fire_candidate_redirect_hook.cpp" />
     <ClCompile Include="..\hooks\controller_trigger_hook.cpp" />
     <ClCompile Include="..\hooks\camera_matrix_test_hook.cpp" />
@@ -161,6 +162,7 @@
     <ClInclude Include="..\openvr_direct\vr_steering.h" />
     <ClInclude Include="..\hooks\alternating_eye.h" />
     <ClInclude Include="..\hooks\bullet_raycast_redirect_hook.h" />
+    <ClInclude Include="..\hooks\marker_projection_hook.h" />
     <ClInclude Include="..\hooks\fire_candidate_redirect_hook.h" />
     <ClInclude Include="..\hooks\controller_trigger_hook.h" />
     <ClInclude Include="..\hooks\camera_matrix_test_hook.h" />

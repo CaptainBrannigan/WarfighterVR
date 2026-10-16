@@ -33,6 +33,7 @@
 #include "../hooks/projection_aspect_hook.h"
 #include "../hooks/alternating_eye.h"
 #include "../hooks/bullet_raycast_redirect_hook.h"
+#include "../hooks/marker_projection_hook.h"
 #include "../hooks/fire_candidate_redirect_hook.h"
 #include "../hooks/camera_matrix_test_hook.h"
 #include "../hooks/memory_dump.h"
@@ -131,6 +132,10 @@ void InstallGameHooks()
     // the visual feedback channel alongside InstallFireCandidateRedirectHook's actual hit-scan redirect.
     if (!mohw::InstallBulletRaycastRedirectHook())
         MOHW_LOG(kLogFile, "InstallBulletRaycastRedirectHook FAILED -- see mohwvr_bulletraycast.log");
+
+    // The in-world markers projected into the HUD rectangle (hooks/marker_projection_hook.h).
+    if (!mohw::InstallMarkerProjectionHook())
+        MOHW_LOG(kLogFile, "InstallMarkerProjectionHook FAILED -- see mohwvr_marker.log");
 
     // Redirects the real hit-scan/damage raycast to the right motion controller's live aim direction --
     // see hooks/fire_candidate_redirect_hook.cpp and sdk/mohw_offsets.h's OFFSET_FIRECANDIDATE comment.
