@@ -96,7 +96,8 @@ controller's tip instead of your palm.
   the dot stays on the shot line). Beam on/off, opacity and width, the max range, and how often the raycast runs
   (every N frames) are in the settings menu.
 - **Optic dot:** fixed to the gun like a sight -- zero it against the laser with its height and windage settings. Each
-  dot red or green.
+  dot red or green. Caveat: It's best to use the new tracer in place of this optic dot, as the optic dot is tied to the
+  right hand tracking, prone to tracking jitter.
 - **Peek and lean:** hold LB ("Gamepad: LB" in the SteamVR bindings, or a left-grip double-tap held on the second
   press) and push the move stick: analog lean left / right and peek up / down, as on a gamepad. Turn off the game's
   own **Auto ADS** option to lean without aiming down sights (with it on, a full lean aims down sights by itself).
