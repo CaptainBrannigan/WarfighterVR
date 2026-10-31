@@ -114,6 +114,7 @@
     <ClCompile Include="..\hooks\alternating_eye.cpp" />
     <ClCompile Include="..\hooks\bullet_raycast_redirect_hook.cpp" />
     <ClCompile Include="..\hooks\marker_projection_hook.cpp" />
+    <ClCompile Include="..\hooks\startup_diag.cpp" />
     <ClCompile Include="..\hooks\fire_candidate_redirect_hook.cpp" />
     <ClCompile Include="..\hooks\controller_trigger_hook.cpp" />
     <ClCompile Include="..\hooks\camera_matrix_test_hook.cpp" />
@@ -164,6 +165,8 @@
     <ClInclude Include="..\hooks\alternating_eye.h" />
     <ClInclude Include="..\hooks\bullet_raycast_redirect_hook.h" />
     <ClInclude Include="..\hooks\marker_projection_hook.h" />
+    <ClInclude Include="..\hooks\startup_diag.h" />
+    <ClInclude Include="..\sdk\version.h" />
     <ClInclude Include="..\hooks\fire_candidate_redirect_hook.h" />
     <ClInclude Include="..\hooks\controller_trigger_hook.h" />
     <ClInclude Include="..\hooks\camera_matrix_test_hook.h" />

@@ -4,6 +4,8 @@
 #include "vr_hands.h"
 #include "vr_overlay.h"
 #include "vr_steering.h"
+#include "openvr_direct.h"
+#include "../hooks/startup_diag.h"
 #include "../hooks/aiming_controller_hook.h"
 #include "../hooks/companion_bridge.h"
 #include "../sdk/logging.h"
@@ -27,6 +29,7 @@ constexpr const char* kLogFile = "mohwvr_vrinput.log";
 
 constexpr const char* kManifestFileName = "mohwvr_actions.json";
 constexpr const char* kTouchBindingsFileName = "mohwvr_bindings_oculus_touch.json";
+constexpr const char* kIndexBindingsFileName = "mohwvr_bindings_knuckles.json";
 
 // GAME ACTIONS (2026-09-28): one SteamVR boolean action per game keybinding (a GstKeyBinding concept from the game's
 // own profile, infantry or infantrySP context), holding that action's key for as long as the button is held -- so
@@ -40,7 +43,7 @@ struct GameAction
     const char* concept;     // GstKeyBinding concept whose keyboard key is sent, or nullptr for fixedKey
     int fixedKey;            // DirectInput scancode sent when concept is nullptr
     const char* label;
-    const char* defaultPath; // the oculus_touch input bound by default, or nullptr = unbound by default
+    const char* defaultPath; // the oculus_touch input bound by default (Index: see IndexPath), or nullptr = unbound
     const char* defaultMode; // "button", or "joystick" for a stick click
     const char* defaultInput; // "click" or "long" (long press)
 };
@@ -104,7 +107,7 @@ const PadAction kPadActions[] = {
     {"DpadRight", "D-pad right", 0x0008, "/user/hand/right/input/b", "button", "double"},
     {"Start", "Start / menu", 0x0010, "/user/hand/left/input/y", "button", "long"},
     {"Back", "Back / view", 0x0020, nullptr, nullptr, nullptr},
-    // Unbound by default: the grip can't take a double press (see BuildTouchBindings).
+    // Unbound by default: the grip can't take a double press (see BuildBindings).
     {"LB", "Left bumper", 0x0100, nullptr, nullptr, nullptr},
     {"RB", "Right bumper", 0x0200, nullptr, nullptr, nullptr},
 };
@@ -124,7 +127,8 @@ std::string BuildActionManifest()
 {
     std::string s = R"({
   "default_bindings": [
-    { "controller_type": "oculus_touch", "binding_url": "mohwvr_bindings_oculus_touch.json" }
+    { "controller_type": "oculus_touch", "binding_url": "mohwvr_bindings_oculus_touch.json" },
+    { "controller_type": "knuckles", "binding_url": "mohwvr_bindings_knuckles.json" }
   ],
   "actions": [
     { "name": "/actions/main/in/RightHandAim", "type": "pose" },
@@ -187,26 +191,52 @@ struct DefaultBinding
 // button is held for real until release.
 constexpr const char* kHoldLongPressDelay = "0.3";
 
-// The default Touch binding, grouped into one source per path+mode (a button can carry several inputs, e.g. A = click
-// A + double press D-pad down).
-std::string BuildTouchBindings()
+enum class Controller
 {
+    Touch,
+    Index, // "knuckles": real Index controllers, and Virtual Desktop's Index emulation of Touch controllers
+};
+
+// The Index layout from the tables' Touch paths: left A / B stand where X / Y are, thumbstick for joystick. (2026-10-31:
+// a controller type without a default binding gets no input at all, and that includes Virtual Desktop users, whose
+// driver can present Touch as Index.)
+std::string IndexPath(std::string path)
+{
+    const auto swap = [&path](const char* from, const char* to) {
+        const size_t at = path.rfind(from);
+        if (at != std::string::npos && at + strlen(from) == path.size())
+            path = path.substr(0, at) + to;
+    };
+    swap("/input/x", "/input/a");
+    swap("/input/y", "/input/b");
+    swap("/input/joystick", "/input/thumbstick");
+    return path;
+}
+
+// A controller's default binding, grouped into one source per path+mode (a button can carry several inputs, e.g. A =
+// click A + double press D-pad down).
+std::string BuildBindings(Controller controller)
+{
+    const bool index = controller == Controller::Index;
+    const auto path = [index](const char* touchPath) { return index ? IndexPath(touchPath) : std::string(touchPath); };
+    // An Index grip reads near full just from being held, so it takes the squeeze force ("force_sensor" mode "force").
+    const std::string gripMode = index ? "force_sensor" : "trigger", gripInput = index ? "force" : "pull";
     std::vector<DefaultBinding> bindings = {
         {"/user/hand/right/input/trigger", "trigger", "click", "/actions/main/in/FireRight"},
         {"/user/hand/left/input/trigger", "trigger", "click", "/actions/main/in/FireLeft"},
         // Grips: the analog pull ("trigger" mode "pull", a vector1 action); the press and the double-tap bumpers are
         // made in UpdateGripGesture, as SteamVR can't bind a double press on the Touch grip (see there).
-        {"/user/hand/right/input/grip", "trigger", "pull", "/actions/main/in/GripRight"},
-        {"/user/hand/left/input/grip", "trigger", "pull", "/actions/main/in/GripLeft"},
-        {"/user/hand/left/input/joystick", "joystick", "position", "/actions/main/in/Move"},
-        {"/user/hand/right/input/joystick", "joystick", "position", "/actions/main/in/Turn"},
+        {"/user/hand/right/input/grip", gripMode, gripInput, "/actions/main/in/GripRight"},
+        {"/user/hand/left/input/grip", gripMode, gripInput, "/actions/main/in/GripLeft"},
+        {path("/user/hand/left/input/joystick"), "joystick", "position", "/actions/main/in/Move"},
+        {path("/user/hand/right/input/joystick"), "joystick", "position", "/actions/main/in/Turn"},
     };
     for (const PadAction& a : kPadActions)
         if (a.defaultPath)
-            bindings.push_back({a.defaultPath, a.defaultMode, a.defaultInput, PadActionName(a)});
+            bindings.push_back({path(a.defaultPath), a.defaultMode, a.defaultInput, PadActionName(a)});
     for (const GameAction& a : kGameActions)
         if (a.defaultPath)
-            bindings.push_back({a.defaultPath, a.defaultMode, a.defaultInput, GameActionName(a)});
+            bindings.push_back({path(a.defaultPath), a.defaultMode, a.defaultInput, GameActionName(a)});
 
     std::string sources;
     std::vector<bool> done(bindings.size(), false);
@@ -240,10 +270,9 @@ std::string BuildTouchBindings()
                    "\",\n          \"inputs\": { " + inputs + " }" + parameters + "\n        }";
     }
 
-    std::string s = R"({
-  "controller_type": "oculus_touch",
+    std::string s = std::string("{\n  \"controller_type\": \"") + (index ? "knuckles" : "oculus_touch") + R"(",
   "name": "MOHW VR defaults",
-  "description": "Default MOHW VR bindings for Touch controllers",
+  "description": "Default MOHW VR bindings for )" + (index ? "Index" : "Touch") + R"( controllers",
   "bindings": {
     "/actions/main": {
       "poses": [
@@ -380,6 +409,9 @@ bool WriteTextFile(const std::string& path, const char* text)
 // reported straight away either way, so a double-tap is also two quick grip presses to the holsters.
 constexpr float kGripOnPull = 0.70f;
 constexpr float kGripOffPull = 0.55f;
+// Index grips report squeeze force, not finger position: 0.7 force is a crushing grip (same values as AvPVR).
+constexpr float kGripOnForce = 0.50f;
+constexpr float kGripOffForce = 0.30f;
 constexpr unsigned long long kGripDoubleTapMs = 300;
 constexpr unsigned long long kGripTapMaxMs = 300;
 
@@ -391,13 +423,38 @@ struct GripGesture
     unsigned long long lastTapReleaseMs = 0; // release of the last short press, 0 = none
 };
 GripGesture g_gripGesture[2]; // submit thread only
+bool g_handIsIndex[2] = {false, false}; // submit thread only: its grip action carries force (RefreshControllerTypes)
+
+// Each hand's controller type, every 2 s: a controller can switch on after the game connects, and Virtual Desktop can
+// present Touch as Index. Each change goes to the startup log.
+void RefreshControllerTypes()
+{
+    static unsigned long long nextCheckMs = 0;
+    static std::string known[2];
+    unsigned long long now = GetTickCount64();
+    if (now < nextCheckMs)
+        return;
+    nextCheckMs = now + 2000;
+    for (int h = 0; h < 2; ++h)
+    {
+        char type[64] = "";
+        if (!GetHandControllerType(h == kLeftHand, type, sizeof(type)) || known[h] == type)
+            continue;
+        known[h] = type;
+        g_handIsIndex[h] = known[h] == "knuckles";
+        MOHW_LOG(StartupLogFile(), "%s hand controller type: %s%s", h == kLeftHand ? "left" : "right", type,
+                 known[h] == "knuckles" || known[h] == "oculus_touch" ? "" : " -- no default binding, bind it in SteamVR");
+    }
+}
 
 // Returns whether the grip is down; *bumper = the double-tap bumper is held.
 bool UpdateGripGesture(int hand, float pull, bool* bumper)
 {
     GripGesture& g = g_gripGesture[hand];
     unsigned long long now = GetTickCount64();
-    bool down = g.down ? pull > kGripOffPull : pull >= kGripOnPull;
+    float onAt = g_handIsIndex[hand] ? kGripOnForce : kGripOnPull;
+    float offAt = g_handIsIndex[hand] ? kGripOffForce : kGripOffPull;
+    bool down = g.down ? pull > offAt : pull >= onAt;
     if (down && !g.down)
     {
         g.pressedAtMs = now;
@@ -506,9 +563,11 @@ bool InitVrInput(void* input, int trackingUniverse)
     g_trackingUniverse = trackingUniverse;
 
     std::string manifestPath = LogFilePath(kManifestFileName);
-    std::string bindingsPath = LogFilePath(kTouchBindingsFileName);
+    std::string touchBindingsPath = LogFilePath(kTouchBindingsFileName);
+    std::string indexBindingsPath = LogFilePath(kIndexBindingsFileName);
     if (!WriteTextFile(manifestPath, BuildActionManifest().c_str()) ||
-        !WriteTextFile(bindingsPath, BuildTouchBindings().c_str()))
+        !WriteTextFile(touchBindingsPath, BuildBindings(Controller::Touch).c_str()) ||
+        !WriteTextFile(indexBindingsPath, BuildBindings(Controller::Index).c_str()))
     {
         MOHW_LOG(kLogFile, "FAILED to write the action manifest/bindings next to the DLL (%s)", manifestPath.c_str());
         return false;
@@ -594,6 +653,7 @@ void UpdateVrInput()
     HandInput hands[2]{};
     const uint64_t poseActions[2] = {g_leftAimAction, g_rightAimAction};
     bool gripBumper[2] = {false, false}; // a grip double-tap held: LB (left) / RB (right), see UpdateGripGesture
+    RefreshControllerTypes();
     for (int h = 0; h < 2; ++h)
     {
         hands[h].tracked = ReadHandPose(poseActions[h], &poses[h]);

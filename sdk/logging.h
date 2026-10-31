@@ -40,13 +40,15 @@ inline std::unordered_set<std::string>& PreserveHistoryLogFiles()
     return files;
 }
 
-inline std::string LogFilePath(const char* fileName)
+// A file next to the DLL -- for the driving copy in game\, next to MOHW.exe. For files the user places there
+// (openvr_api.dll); what the mod writes goes through LogFilePath.
+inline std::string ModuleFolderPath(const char* fileName)
 {
     char modulePath[MAX_PATH]{};
     HMODULE hSelf = nullptr;
     GetModuleHandleExA(
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-        reinterpret_cast<LPCSTR>(&LogFilePath),
+        reinterpret_cast<LPCSTR>(&ModuleFolderPath),
         &hSelf);
     GetModuleFileNameA(hSelf, modulePath, MAX_PATH);
 
@@ -65,6 +67,42 @@ inline std::string LogFilePath(const char* fileName)
     return path;
 }
 
+inline bool FolderIsWritable(const std::string& folder)
+{
+    HANDLE file = CreateFileA((folder + "mohwvr_write_test.tmp").c_str(), GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+    CloseHandle(file);
+    return true;
+}
+
+// Where the mod writes: its logs, settings and SteamVR binding files. Next to the DLL, or %LOCALAPPDATA%\MOHWVR when
+// that isn't writable (2026-10-31): the game runs asInvoker, so under Program Files, the EA app's default, it can't
+// write there -- which lost every log, and the action manifest the controllers need.
+inline const std::string& DataFolder()
+{
+    static const std::string folder = [] {
+        std::string own = ModuleFolderPath("");
+        if (FolderIsWritable(own))
+            return own;
+        char local[MAX_PATH]{};
+        DWORD length = GetEnvironmentVariableA("LOCALAPPDATA", local, MAX_PATH);
+        if (length == 0 || length >= MAX_PATH)
+            return own;
+        std::string fallback = std::string(local) + "\\MOHWVR\\";
+        CreateDirectoryA(fallback.c_str(), nullptr);
+        return FolderIsWritable(fallback) ? fallback : own;
+    }();
+    return folder;
+}
+
+inline std::string LogFilePath(const char* fileName)
+{
+    return DataFolder() + fileName;
+}
+
 // Function-local statics in an inline function are merged across every TU
 // that includes this header (guaranteed since C++17, which this project
 // already targets) -- so this is the one shared handle cache/mutex for the
@@ -79,6 +117,17 @@ inline std::mutex& LogMutex()
 {
     static std::mutex m;
     return m;
+}
+
+// A file past this size moves to <name>.older.log and starts again (2026-10-31): the end of a session, which is what
+// matters after a crash, is always kept, and a log costs at most twice this (mohwvr_fovscale.log reached 478 MB in one
+// session).
+constexpr long long kMaxLogFileBytes = 32 * 1024 * 1024;
+
+inline std::unordered_map<std::string, long long>& LogFileSizes()
+{
+    static std::unordered_map<std::string, long long> sizes;
+    return sizes;
 }
 
 inline void Log(const char* fileName, const char* fmt, ...)
@@ -139,15 +188,28 @@ inline void Log(const char* fileName, const char* fmt, ...)
 
     SYSTEMTIME st;
     GetLocalTime(&st);
-    fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    int written = fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
 
     va_list args;
     va_start(args, fmt);
-    vfprintf(f, fmt, args);
+    written += vfprintf(f, fmt, args);
     va_end(args);
 
     fprintf(f, "\n");
     fflush(f); // keep durable for crash forensics without paying open/close cost per call
+
+    long long& size = LogFileSizes()[fileName];
+    size += written > 0 ? written + 1 : 1;
+    if (size > kMaxLogFileBytes)
+    {
+        fclose(f);
+        handles.erase(fileName);
+        size = 0;
+        std::string path = LogFilePath(fileName);
+        size_t dot = path.find_last_of('.');
+        std::string older = (dot == std::string::npos ? path : path.substr(0, dot)) + ".older.log";
+        MoveFileExA(path.c_str(), older.c_str(), MOVEFILE_REPLACE_EXISTING); // the next line opens a new one
+    }
 }
 
 } // namespace mohw

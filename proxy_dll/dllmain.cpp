@@ -34,6 +34,7 @@
 #include "../hooks/alternating_eye.h"
 #include "../hooks/bullet_raycast_redirect_hook.h"
 #include "../hooks/marker_projection_hook.h"
+#include "../hooks/startup_diag.h"
 #include "../hooks/fire_candidate_redirect_hook.h"
 #include "../hooks/camera_matrix_test_hook.h"
 #include "../hooks/memory_dump.h"
@@ -183,6 +184,15 @@ void EnsureInitialized()
         {
             mohw::g_drivingExe = true;
             MOHW_LOG(kLogFile, "running in the driving missions' executable (%s)", exePath);
+            mohw::WriteStartupReport();
+            auto base = reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));
+            auto nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(
+                base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+            if (nt->OptionalHeader.SizeOfImage != MOHWD_SIZE) // its hook addresses are for this build only
+            {
+                MOHW_LOG(mohw::StartupLogFile(), "mod OFF: this MOHWD.exe isn't the build the mod supports");
+                return;
+            }
             mohw::LoadSettings();
             // MASTER SWITCH: nothing is hooked until a headset is detected -- see hooks/master_switch.h. Not before the
             // game is up (2026-10-16): live, MOHWD.exe crashed at startup in its own window procedure, on the
@@ -194,6 +204,8 @@ void EnsureInitialized()
             mohw::StartMasterSwitch(&InstallDrivingHooks, kDrivingStartDelayMs);
             return;
         }
+
+        mohw::WriteStartupReport();
 
         if (!mohw::ResolveModule())
         {
@@ -210,6 +222,7 @@ void EnsureInitialized()
                       "VerifyBuild FAILED -- loaded image size does not match MOHW_MP_SIZE (0x%X). "
                       "Offsets in sdk/ were captured from a different build; do NOT proceed to install hooks.",
                       MOHW_MP_SIZE);
+            MOHW_LOG(mohw::StartupLogFile(), "mod OFF: this MOHW.exe isn't the build the mod supports");
             return;
         }
 

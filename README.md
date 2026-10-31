@@ -12,8 +12,9 @@ hasn't been played all the way through yet; see [Known issues](#known-issues).
 
 - Medal of Honor: Warfighter (the Steam/Origin PC release, 32-bit `MOHW.exe`).
 - SteamVR **2.17 or newer** (the release that added a 32-bit runtime), with a headset and motion controllers.
-  Developed and tested on a Meta Quest 3 over Steam Link with Touch controllers; other headsets should work, but only
-  the Touch controllers get default bindings.
+  Developed and tested on a Meta Quest 3 over Steam Link with Touch controllers; other headsets should work. Touch and
+  Valve Index controllers get default bindings (including Touch that Virtual Desktop presents as Index); any other
+  controller type has no input until you bind it yourself in SteamVR.
 - `openvr_api.dll` (32-bit) from your SteamVR install.
 
 ## Installing
@@ -142,7 +143,7 @@ All of it is in the settings menu's **Driving** section; "Steering wheel (hold g
 
 ### Controls
 The controllers drive a virtual Xbox gamepad, so the game itself maps buttons to actions in every context (on foot,
-vehicles, the Apache, menus). Default Touch layout:
+vehicles, the Apache, menus). Default layout:
 
 | Touch | Gamepad | In game |
 |---|---|---|
@@ -157,6 +158,10 @@ vehicles, the Apache, menus). Default Touch layout:
 | Grips | - | Holsters, two-handed grip; the steering wheel in driving missions |
 | Double-tap left / right grip | LB / RB | (setting: "Grip double-tap = LB / RB") |
 
+On Index controllers the layout is the same, with the left hand's A / B in place of X / Y (left A = Touch X, left B =
+Touch Y, double presses and the long press included). The grips use squeeze force rather than finger position, because
+an Index grip reads as nearly full just from holding the controller.
+
 Buttons that also have a double press (A, B, X) register a hold after 0.3 s, and a tap just after the double-press
 window; that is how SteamVR tells single from double presses. The grips are bound as their analog pull and the mod
 makes the press and the double-tap itself (SteamVR can't bind a double press on the Touch grip), so a grab is instant
@@ -169,6 +174,20 @@ Open the SteamVR dashboard in the headset and select the **MOHW VR** tab. Every 
 immediately: head look, view (IPD, world scale, smoothing), controls (turn speed, stick deadzone, two-handed grab,
 shot spread, fire as mouse or triggers), hands (left-handed, holsters, sight dots), weapon grip, HUD, holster
 positions and actions, and the driving missions (head look, stereo, steering wheel). There is also a Recenter button.
+
+## Troubleshooting
+
+If the game runs flat, or the mod doesn't seem to do anything, open `mohwvr_startup.log` next to `MOHW.exe`. It
+reports the game build, SteamVR install, headset and controllers it found, and ends with why the mod is on or off.
+(`mohwvr_startup_driving.log` is the same for the driving missions.) If the game folder isn't writable, as under
+Program Files, the logs and settings are in `%LOCALAPPDATA%\MOHWVR` instead.
+
+The mod talks to SteamVR only: **SteamVR must already be running** when you need VR, and an OpenXR runtime on its own
+doesn't count. With Virtual Desktop, start SteamVR from Virtual Desktop first.
+
+If `mohwvr_startup.log` doesn't exist in either place, the DLL never loaded: check that `dxgi.dll` is next to
+`MOHW.exe`. When reporting a problem, include that log along with `mohwvr_proxy.log`, `mohwvr_master.log` and
+`mohwvr_openvr_direct.log`.
 
 ## Known issues
 
@@ -184,6 +203,9 @@ This is a Beta. The rough edges known so far:
   weapon mesh there.
 - **Not every weapon has a profile yet** (the campaign hasn't been played all the way through); those use the default
   grip until you set them up.
+- **Index default bindings are new and untested on real Index controllers**, and on Touch presented as Index by
+  Virtual Desktop. The hand calibration and weapon profiles were tuned on Touch, so Index users may need to adjust
+  "Hand offset" / "Hand rotation" and the grip offsets.
 - **The robot-control section** shows the robot's camera head-locked (no head look on it yet); the right stick
   looks around.
 - **Objectives where you shoot something that isn't a soldier** (a target, a device) only count the game's own aim,

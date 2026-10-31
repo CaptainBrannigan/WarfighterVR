@@ -2,9 +2,9 @@
 
 #include "../openvr_direct/openvr_direct.h"
 #include "../sdk/logging.h"
+#include "startup_diag.h"
 
 #include <windows.h>
-#include <tlhelp32.h>
 #include <atomic>
 #include <thread>
 
@@ -20,16 +20,7 @@ std::atomic<bool> g_active{false};
 // (live 2026-10-15: playing flat with no headset, the game started SteamVR, which then reported no headset).
 bool IsSteamVrRunning()
 {
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE)
-        return false;
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    bool found = false;
-    for (BOOL ok = Process32FirstW(snapshot, &entry); ok && !found; ok = Process32NextW(snapshot, &entry))
-        found = _wcsicmp(entry.szExeFile, L"vrserver.exe") == 0;
-    CloseHandle(snapshot);
-    return found;
+    return IsProcessRunning(L"vrserver.exe");
 }
 
 // HEADSET TEST (2026-10-15): the VR connection itself. VR_IsHmdPresent was the first try and said yes with no headset
@@ -43,14 +34,22 @@ void SwitchThreadProc(void (*installHooks)(), unsigned startDelayMs)
         MOHW_LOG(kLogFile, "waiting %u ms before the first check", startDelayMs);
         Sleep(startDelayMs);
     }
+    const char* report = StartupLogFile();
     bool loggedNoServer = false, loggedNoHeadset = false;
     for (;;)
     {
         if (!IsSteamVrRunning())
         {
             if (!loggedNoServer)
+            {
                 MOHW_LOG(kLogFile, "SteamVR isn't running -- the mod is OFF (the game runs unmodified); checking every %lu s",
                           kRecheckMs / 1000);
+                MOHW_LOG(report, "mod OFF: SteamVR isn't running (no vrserver.exe). The mod needs it and never starts it; "
+                                 "checking every %lu s", kRecheckMs / 1000);
+                if (IsProcessRunning(L"VirtualDesktop.Streamer.exe"))
+                    MOHW_LOG(report, "Virtual Desktop is running, but its VDXR OpenXR runtime can't serve this mod, which "
+                                     "uses OpenVR: start SteamVR from Virtual Desktop");
+            }
             loggedNoServer = true;
             loggedNoHeadset = false;
             Sleep(kRecheckMs);
@@ -63,24 +62,34 @@ void SwitchThreadProc(void (*installHooks)(), unsigned startDelayMs)
         if (r == openvr_direct::ConnectResult::Failed)
         {
             MOHW_LOG(kLogFile, "the VR connection failed (see mohwvr_openvr_direct.log) -- the mod stays OFF this session");
+            MOHW_LOG(report, "mod OFF for this session: the VR connection failed, see the lines above and "
+                             "mohwvr_openvr_direct.log");
             return;
         }
         if (!loggedNoHeadset)
-            MOHW_LOG(kLogFile, "SteamVR is running but no headset is connected -- the mod is OFF; checking every %lu s",
+        {
+            MOHW_LOG(kLogFile, "SteamVR is running but the VR connection isn't up -- the mod is OFF; checking every %lu s",
                       kRecheckMs / 1000);
+            MOHW_LOG(report, "mod OFF for now: SteamVR is running but the VR connection isn't up (reason above); "
+                             "checking every %lu s", kRecheckMs / 1000);
+        }
         loggedNoHeadset = true;
         Sleep(kRecheckMs);
     }
     MOHW_LOG(kLogFile, "headset connected -- switching the mod ON (stays on until the game is restarted)");
+    BeginStartupStep("installing hooks");
     installHooks();
+    EndStartupStep();
     g_active.store(true, std::memory_order_release);
     MOHW_LOG(kLogFile, "mod ON: hooks installed");
+    MOHW_LOG(report, "mod ON: connected and hooks installed");
 }
 
 } // namespace
 
 void StartMasterSwitch(void (*installHooks)(), unsigned startDelayMs)
 {
+    StartStartupWatchdog();
     std::thread(SwitchThreadProc, installHooks, startDelayMs).detach();
 }
 

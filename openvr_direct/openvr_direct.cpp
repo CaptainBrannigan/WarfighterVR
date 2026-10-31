@@ -8,6 +8,7 @@
 #include "../hooks/aiming_controller_hook.h"
 #include "../hooks/companion_bridge.h"
 #include "../hooks/render_pose_stamp.h"
+#include "../hooks/startup_diag.h"
 #include "../shared/ipc_protocol.h"
 #include "../sdk/d3d_util.h"
 
@@ -31,6 +32,7 @@ constexpr const char* kLogFile = "mohwvr_openvr_direct.log";
 using PFN_VR_InitInternal2 = uint32_t(__cdecl*)(int* peError, int eApplicationType, const char* pStartupInfo);
 using PFN_VR_GetGenericInterface = void*(__cdecl*)(const char* pchInterfaceVersion, int* peError);
 using PFN_VR_IsInterfaceVersionValid = bool(__cdecl*)(const char* pchInterfaceVersion);
+using PFN_VR_GetVRInitErrorText = const char*(__cdecl*)(int error);
 
 constexpr int kInitError_None = 0;
 constexpr int kAppType_Scene = 1; // EVRApplicationType::VRApplication_Scene
@@ -296,22 +298,105 @@ bool EnsurePersistentEyeTexture(ID3D11Device* device, ID3D11Texture2D*& tex, UIN
     return true;
 }
 
+// The runtime and every tracked device, to mohwvr_startup.log: which driver a tester's headset comes through (Steam
+// Link's vrlink, Virtual Desktop's, Oculus...) and which controller type, since default bindings only cover Touch.
+void ReportVrDevices(void* system)
+{
+    constexpr int kGetTrackedDeviceClassVtableIndex = 20, kGetStringPropertyVtableIndex = 28,
+                  kGetRuntimeVersionVtableIndex = 49;
+    constexpr int kPropTrackingSystemName = 1000, kPropModelNumber = 1001, kPropManufacturerName = 1005,
+                  kPropDriverVersion = 1031, kPropControllerType = 7000;
+    using GetClassFn = int(__thiscall*)(void*, uint32_t);
+    using GetStringFn = uint32_t(__thiscall*)(void*, uint32_t, int, char*, uint32_t, int*);
+    using GetRuntimeVersionFn = const char*(__thiscall*)(void*);
+    void** vtable = *reinterpret_cast<void***>(system);
+    auto getClass = reinterpret_cast<GetClassFn>(vtable[kGetTrackedDeviceClassVtableIndex]);
+    auto getString = reinterpret_cast<GetStringFn>(vtable[kGetStringPropertyVtableIndex]);
+    const char* runtime = reinterpret_cast<GetRuntimeVersionFn>(vtable[kGetRuntimeVersionVtableIndex])(system);
+    const char* report = StartupLogFile();
+    MOHW_LOG(report, "runtime version: %s", runtime ? runtime : "?");
+    for (uint32_t device = 0; device < 16; ++device)
+    {
+        int deviceClass = getClass(system, device);
+        if (deviceClass == 0)
+            continue;
+        char tracking[64] = "", model[64] = "", maker[64] = "", driver[64] = "", type[64] = "";
+        int error = 0;
+        getString(system, device, kPropTrackingSystemName, tracking, sizeof(tracking), &error);
+        getString(system, device, kPropModelNumber, model, sizeof(model), &error);
+        getString(system, device, kPropManufacturerName, maker, sizeof(maker), &error);
+        getString(system, device, kPropDriverVersion, driver, sizeof(driver), &error);
+        getString(system, device, kPropControllerType, type, sizeof(type), &error);
+        MOHW_LOG(report, "VR device %u: class %d, tracking system \"%s\", model \"%s\", by \"%s\", driver \"%s\", "
+                         "controller type \"%s\"", device, deviceClass, tracking, model, maker, driver, type);
+    }
+}
+
+// The GPU the game renders on, and whether it's the one SteamVR wants: on a laptop or a multi-GPU PC they can differ.
+void ReportGameAdapter(IDXGIAdapter* adapter)
+{
+    constexpr int kGetDXGIOutputInfoVtableIndex = 8;
+    using GetOutputInfoFn = void(__thiscall*)(void*, int32_t*);
+    const char* report = StartupLogFile();
+    DXGI_ADAPTER_DESC mine{};
+    if (!adapter || FAILED(adapter->GetDesc(&mine)))
+    {
+        MOHW_LOG(report, "game GPU: unknown");
+        return;
+    }
+    MOHW_LOG(report, "game GPU: %ls, %llu MB", mine.Description,
+             static_cast<unsigned long long>(mine.DedicatedVideoMemory) / (1024 * 1024));
+    if (!g_system)
+        return;
+    int32_t wanted = -1;
+    reinterpret_cast<GetOutputInfoFn>((*reinterpret_cast<void***>(g_system))[kGetDXGIOutputInfoVtableIndex])(g_system,
+                                                                                                             &wanted);
+    IDXGIFactory* factory = nullptr;
+    IDXGIAdapter* steamVrAdapter = nullptr;
+    DXGI_ADAPTER_DESC theirs{};
+    if (wanted >= 0 && SUCCEEDED(adapter->GetParent(__uuidof(IDXGIFactory), reinterpret_cast<void**>(&factory))) &&
+        SUCCEEDED(factory->EnumAdapters(static_cast<UINT>(wanted), &steamVrAdapter)) &&
+        SUCCEEDED(steamVrAdapter->GetDesc(&theirs)))
+    {
+        bool same = theirs.AdapterLuid.LowPart == mine.AdapterLuid.LowPart &&
+                    theirs.AdapterLuid.HighPart == mine.AdapterLuid.HighPart;
+        MOHW_LOG(report, "SteamVR's GPU: %ls -- %s", theirs.Description,
+                 same ? "the same as the game's" : "DIFFERENT from the game's");
+    }
+    else
+    {
+        MOHW_LOG(report, "SteamVR's GPU: adapter index %d, couldn't be compared", wanted);
+    }
+    if (steamVrAdapter)
+        steamVrAdapter->Release();
+    if (factory)
+        factory->Release();
+}
+
 // One connection attempt (TryConnectOpenVrDirect): NotNow = no headset this time, try again later (the state goes back
 // to NotStarted); Failed = connected to SteamVR but something it needs is missing, don't retry.
 ConnectResult ConnectAttempt()
 {
     // The main game folder, where the SteamVR-current copy was placed -- also from the driving missions'
-    // game\MOHWD.exe (LogFilePath resolves its game\ folder to the main one), so one copy serves both. Loaded once.
+    // game\MOHWD.exe (ModuleFolderPath resolves its game\ folder to the main one), so one copy serves both. Loaded once.
+    const char* report = StartupLogFile();
     static HMODULE h = nullptr;
     if (!h)
     {
         char path[MAX_PATH] = {};
-        strcpy_s(path, LogFilePath("openvr_api.dll").c_str());
+        strcpy_s(path, ModuleFolderPath("openvr_api.dll").c_str());
         MOHW_LOG(kLogFile, "loading %s ...", path);
+        BeginStartupStep("loading openvr_api.dll");
         h = LoadLibraryA(path);
+        DWORD loadError = GetLastError();
+        EndStartupStep();
         if (!h)
         {
-            MOHW_LOG(kLogFile, "LoadLibraryA FAILED, GetLastError=%lu", GetLastError());
+            MOHW_LOG(kLogFile, "LoadLibraryA FAILED, GetLastError=%lu", loadError);
+            MOHW_LOG(report, "openvr_api.dll failed to load, error %lu%s", loadError,
+                     loadError == ERROR_MOD_NOT_FOUND     ? " (file missing)"
+                     : loadError == ERROR_BAD_EXE_FORMAT ? " (wrong bitness: needs SteamVR's bin\\win32 copy)"
+                                                         : "");
             return ConnectResult::Failed;
         }
     }
@@ -323,6 +408,7 @@ ConnectResult ConnectAttempt()
     if (!initInternal2 || !getGenericInterface || !isInterfaceVersionValid)
     {
         MOHW_LOG(kLogFile, "GetProcAddress FAILED for one or more exports");
+        MOHW_LOG(report, "openvr_api.dll loaded but lacks the functions the mod needs (an unexpected build of it)");
         return ConnectResult::Failed;
     }
 
@@ -333,20 +419,37 @@ ConnectResult ConnectAttempt()
     // goes to the running vrserver over IPC and is the real test.
     // Only ever called with SteamVR already running (hooks/master_switch.cpp), so this never launches it.
     int err = kInitError_None;
+    static bool firstInit = true;
+    BeginStartupStep("VR_Init (connecting to SteamVR)", !firstInit);
+    firstInit = false;
     uint32_t token = initInternal2(&err, kAppType_Scene, nullptr);
+    EndStartupStep();
     if (err != kInitError_None)
     {
+        // Every failure lands here, not only "no headset" (215): SteamVR's own words for which.
         static int lastErr = 0;
         if (err != lastErr)
-            MOHW_LOG(kLogFile, "VR_InitInternal2() err=%d -- no headset connected yet", err);
+        {
+            auto symbol = reinterpret_cast<PFN_VR_GetVRInitErrorText>(GetProcAddress(h, "VR_GetVRInitErrorAsSymbol"));
+            auto english =
+                reinterpret_cast<PFN_VR_GetVRInitErrorText>(GetProcAddress(h, "VR_GetVRInitErrorAsEnglishDescription"));
+            const char* name = symbol ? symbol(err) : nullptr;
+            const char* description = english ? english(err) : nullptr;
+            MOHW_LOG(kLogFile, "VR_InitInternal2() err=%d %s: %s", err, name ? name : "?", description ? description : "?");
+            MOHW_LOG(report, "VR_Init failed, error %d %s: %s", err, name ? name : "?", description ? description : "?");
+        }
         lastErr = err;
         return ConnectResult::NotNow;
     }
     MOHW_LOG(kLogFile, "VR_InitInternal2() returned token=%u -- connected", token);
+    MOHW_LOG(report, "VR_Init succeeded");
     g_state.store(static_cast<int>(ConnectState::Connecting), std::memory_order_relaxed);
 
     bool ifaceOk = isInterfaceVersionValid("IVRSystem_026");
     MOHW_LOG(kLogFile, "IVRSystem_026 valid = %d", ifaceOk);
+    for (const char* name : {"IVRSystem_026", "IVRCompositor_029", "IVRInput_011", "IVROverlay_028"})
+        if (!isInterfaceVersionValid(name))
+            MOHW_LOG(report, "this runtime doesn't offer %s", name);
 
     // Real per-eye HMD frustum, published into the SAME HmdViewBlock hooks/eye_matched_fov.cpp already knows how
     // to consume (true per-eye frustum, no crop).
@@ -355,6 +458,7 @@ ConnectResult ConnectAttempt()
     MOHW_LOG(kLogFile, "IVRSystem_026 = %p, err=%d", system, sysErr);
     if (system)
     {
+        ReportVrDevices(system);
         void** sysVtable = *reinterpret_cast<void***>(system);
         g_pollNextEvent = reinterpret_cast<PFN_PollNextEvent>(sysVtable[kPollNextEventVtableIndex]);
         g_getEventTypeName = reinterpret_cast<PFN_GetEventTypeName>(sysVtable[kGetEventTypeNameVtableIndex]);
@@ -388,6 +492,8 @@ ConnectResult ConnectAttempt()
                       "eye%d GetProjectionRaw: raw L/R/T/B = %.4f/%.4f/%.4f/%.4f -> angles L/R/U/D = %.1f/%.1f/%.1f/%.1f deg",
                       eye, rawLeft, rawRight, rawTop, rawBottom, hmd.angleLeft[eye] * kRadToDeg, hmd.angleRight[eye] * kRadToDeg,
                       hmd.angleUp[eye] * kRadToDeg, hmd.angleDown[eye] * kRadToDeg);
+            MOHW_LOG(report, "eye %d raw projection L/R/T/B: %.4f / %.4f / %.4f / %.4f", eye, rawLeft, rawRight, rawTop,
+                     rawBottom);
         }
         hmd.ready = 1;
         hmd.viewMode = mohwvr::ipc::kViewModeTrueFrustum;
@@ -401,6 +507,7 @@ ConnectResult ConnectAttempt()
     MOHW_LOG(kLogFile, "IVRCompositor_029 = %p, err=%d", compositor, compErr);
     if (!compositor)
     {
+        MOHW_LOG(report, "no compositor from this runtime (IVRCompositor_029, error %d)", compErr);
         g_state.store(static_cast<int>(ConnectState::Failed), std::memory_order_release);
         return ConnectResult::Failed;
     }
@@ -416,14 +523,20 @@ ConnectResult ConnectAttempt()
     void* input = getGenericInterface("IVRInput_011", &inputErr);
     MOHW_LOG(kLogFile, "IVRInput_011 = %p, err=%d", input, inputErr);
     if (!InitVrInput(input, trackingUniverse))
+    {
         MOHW_LOG(kLogFile, "SteamVR Input setup FAILED -- continuing without controllers (see mohwvr_vrinput.log)");
+        MOHW_LOG(report, "SteamVR Input setup failed: no controllers, see mohwvr_vrinput.log");
+    }
 
     // Settings menu: a "MOHW VR" tab in the SteamVR dashboard.
     int overlayErr = kInitError_None;
     void* overlay = getGenericInterface("IVROverlay_028", &overlayErr);
     MOHW_LOG(kLogFile, "IVROverlay_028 = %p, err=%d", overlay, overlayErr);
     if (!InitVrOverlay(overlay, trackingUniverse))
+    {
         MOHW_LOG(kLogFile, "dashboard settings tab setup FAILED -- continuing without it (see mohwvr_overlay.log)");
+        MOHW_LOG(report, "dashboard settings tab setup failed, see mohwvr_overlay.log");
+    }
 
     MOHW_LOG(kLogFile, "CONNECTED -- game thread will start the separate-device SubmitThreadProc on its first call");
     g_state.store(static_cast<int>(ConnectState::Connected), std::memory_order_release);
@@ -683,6 +796,13 @@ void SubmitThreadProc()
         // a genuine SteamVR submission-order quirk; if it stays on the right eye, order is ruled out too.
         int rightErr = g_submit(g_compositor, /*Eye_Right*/ 1, rightSubmitTex, nullptr, rightFlags);
         int leftErr = g_submit(g_compositor, /*Eye_Left*/ 0, leftSubmitTex, nullptr, leftFlags);
+        static bool reportedFirstSubmit = false;
+        if (!reportedFirstSubmit)
+        {
+            reportedFirstSubmit = true;
+            MOHW_LOG(StartupLogFile(), "first frame sent to the headset: Submit left %d, right %d (0 = accepted)", leftErr,
+                     rightErr);
+        }
 
         if (submitBurstRemaining > 0)
         {
@@ -736,6 +856,7 @@ bool PrepareForUpdate(ID3D11Device* device)
             dxgiDevice->GetAdapter(&adapter);
             dxgiDevice->Release();
         }
+        ReportGameAdapter(adapter);
         HRESULT hr = D3D11CreateDevice(adapter, adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
                                           nullptr, 0, D3D11_SDK_VERSION, &g_ownDevice, nullptr, nullptr);
         if (adapter)
@@ -743,6 +864,7 @@ bool PrepareForUpdate(ID3D11Device* device)
         if (FAILED(hr) || !g_ownDevice)
         {
             MOHW_LOG(kLogFile, "D3D11CreateDevice (own device) FAILED 0x%08lX -- VR submission will not start", hr);
+            MOHW_LOG(StartupLogFile(), "the mod's own D3D11 device failed, 0x%08lX: no frames can reach the headset", hr);
         }
         else
         {
@@ -870,6 +992,26 @@ ConnectResult TryConnectOpenVrDirect()
     if (g_state.load(std::memory_order_acquire) == static_cast<int>(ConnectState::Connected))
         return ConnectResult::Connected;
     return ConnectAttempt();
+}
+
+bool GetHandControllerType(bool left, char* out, unsigned size)
+{
+    constexpr int kGetDeviceForRoleVtableIndex = 18, kGetStringPropertyVtableIndex = 28, kPropControllerType = 7000;
+    constexpr int kRoleLeftHand = 1, kRoleRightHand = 2;
+    constexpr uint32_t kInvalidDevice = 0xFFFFFFFFu;
+    using GetDeviceForRoleFn = uint32_t(__thiscall*)(void*, int);
+    using GetStringFn = uint32_t(__thiscall*)(void*, uint32_t, int, char*, uint32_t, int*);
+    if (!g_system)
+        return false;
+    void** vtable = *reinterpret_cast<void***>(g_system);
+    uint32_t device = reinterpret_cast<GetDeviceForRoleFn>(vtable[kGetDeviceForRoleVtableIndex])(
+        g_system, left ? kRoleLeftHand : kRoleRightHand);
+    if (device == kInvalidDevice)
+        return false;
+    int error = 0;
+    uint32_t length = reinterpret_cast<GetStringFn>(vtable[kGetStringPropertyVtableIndex])(
+        g_system, device, kPropControllerType, out, size, &error);
+    return error == 0 && length > 1;
 }
 
 float GetDetectedDisplayFrequencyHz()

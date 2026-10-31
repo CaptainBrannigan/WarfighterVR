@@ -26,6 +26,9 @@
 #define MOHW_MP "MOHW.exe"
 #define MOHW_MP_BASE 0x400000u
 #define MOHW_MP_SIZE 0x2865000u
+// MOHWD.exe (in the game subfolder), the driving missions. Its hook addresses are hardcoded for this build
+// (hooks/driving_camera_hook.cpp, hooks/marker_projection_hook.cpp).
+#define MOHWD_SIZE 0x251B000u
 
 // --- Confirmed for this build ---
 #define OFFSET_MAIN 0x2A4D480u

@@ -67,6 +67,10 @@ enum class ConnectResult
 };
 ConnectResult TryConnectOpenVrDirect();
 
+// Once connected: SteamVR's controller type for a hand ("oculus_touch", "knuckles", ...). False if no controller holds
+// that role right now. Submit thread (vr_input.cpp).
+bool GetHandControllerType(bool left, char* out, unsigned size);
+
 // The HMD's real display refresh rate, queried live via IVRSystem::GetFloatTrackedDeviceProperty
 // (Prop_DisplayFrequency_Float) once connected -- see openvr_direct.cpp's g_detectedDisplayFrequencyHz comment.
 // Returns 0.0f if not yet known (not connected, or the query failed/returned an implausible value).
