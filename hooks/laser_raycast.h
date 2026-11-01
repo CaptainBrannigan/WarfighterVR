@@ -32,9 +32,6 @@ void LaserNoteBulletHits(const void* hits, unsigned int count, const float* segm
 // land on the dot. False when the laser isn't running (no recent cast): they keep the controller's direction then.
 bool GetLaserAimPoint(float worldPoint[3]);
 
-// Any thread: the rotation rows (right, up, back) of the game's own camera this frame, before the mod smooths it: the
-// 30 Hz camera the first-person rig was posed with. False if it's stale.
-bool GetGameCameraRows(float rows[3][3]);
 
 // Any thread: the point the laser's cast starts from, in the game world: the hand's point moved LaserStart forward (the
 // muzzle). The shots start there too, so nothing the laser clears can stop a shot. False when the laser isn't running.

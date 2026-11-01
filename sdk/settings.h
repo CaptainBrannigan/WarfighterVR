@@ -213,8 +213,8 @@ ArmIkSettings GetArmIkSettings();
 // body frame, metres, and BodyUpright keeps it from tilting with the view. BodyOffsetRight/Up/Forward, BodyUpright.
 void GetBodyOffset(float out[3]);
 bool GetBodyUpright();
-// The rig measured from the game's 30 Hz camera, so it doesn't jitter on head turns (hooks/camera_matrix_test_hook.cpp
-// AlignRigCamera). StabilizeRig, default on.
+// The rig corrected by the skeleton's Head bone, for bones and a camera from different game ticks
+// (hooks/first_person_rig.cpp AlignRigToBones). StabilizeRig, default on.
 bool GetStabilizeRig();
 // Draws every grab zone in the headset, for setting them up (openvr_direct/vr_hands.cpp). ShowGrabZones, default off.
 bool GetShowGrabZones();

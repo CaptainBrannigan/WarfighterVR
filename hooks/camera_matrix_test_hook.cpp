@@ -12,7 +12,7 @@
 #include "fov_scale_hook.h"
 #include "aiming_controller_hook.h"
 #include "first_person_rig.h"
-#include "laser_raycast.h"
+#include "render_pose_stamp.h"
 #include "../sdk/rigid.h"
 #include "../openvr_direct/vr_hands.h"
 #include "../openvr_direct/vr_reload.h"
@@ -87,34 +87,85 @@ void* g_submitAddress = nullptr;
 // character loads); Numpad . toggles and saves it.
 std::atomic<bool> g_weaponGripLogRequested{true}; // log the hand's pose in camera space once, on the next weapon draw
 
+// WHERE THE FRAME IS SHOWN FROM (2026-11-01): M here is the game's raw 30 Hz camera, but the world is drawn from the
+// mod's smoothed one, and SteamVR is told so by the render-pose stamp. A frame through M for "the world" put the gun on
+// that staircase, so on a head turn it jumped against the smooth world (live: the two cameras' rows matched to 0.04 deg
+// for M, so it wasn't the other way round). So a controller is taken relative to the head pose the frame is shown from,
+// which is the frame the view's own axes are in (x right, y up, z back, as the laser's RENDER MAPPING), then carried
+// through M only so the formulas above cancel it: M * C^-1 = H^-1, with H the pose in the view.
+bool ShownHeadPose(Quat* orientation, float position[3])
+{
+    mohwvr::ipc::HeadPoseBlock head{};
+    if (!GetHeadPose(&head))
+        return false;
+    *orientation = Quat{head.orientationX, head.orientationY, head.orientationZ, head.orientationW};
+    position[0] = head.positionX;
+    position[1] = head.positionY;
+    position[2] = head.positionZ;
+    float stampQ[4], stampP[3];
+    bool stampPosValid = false;
+    if (GetCommittedFrameRenderPose(stampQ, stampP, &stampPosValid))
+    {
+        *orientation = Quat{stampQ[0], stampQ[1], stampQ[2], stampQ[3]};
+        if (stampPosValid)
+            memcpy(position, stampP, sizeof(stampP));
+    }
+    return true;
+}
+
+// A tracking-space frame (axes, position) as a frame like M: in the view of this eye, then through m.
+bool FrameInView(const float m[16], const Vec3 axes[3], const Vec3& position, Rigid* out)
+{
+    Quat headQ{};
+    float headP[3];
+    if (!ShownHeadPose(&headQ, headP))
+        return false;
+    Quat headInverse = QuatConjugate(headQ);
+    Rigid inView{};
+    for (int i = 0; i < 3; ++i)
+    {
+        Vec3 axis = QuatRotateVector(headInverse, axes[i]);
+        inView.R[i][0] = axis.x;
+        inView.R[i][1] = axis.y;
+        inView.R[i][2] = axis.z;
+    }
+    Vec3 relative;
+    relative.x = position.x - headP[0];
+    relative.y = position.y - headP[1];
+    relative.z = position.z - headP[2];
+    Vec3 local = QuatRotateVector(headInverse, relative);
+    float scale = GetHeadPositionScale();
+    if (!(scale > 0.01f))
+        scale = 1.0f;
+    inView.t[0] = local.x * scale - GetActiveEyeOffsetAlongRow0();
+    inView.t[1] = local.y * scale;
+    inView.t[2] = local.z * scale;
+    *out = Compose(inView, FromMatrix(m));
+    return true;
+}
+
 // The weapon hand's controller (the "right" slot), or the off hand's.
 bool ControllerFrame(const float m[16], bool offHand, Rigid* out)
 {
     mohwvr::ipc::ControllerPoseBlock controller{};
-    mohwvr::ipc::HeadPoseBlock head{};
-    if (!(offHand ? GetLeftControllerPose(&controller) : GetRightControllerPose(&controller)) || !GetHeadPose(&head))
+    if (!(offHand ? GetLeftControllerPose(&controller) : GetRightControllerPose(&controller)))
         return false;
 
     Quat q{controller.orientationX, controller.orientationY, controller.orientationZ, controller.orientationW};
+    Vec3 axes[3];
     for (int i = 0; i < 3; ++i)
     {
         Vec3 e{};
         e.x = i == 0 ? 1.0f : 0.0f;
         e.y = i == 1 ? 1.0f : 0.0f;
         e.z = i == 2 ? 1.0f : 0.0f;
-        Vec3 axis = QuatRotateVector(q, e);
-        if (!TrackingDirectionToGameWorld(axis.x, axis.y, axis.z, out->R[i]))
-            return false;
+        axes[i] = QuatRotateVector(q, e);
     }
-
-    float offset[3];
-    if (!TrackingOffsetToGameWorld(controller.positionX - head.positionX, controller.positionY - head.positionY,
-                                   controller.positionZ - head.positionZ, offset))
-        return false;
-    float eyeOffset = GetActiveEyeOffsetAlongRow0();
-    for (int k = 0; k < 3; ++k)
-        out->t[k] = m[12 + k] - m[k] * eyeOffset + offset[k];
-    return true;
+    Vec3 position;
+    position.x = controller.positionX;
+    position.y = controller.positionY;
+    position.z = controller.positionZ;
+    return FrameInView(m, axes, position, out);
 }
 
 Rigid GripInCamera()
@@ -177,40 +228,6 @@ void AnchorRigToHead(float m[16], const Rigid& rigCamera, bool addRoll)
     ToMatrix(Compose(shiftAndRoll, rigCamera), m);
 }
 
-// THE RIG'S OWN CAMERA (2026-11-01): the rig's bones are posed at the game's 30 Hz tick, against the game's own camera,
-// but the camera it's drawn from is the mod's smoothed one, updated every frame. Head still, they agree; turning, the
-// rig sits behind and then catches up each tick, which reads as jitter on everything attached to it, and only on head
-// turns (the 2026-08 smoothing fixed the world, and left this). So what's "camera-relative" in the rig is measured from
-// the game's camera: rotation only, as the two share a position bar the head offset. A big gap means it isn't this
-// camera's frame (a cutscene, a transition): left alone.
-constexpr float kRigCameraMaxDegrees = 25.0f;
-std::atomic<float> g_rigGapDegrees{0.0f};
-std::atomic<unsigned long long> g_rigGapLogMs{0};
-
-void AlignRigCamera(Rigid* rigCamera)
-{
-    float rows[3][3];
-    if (!GetStabilizeRig() || !GetGameCameraRows(rows))
-        return;
-    float back = 0.0f, up = 0.0f;
-    for (int k = 0; k < 3; ++k)
-    {
-        back += rows[2][k] * rigCamera->R[2][k];
-        up += rows[1][k] * rigCamera->R[1][k];
-    }
-    const float lowest = back < up ? back : up;
-    const float gap = acosf(lowest > 1.0f ? 1.0f : lowest < -1.0f ? -1.0f : lowest) * 57.29578f;
-    if (gap > g_rigGapDegrees.load(std::memory_order_relaxed))
-        g_rigGapDegrees.store(gap, std::memory_order_relaxed);
-    unsigned long long now = GetTickCount64(), due = g_rigGapLogMs.load(std::memory_order_relaxed);
-    if (now >= due && g_rigGapLogMs.compare_exchange_strong(due, now + 2000))
-        MOHW_LOG(kLogFile, "rig camera: largest gap to the drawn camera %.2f deg in the last 2 s%s",
-                 g_rigGapDegrees.exchange(0.0f), gap > kRigCameraMaxDegrees ? " (over the limit: not used)" : "");
-    if (gap > kRigCameraMaxDegrees)
-        return;
-    memcpy(rigCamera->R, rows, sizeof(rows));
-}
-
 // Rewrites m (a weapon batch's local camera matrix) so the gun follows the controller. Returns false, leaving m
 // untouched, while the drive is off or a pose is unavailable.
 bool DriveWeaponFromController(float m[16], const Rigid& rigCamera)
@@ -241,17 +258,25 @@ bool DriveWeaponFromController(float m[16], const Rigid& rigCamera)
 // The pouch as a frame like a controller's (rows: right, up, back): the body's axes at the pouch.
 bool PouchFrame(const float m[16], const openvr_direct::MagazineView& view, Rigid* out)
 {
-    const float up[3] = {0.0f, 1.0f, 0.0f};
-    float offset[3];
-    if (!TrackingDirectionToGameWorld(view.bodyRight[0], view.bodyRight[1], view.bodyRight[2], out->R[0]) ||
-        !TrackingDirectionToGameWorld(up[0], up[1], up[2], out->R[1]) ||
-        !TrackingDirectionToGameWorld(view.bodyBack[0], view.bodyBack[1], view.bodyBack[2], out->R[2]) ||
-        !TrackingOffsetToGameWorld(view.pouchFromHead[0], view.pouchFromHead[1], view.pouchFromHead[2], offset))
+    Vec3 axes[3];
+    axes[0].x = view.bodyRight[0];
+    axes[0].y = view.bodyRight[1];
+    axes[0].z = view.bodyRight[2];
+    axes[1].x = 0.0f;
+    axes[1].y = 1.0f;
+    axes[1].z = 0.0f;
+    axes[2].x = view.bodyBack[0];
+    axes[2].y = view.bodyBack[1];
+    axes[2].z = view.bodyBack[2];
+    Quat headQ{};
+    float headP[3];
+    if (!ShownHeadPose(&headQ, headP))
         return false;
-    float eyeOffset = GetActiveEyeOffsetAlongRow0();
-    for (int k = 0; k < 3; ++k)
-        out->t[k] = m[12 + k] - m[k] * eyeOffset + offset[k];
-    return true;
+    Vec3 position; // the pouch is placed from the live head; only its offset from there matters
+    position.x = headP[0] + view.pouchFromHead[0];
+    position.y = headP[1] + view.pouchFromHead[1];
+    position.z = headP[2] + view.pouchFromHead[2];
+    return FrameInView(m, axes, position, out);
 }
 
 float BlendStep(float from, float to, float x)
@@ -628,7 +653,7 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     // anchored to the head centre: the body+hands batch without the head's roll, the weapon with the drive off with
     // it (it's the view's gun then, and should roll with the view).
     Rigid rigCamera = FromMatrix(m);
-    AlignRigCamera(&rigCamera);
+    AlignRigToBones(&rigCamera);
     bool driven = false;
     if (patchThis)
     {

@@ -85,6 +85,10 @@ bool ReadName(uintptr_t address, char* out, size_t size)
     }
 }
 
+// The bones the rig's wobble against the camera is read from; the first one also corrects it. Head: it held to 0.03 deg
+// against the camera, where CameraJoint swung up to 32 deg with the animations (live 2026-11-01).
+const char* const kRigFrameBoneNames[3] = {"Head", "CameraJoint", "Spine2"};
+
 // ---- The skeleton ----
 struct ArmBones
 {
@@ -103,6 +107,7 @@ struct Skeleton
     bool armsValid = false;
     int magBone = -1, magAmmoBone = -1;
     int gunBone = -1;                               // Wep_Root
+    int frameBones[3] = {-1, -1, -1};               // kRigFrameBoneNames
     std::vector<std::pair<int, int>> mirroredHands; // each left hand bone and its right one
     int mirrorAxis = 0;                             // the bind pose's left-right axis
 };
@@ -177,6 +182,9 @@ bool ReadSkeleton(uintptr_t skeleton)
         names[i] = name;
         if (_stricmp(name, "Wep_Root") == 0)
             next.gunBone = static_cast<int>(i);
+        for (int b = 0; b < 3; ++b)
+            if (_stricmp(name, kRigFrameBoneNames[b]) == 0)
+                next.frameBones[b] = static_cast<int>(i);
         ClassifyArmBone(next.arms[0], "Left", name, static_cast<int>(i));
         ClassifyArmBone(next.arms[1], "Right", name, static_cast<int>(i));
         if (_stricmp(name, "Wep_Mag") == 0)
@@ -246,6 +254,13 @@ std::mutex g_candidateMutex;
 SkeletonCandidate g_candidates[kMaxCandidates]; // guarded by g_candidateMutex
 int g_candidateCount = 0, g_candidateNext = 0;
 std::atomic<bool> g_wantCandidates{true}; // only while no skeleton is settled
+// The player's bones (as the game returns them), and the frame bones' rotations from them this job, for AlignRigToBones:
+// read here because this is the copy the batches are made from, and a later read could be a tick newer.
+std::atomic<uintptr_t> g_playerBones{0};
+std::atomic<int> g_frameBoneIndex[3] = {{-1}, {-1}, {-1}};
+std::mutex g_frameMutex;
+float g_frameRows[3][3][3] = {}; // guarded by g_frameMutex
+bool g_haveFrameRows = false;    // likewise
 
 void NoteCandidate(uintptr_t bones, uintptr_t skeleton)
 {
@@ -293,11 +308,31 @@ void CollectCandidates(void* soldier, void* bones)
     NoteCandidate(reinterpret_cast<uintptr_t>(bones), current);
 }
 
+void NoteFrameBones(uintptr_t bones)
+{
+    float rows[3][3][3] = {};
+    for (int b = 0; b < 3; ++b)
+    {
+        const int index = g_frameBoneIndex[b].load(std::memory_order_relaxed);
+        float slot[12];
+        if (index < 0 || !ReadBytes(bones + index * 48, slot, sizeof(slot)))
+            continue;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                rows[b][i][j] = slot[j * 4 + i]; // a bone is the transpose of the row-vector matrix
+    }
+    std::lock_guard<std::mutex> lock(g_frameMutex);
+    memcpy(g_frameRows, rows, sizeof(rows));
+    g_haveFrameRows = true;
+}
+
 void* __fastcall HookedBonesGetter(void* soldier)
 {
     void* bones = g_originalBonesGetter(soldier);
     if (g_wantCandidates.load(std::memory_order_relaxed))
         CollectCandidates(soldier, bones);
+    else if (reinterpret_cast<uintptr_t>(bones) == g_playerBones.load(std::memory_order_relaxed))
+        NoteFrameBones(reinterpret_cast<uintptr_t>(bones));
     return bones;
 }
 
@@ -359,6 +394,32 @@ void __fastcall HookedPlacePart(void* entry, void* /*edx*/, int firstPerson, int
         uint32_t mesh = 0;
         if (ReadU32(begin + i * kRigidRecordBytes, &mesh) && mesh)
             NoteMagazineMesh(mesh);
+    }
+}
+
+// FUN_00831080: the reload's time, for the firing state machine's timers. None for manual reload: the hand has already
+// done it, and at no time a round-at-a-time reload runs to full within one tick. Hand-written, as the game is compiled
+// knowing this function leaves ECX alone: FUN_0083B130 calls it and then FUN_00831170 with no ECX of its own, so a C++
+// detour, free to use ECX, crashed there (live 2026-11-01, fault at 0x00831170). This touches only EAX, which the original
+// overwrites first thing. Only FUN_0083B130's own calls: FUN_00835620 divides by the time.
+uintptr_t g_reloadTimeCallersFirst = 0;
+volatile uintptr_t g_instantReloadFiring = 0;
+void* g_originalReloadTime = nullptr;
+void* g_reloadTimeAddress = nullptr;
+
+__declspec(naked) void ReloadTimeStub()
+{
+    __asm {
+        mov eax, dword ptr [esp]
+        sub eax, g_reloadTimeCallersFirst
+        cmp eax, 0xCA6 // FUN_0083B130's size
+        jae original
+        cmp ecx, g_instantReloadFiring
+        jne original
+        fldz
+        ret
+    original:
+        jmp g_originalReloadTime
     }
 }
 
@@ -977,6 +1038,82 @@ float BoneDifference(const SkeletonCandidate& c, const float* batchBones, int co
 
 } // namespace
 
+// THE RIG AGAINST THE CAMERA (2026-11-01): the bones are posed at the game's tick, and a frame can pair them with a
+// camera from a different tick, so on a head turn the whole rig steps against the camera. That shows as a wobble in the
+// bone's rotation relative to the batch camera. O = bone * M^-1 is constant for a rig that's rigid to M; its slow
+// average O' takes out the bone's own fixed turn, and M' = O'^-1 * bone is the camera the rig really goes with. Only a
+// small wobble is that: anything bigger is an animation moving the bone, and following one turned the whole rig and let
+// it ease back over the average's second (live: "jump and lerp back", with CameraJoint as the bone).
+void AlignRigToBones(Rigid* rigCamera)
+{
+    constexpr float kFollowSeconds = 1.0f;
+    constexpr float kMaxWobbleDegrees = 3.0f;
+    float rows[3][3][3];
+    {
+        std::lock_guard<std::mutex> lock(g_frameMutex);
+        if (!g_haveFrameRows)
+            return;
+        memcpy(rows, g_frameRows, sizeof(rows));
+    }
+    static std::mutex mutex;
+    static float average[3][3][3];
+    static bool haveAverage[3] = {};
+    static float peak[3] = {};
+    static unsigned long long lastMs = 0, nextLogMs = 0;
+    std::lock_guard<std::mutex> lock(mutex);
+    const unsigned long long now = GetTickCount64();
+    const float dt = lastMs ? static_cast<float>(now - lastMs) * 0.001f : 0.0f;
+    lastMs = now;
+    const float follow = 1.0f - std::exp(-dt / kFollowSeconds);
+    float wobble0 = 1000.0f;
+    for (int b = 0; b < 3; ++b)
+    {
+        if (g_frameBoneIndex[b].load(std::memory_order_relaxed) < 0)
+            continue;
+        float o[3][3];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                o[i][j] = rows[b][i][0] * rigCamera->R[j][0] + rows[b][i][1] * rigCamera->R[j][1] +
+                          rows[b][i][2] * rigCamera->R[j][2];
+        if (!haveAverage[b])
+        {
+            memcpy(average[b], o, sizeof(o));
+            haveAverage[b] = true;
+        }
+        float blended[3][3];
+        BlendRotation(average[b], o, follow, blended);
+        memcpy(average[b], blended, sizeof(blended));
+        float trace = 0.0f;
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                trace += o[i][j] * average[b][i][j];
+        const float cosine = (trace - 1.0f) * 0.5f;
+        const float wobble = std::acos(cosine > 1.0f ? 1.0f : cosine < -1.0f ? -1.0f : cosine) / kRad;
+        if (wobble > peak[b])
+            peak[b] = wobble;
+        if (b == 0)
+            wobble0 = wobble;
+    }
+    if (now >= nextLogMs)
+    {
+        nextLogMs = now + 2000;
+        MOHW_LOG(kLogFile, "rig wobble against the camera, peak in 2 s: %s %.2f, %s %.2f, %s %.2f deg",
+                 kRigFrameBoneNames[0], peak[0], kRigFrameBoneNames[1], peak[1], kRigFrameBoneNames[2], peak[2]);
+        peak[0] = peak[1] = peak[2] = 0.0f;
+    }
+    if (!GetStabilizeRig() || wobble0 > kMaxWobbleDegrees)
+        return;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            rigCamera->R[i][j] = average[0][0][i] * rows[0][0][j] + average[0][1][i] * rows[0][1][j] +
+                                 average[0][2][i] * rows[0][2][j];
+}
+
+void SetInstantReloadFiring(uintptr_t firing)
+{
+    g_instantReloadFiring = firing;
+}
+
 void NoteBodyBatch(const unsigned char* batch)
 {
     std::lock_guard<std::mutex> lock(g_skeletonMutex);
@@ -986,6 +1123,7 @@ void NoteBodyBatch(const unsigned char* batch)
         MOHW_LOG(kLogFile, "no body batch for a while: finding the skeleton again");
         g_skeleton = Skeleton{};
         g_skeletonObject.store(0, std::memory_order_relaxed);
+        g_playerBones.store(0, std::memory_order_relaxed);
         g_magBone.store(-1, std::memory_order_relaxed);
         g_magAmmoBone.store(-1, std::memory_order_relaxed);
         g_rejectedSkeleton = 0;
@@ -1008,7 +1146,7 @@ void NoteBodyBatch(const unsigned char* batch)
         memcpy(snapshot, g_candidates, sizeof(SkeletonCandidate) * candidates);
     }
     float best = -1.0f;
-    uintptr_t bestSkeleton = 0;
+    uintptr_t bestSkeleton = 0, bestBones = 0;
     for (int i = 0; i < candidates; ++i)
     {
         uint32_t namesTable = 0, boneCount = 0;
@@ -1020,6 +1158,7 @@ void NoteBodyBatch(const unsigned char* batch)
         {
             best = difference;
             bestSkeleton = snapshot[i].skeleton;
+            bestBones = snapshot[i].bones;
         }
     }
     static std::atomic<int> misses{0};
@@ -1034,6 +1173,9 @@ void NoteBodyBatch(const unsigned char* batch)
              reinterpret_cast<void*>(bestSkeleton), best, candidates);
     if (ReadSkeleton(bestSkeleton))
     {
+        for (int b = 0; b < 3; ++b)
+            g_frameBoneIndex[b].store(g_skeleton.frameBones[b], std::memory_order_relaxed);
+        g_playerBones.store(bestBones, std::memory_order_relaxed);
         g_skeletonObject.store(bestSkeleton, std::memory_order_relaxed);
         g_wantCandidates.store(false, std::memory_order_relaxed);
     }
@@ -1226,6 +1368,16 @@ bool InstallFirstPersonRigHooks()
                  MH_StatusToString(s));
         g_placePartAddress = nullptr;
     }
+    g_reloadTimeCallersFirst = g_baseDelta + OFFSET_RELOAD_TIME_CALLERS_FIRST;
+    g_reloadTimeAddress = Offset<void*>(OFFSET_RELOAD_TIME);
+    s = MH_CreateHook(g_reloadTimeAddress, reinterpret_cast<void*>(&ReloadTimeStub), &g_originalReloadTime);
+    if (s == MH_OK)
+        s = MH_EnableHook(g_reloadTimeAddress);
+    if (s != MH_OK)
+    {
+        MOHW_LOG(kLogFile, "reload time hook (FUN_00831080 @ %p) FAILED: %s", g_reloadTimeAddress, MH_StatusToString(s));
+        g_reloadTimeAddress = nullptr;
+    }
     g_reloadStartedAddress = Offset<void*>(OFFSET_RELOAD_STARTED_NOTIFY);
     s = MH_CreateHook(g_reloadStartedAddress, reinterpret_cast<void*>(&HookedReloadStarted),
                       reinterpret_cast<void**>(&g_originalReloadStarted));
@@ -1243,7 +1395,7 @@ bool InstallFirstPersonRigHooks()
 
 void RemoveFirstPersonRigHooks()
 {
-    for (void** address : {&g_bonesGetterAddress, &g_placePartAddress, &g_reloadStartedAddress})
+    for (void** address : {&g_bonesGetterAddress, &g_placePartAddress, &g_reloadStartedAddress, &g_reloadTimeAddress})
     {
         if (*address)
         {

@@ -103,6 +103,10 @@
 // WeaponFiring announces a reload's start to the animation here: __thiscall (char local), RET 4; its one job is the
 // named event. Called from FUN_0083B130 and FUN_008388F0.
 #define OFFSET_RELOAD_STARTED_NOTIFY 0x8373E0u
+// The reload's time for this weapon: __fastcall (ECX = WeaponFiring), float in ST0. FUN_0083B130 sets the reload states'
+// timers from it; FUN_00835620 calls it too, and is left alone.
+#define OFFSET_RELOAD_TIME 0x831080u
+#define OFFSET_RELOAD_TIME_CALLERS_FIRST 0x83B130u // FUN_0083B130
 // Camera-class matrix setter (2026-09-19, found via Cheat Engine "what writes"
 // on the camera object): FUN_006FC2A0, __thiscall(this=camera, float* 4x4),
 // RET 4; copies 16 dwords to this+0 and ORs 9 into this+0x90 (dirty flags).

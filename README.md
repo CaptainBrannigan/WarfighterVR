@@ -3,9 +3,10 @@
 An unofficial VR mod for **Medal of Honor: Warfighter** (2012, Frostbite 2 / DirectX 11). The game has no VR support
 of its own. This mod is a proxy `dxgi.dll` that hooks the game's rendering and input and talks to SteamVR directly
 from inside the game: stereo rendering at the headset's real field of view, head-tracked look and movement, motion
-controllers for aiming, a gun held in your hand, body holsters, and an in-headset settings menu.
+controllers for aiming, a gun held in your hand, arms that follow your hands, manual magazine reloads, body holsters,
+and an in-headset settings menu.
 
-**Status: Beta, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
+**Status: v1.1, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
 hasn't been played all the way through yet; see [Known issues](#known-issues).
 
 ## Requirements
@@ -42,9 +43,9 @@ running and the mod switches on then, and stays on until you quit.
 
 **Controller bindings:** in SteamVR's controller bindings for the game, pick **"MOHW VR defaults"**. If you
 previously saved your own binding for the game, SteamVR keeps using that copy and won't pick up new actions from a
-newer version of the mod until you switch back to the defaults (or add the new actions to your copy). New in the
-Beta: "Left / Right hand position for two-handed grip", bound to the Grip pose; without it two-handed aim uses the
-controller's tip instead of your palm.
+newer version of the mod until you switch back to the defaults (or add the new actions to your copy). The ones a saved
+binding may be missing: "Left / Right hand position for two-handed grip", bound to the Grip pose (without it two-handed
+aim uses the controller's tip instead of your palm), and "Thumb tap - left / right hand" for LB / RB.
 
 ## Features
 
@@ -78,7 +79,22 @@ controller's tip instead of your palm.
   holsters and two-handed aim -- mirrored for the left hand. Per-weapon settings come on top.
 - **Two-handed aiming:** grip with your other hand on the barrel to aim along the line between your hands. Only the
   other hand's position counts (its palm, the SteamVR grip pose), so turning that hand doesn't move the aim.
-- **Left-handed mode.**
+- **Left-handed mode.** With the gun in the left hand the game's arms swap roles, each hand mirroring the other's pose.
+- **Arms on your hands:** the first-person arms follow the controllers, with two-bone IK and an elbow model that
+  follows your wrist. The weapon hand stays on the gun's grip; the other hand follows its controller, or stays on the
+  gun when two-handed. Hand offsets, each shoulder's position and the elbow limits are in the **Arm IK** settings.
+- **Body:** the body and legs can be moved under your view, and kept upright when you look up or down, in the **Body**
+  settings. The hands stay on the controllers. Which other parts are drawn is set by the "Hide part" rows in Weapon.
+- **Manual reload:** there's no reload animation; you change the magazine yourself.
+  1. Grip with your other hand on the magazine and pull it out. The gun can't fire while it's out.
+  2. Let go away from the gun, and the magazine moves to a pouch on your chest.
+  3. Grip at the pouch to take it, and bring it to the magwell.
+  4. Inside its range it stays in your hand and turns so its top points at the aim point, more the closer it gets. At
+     the lock distance it's upright and can only move up and down: push it up to seat it.
+
+  Pulling a magazine and pushing the same one back in costs nothing. The Reload button drops the magazine, as does the
+  game's auto-reload when empty. The ammo count stays the game's own. The grab box, aim point and ranges are per weapon
+  (see **Weapon profiles**).
 - **Body holsters:** press grip with a hand at a body position to trigger an action. That hand also takes the weapon
   if the action is a weapon.
 
@@ -100,11 +116,13 @@ controller's tip instead of your palm.
 - **Optic dot:** fixed to the gun like a sight -- zero it against the laser with its height and windage settings. Each
   dot red or green. Caveat: It's best to use the new tracer in place of this optic dot, as the optic dot is tied to the
   right hand tracking, prone to tracking jitter.
-- **Peek and lean:** hold LB ("Gamepad: LB" in the SteamVR bindings, or a left-grip double-tap held on the second
-  press) and push the move stick: analog lean left / right and peek up / down, as on a gamepad. Turn off the game's
+- **Peek and lean:** hold LB (double-tap the left thumbrest, or "Gamepad: LB" in the SteamVR bindings) and push the
+  move stick: analog lean left / right and peek up / down, as on a gamepad. LB stays on while your thumb moves to the
+  stick, and for as long as the stick is off centre. Turn off the game's
   own **Auto ADS** option to lean without aiming down sights (with it on, a full lean aims down sights by itself).
 - **Weapon profiles:** the grip offset and rotation, the optic zero, the controller aim offset, the secondary
-  (two-handed) grip offset and the laser / beam start are kept per weapon
+  (two-handed) grip offset, the laser / beam start and the magazine's setup (grab box, aim point, turn, lock and seat
+  distances) are kept per weapon
   and switch automatically with the weapon in your hand (picked-up weapons included). The settings menu's "Weapon
   profile: <weapon>" section edits the weapon you're holding; a weapon you haven't set up yet starts from the default
   values, which are also used when no weapon is held. The mod ships with profiles for the weapons used so far (AK-103,
@@ -182,15 +200,40 @@ and a double-tap also counts as two quick grabs. Everything is rebindable in Ste
 every keyboard action the game has (read from your game profile, so in-game rebinds carry over) is available as its
 own SteamVR action, listed as "Keyboard: ...", alongside "Gamepad: ..." for the pad buttons.
 
-To see where everything is, turn on **Show grab zones (setup)** in the settings' Holsters group. Holsters, the magazine
-pouch, the magazine's grab box, its turn and lock ranges, its seat (white dot) and aim point (red dot) and the two-handed
-band all show in the headset, and turn green when your hand is in them, so you can adjust them with the view on.
-
 ### Settings menu
-Open the SteamVR dashboard in the headset and select the **MOHW VR** tab. Every setting is there and applies
-immediately: head look, view (IPD, world scale, smoothing), controls (turn speed, stick deadzone, two-handed grab,
-shot spread, fire as mouse or triggers), hands (left-handed, holsters, sight dots), weapon grip, HUD, holster
-positions and actions, and the driving missions (head look, stereo, steering wheel). There is also a Recenter button.
+Open the SteamVR dashboard in the headset and select the **MOHW VR** tab. It's an overlay inside SteamVR, so it works
+over the running game. Point with SteamVR's laser, and scroll with the stick or the title bar's buttons. Every setting
+is there, applies immediately and saves by itself. There is also a Recenter button.
+
+| Group | What's in it |
+|---|---|
+| Head | Head look, its sensitivity and direction, head roll, head position |
+| View | IPD, world scale, rotation smoothing, keeping the game out of exclusive fullscreen |
+| Controls | Turn speed, stick range, two-handed grab, shot spread, fire as mouse or triggers, double-tap bumpers |
+| Hands | Left-handed, holster size, hand calibration, sight dots, laser beam |
+| Holsters | The grab zone view, each zone's position, the magazine pouch |
+| Holster actions | What each zone does |
+| Arm IK | Arms on or off, hand offsets, each shoulder's position, elbow behaviour |
+| Body | Body position, keeping it upright, steadying it on head turns |
+| Weapon | Gun follows the controller, manual reload, which body parts are hidden |
+| Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand |
+| HUD | The HUD panel on or off, its size, depth, IPD and offset, the menu and movie screen size, hiding the reticle |
+| Driving | Head look, stereo and the steering wheel in the driving missions |
+
+**Grab zone view:** turn on **Show grab zones (setup)** in Holsters to see everywhere a grip does something, drawn in
+the headset at its real position, so you can adjust it with the view on. Anything your hand is inside turns green.
+
+| Shape | Shows |
+|---|---|
+| Blue labelled rings | The holster zones (they're spheres, and a ring is a sphere's outline from any side) |
+| Orange ring | The magazine pouch |
+| Yellow box | The magazine's grab box |
+| Purple / pink rings | The magazine's turn range and lock distance |
+| White / red dots | The magazine's seat and its aim point |
+| Green band | The two-handed grab along the barrel |
+
+The magazine's shapes only show on a weapon manual reload works with. All of them draw over everything, including the
+gun.
 
 ## Troubleshooting
 
@@ -206,9 +249,12 @@ If `mohwvr_startup.log` doesn't exist in either place, the DLL never loaded: che
 `MOHW.exe`. When reporting a problem, include that log along with `mohwvr_proxy.log`, `mohwvr_master.log` and
 `mohwvr_openvr_direct.log`.
 
+For Steam Link "vrlink driver" errors at launch or exit, see [Known issues](#known-issues); `C:\Steam\logs\driver_vrlink.txt`
+(under your Steam folder) shows whether the stream reset.
+
 ## Known issues
 
-This is a Beta. The rough edges known so far:
+The rough edges known so far:
 
 - **Hit detection doesn't always follow the shots.** The tracer and the impact go where the laser dot is, but the
   game's own hit check sometimes disagrees -- possibly because it still treats the shot as leaving from the player
@@ -224,10 +270,13 @@ This is a Beta. The rough edges known so far:
   Virtual Desktop. The hand calibration and weapon profiles were tuned on Touch, so other controllers may need
   "Hand offset" / "Hand rotation" and the grip offsets adjusted. Controllers whose grip is bound as a button have no
   analog grip, and on HP, Cosmos and WMR two-handed aiming uses the controller's tip instead of the palm.
-- **Arms on the controllers and manual reload are a first draft, untested in the game.** Both can be turned off under
-  "Arm IK" and "Weapon" in the settings; each weapon's magazine is set up in its weapon profile. Manual reload needs a magazine that's a separate part of the gun, so it doesn't
-  apply to pistols yet. With the gun in the left hand the hands mirror the right-handed pose, and the forearms don't
-  twist with the wrists.
+- **Manual reload needs a magazine that's a separate part of the gun,** so it doesn't apply to pistols yet. They reload
+  as the game does. Taking the magazine out of a gun and switching weapons refills it, and the HUD's count can change
+  before you've seated a new magazine.
+- **With the gun in the left hand** the forearms don't twist with the wrists.
+- **Steam Link can drop the stream at launch.** The game starts in exclusive fullscreen, and leaving it stops the GPU
+  for about half a second. In VR the mod keeps the game out of it from then on, which took care of the same error at
+  exit.
 - **The robot-control section** shows the robot's camera head-locked (no head look on it yet); the right stick
   looks around.
 - **Objectives where you shoot something that isn't a soldier** (a target, a device) only count the game's own aim,

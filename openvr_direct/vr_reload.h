@@ -8,8 +8,9 @@
 //   Out -> off-hand grip in the pouch -> held, now a new magazine
 //   Held near the magwell -> its top turns to the aim point, its horizontal locks, and pushing it up seats it -> in the gun
 //
-// A new magazine seating presses the game's own Reload and cuts it short (WeaponFiring's reload states 0xB / 0xC wait
-// on its timer at +0xC4), with its start never announced to the animation (FUN_008373E0, hooks/first_person_rig.cpp), so
+// A new magazine seating presses the game's own Reload and takes no time (its reload states 0xB / 0xC wait on a time
+// that reads as 0, FUN_00831080, and on the timer at +0xC4 for the rest), with its start never announced to the animation
+// (FUN_008373E0, both hooks/first_person_rig.cpp), so
 // the ammo counts stay the game's and nothing plays. A reload the game starts itself (the Reload button, the auto-reload
 // when empty) goes the same way, and counts as the magazine dropping out.
 
