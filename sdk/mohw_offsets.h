@@ -94,6 +94,15 @@
 // constantbuffer_hook.cpp's UpdateKnownPlayerBoneBuffer comment).
 #define OFFSET_FUNCTIONCONSTANTBUFFERUPDATE_CALLER_ENTITY 0x773BA6u // == OFFSET_UPDATEVIEWCONSTANTS + 0x2E6
 #define OFFSET_FUNCTIONCONSTANTBUFFERUPDATE_CALLER_SHARED 0x773B8Cu // == OFFSET_UPDATEVIEWCONSTANTS + 0x2CC
+
+// The first-person skeleton (2026-10-31, hooks/first_person_rig.h). FUN_009551F0 returns a soldier's bones, __fastcall
+// (ECX = soldier); FUN_008BB050 copies them into the body batch's "soldierBoneTransforms". FUN_00A37160 places one
+// weapon part on a bone: __thiscall, 10 stack arguments (RET 0x28).
+#define OFFSET_FP_BONES_GETTER 0x9551F0u
+#define OFFSET_WEAPON_PART_PLACE 0xA37160u
+// WeaponFiring announces a reload's start to the animation here: __thiscall (char local), RET 4; its one job is the
+// named event. Called from FUN_0083B130 and FUN_008388F0.
+#define OFFSET_RELOAD_STARTED_NOTIFY 0x8373E0u
 // Camera-class matrix setter (2026-09-19, found via Cheat Engine "what writes"
 // on the camera object): FUN_006FC2A0, __thiscall(this=camera, float* 4x4),
 // RET 4; copies 16 dwords to this+0 and ORs 9 into this+0x90 (dirty flags).

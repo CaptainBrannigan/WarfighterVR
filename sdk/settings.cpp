@@ -151,6 +151,74 @@ std::atomic<float> g_handOffsetPos[3] = {{0.0f}, {0.0f}, {0.0f}};
 std::atomic<float> g_handOffsetRotDeg[3] = {{0.0f}, {0.0f}, {0.0f}};
 constexpr const char* kHandOffsetPosKeys[3] = {"HandOffsetRight", "HandOffsetUp", "HandOffsetForward"};
 constexpr const char* kHandOffsetRotKeys[3] = {"HandOffsetPitch", "HandOffsetYaw", "HandOffsetRoll"};
+std::atomic<bool> g_armIkEnabled{true};
+std::atomic<float> g_leftHandIkPos[3] = {{0.0f}, {0.0f}, {0.0f}};
+std::atomic<float> g_leftHandIkRotDeg[3] = {{0.0f}, {0.0f}, {0.0f}};
+constexpr const char* kLeftHandIkPosKeys[3] = {"LeftHandIkRight", "LeftHandIkUp", "LeftHandIkForward"};
+constexpr const char* kLeftHandIkRotKeys[3] = {"LeftHandIkPitch", "LeftHandIkYaw", "LeftHandIkRoll"};
+std::atomic<bool> g_manualReloadEnabled{true};
+std::atomic<float> g_magazinePouchRadius{0.12f};
+std::atomic<float> g_magazinePouch[3] = {{-0.14f}, {-0.42f}, {0.16f}};
+std::atomic<bool> g_keepGameWindowed{true};
+// Per weapon (kProfileFields, MagazineProfile).
+std::atomic<float> g_magazineGrabOffset[3] = {{0.0f}, {-0.06f}, {0.0f}};
+std::atomic<float> g_magazineGrabHalfSize[3] = {{0.08f}, {0.10f}, {0.08f}};
+std::atomic<float> g_magazineAimPoint[3] = {{0.0f}, {0.20f}, {0.0f}};
+std::atomic<float> g_magazineRange{0.25f};
+std::atomic<float> g_magazineLockRange{0.06f};
+std::atomic<float> g_magazineSeatRange{0.02f};
+struct NamedFloat
+{
+    const char* key;
+    std::atomic<float>* value;
+};
+const NamedFloat kMagazineProfileKeys[] = {
+    {"MagazineGrabRight", &g_magazineGrabOffset[0]},    {"MagazineGrabUp", &g_magazineGrabOffset[1]},
+    {"MagazineGrabForward", &g_magazineGrabOffset[2]},  {"MagazineGrabSizeRight", &g_magazineGrabHalfSize[0]},
+    {"MagazineGrabSizeUp", &g_magazineGrabHalfSize[1]}, {"MagazineGrabSizeForward", &g_magazineGrabHalfSize[2]},
+    {"MagazineAimRight", &g_magazineAimPoint[0]},       {"MagazineAimUp", &g_magazineAimPoint[1]},
+    {"MagazineAimForward", &g_magazineAimPoint[2]},     {"MagazineRange", &g_magazineRange},
+    {"MagazineLockRange", &g_magazineLockRange},        {"MagazineSeatRange", &g_magazineSeatRange},
+};
+std::atomic<float> g_rightHandIkPos[3] = {{0.0f}, {0.0f}, {0.0f}};
+std::atomic<float> g_rightHandIkRotDeg[3] = {{0.0f}, {0.0f}, {0.0f}};
+std::atomic<float> g_shoulderOffset[2][3] = {{{0.0f}, {0.0f}, {0.0f}}, {{0.0f}, {0.0f}, {0.0f}}}; // [0] left, [1] right
+// Saved before the shoulders were separate (2026-11-01): read into both.
+constexpr const char* kOldShoulderKeys[3] = {"ShoulderOutward", "ShoulderUp", "ShoulderForward"};
+std::atomic<bool> g_naturalElbow{true};
+std::atomic<float> g_elbowSwivelDeg{0.0f};
+std::atomic<float> g_elbowFollow{0.75f};
+std::atomic<float> g_elbowInKneeDeg{10.0f};
+std::atomic<float> g_elbowInMaxDeg{25.0f};
+std::atomic<float> g_elbowInNearBody{0.5f};
+std::atomic<float> g_elbowOutKneeDeg{100.0f};
+std::atomic<float> g_elbowOutMaxDeg{130.0f};
+std::atomic<float> g_elbowSmoothingMs{50.0f};
+std::atomic<float> g_forearmTwist{0.5f};
+std::atomic<float> g_bodyOffset[3] = {{0.0f}, {0.0f}, {0.0f}};
+std::atomic<bool> g_bodyUpright{false};
+std::atomic<bool> g_stabilizeRig{true};
+std::atomic<bool> g_showGrabZones{false};
+const NamedFloat kArmIkKeys[] = {
+    {"RightHandIkRight", &g_rightHandIkPos[0]},   {"RightHandIkUp", &g_rightHandIkPos[1]},
+    {"RightHandIkForward", &g_rightHandIkPos[2]}, {"RightHandIkPitch", &g_rightHandIkRotDeg[0]},
+    {"RightHandIkYaw", &g_rightHandIkRotDeg[1]},  {"RightHandIkRoll", &g_rightHandIkRotDeg[2]},
+    {"LeftShoulderOutward", &g_shoulderOffset[0][0]},
+    {"LeftShoulderUp", &g_shoulderOffset[0][1]},
+    {"LeftShoulderForward", &g_shoulderOffset[0][2]},
+    {"RightShoulderOutward", &g_shoulderOffset[1][0]},
+    {"RightShoulderUp", &g_shoulderOffset[1][1]},
+    {"RightShoulderForward", &g_shoulderOffset[1][2]},
+    {"ElbowSwivel", &g_elbowSwivelDeg},
+    {"ElbowFollow", &g_elbowFollow},              {"ElbowInKnee", &g_elbowInKneeDeg},
+    {"ElbowInMax", &g_elbowInMaxDeg},             {"ElbowInNearBody", &g_elbowInNearBody},
+    {"ElbowOutKnee", &g_elbowOutKneeDeg},         {"ElbowOutMax", &g_elbowOutMaxDeg},
+    {"ElbowSmoothingMs", &g_elbowSmoothingMs},    {"ForearmTwist", &g_forearmTwist},
+    {"MagazinePouchRadius", &g_magazinePouchRadius},
+    {"BodyOffsetRight", &g_bodyOffset[0]},          {"BodyOffsetUp", &g_bodyOffset[1]},
+    {"BodyOffsetForward", &g_bodyOffset[2]},
+};
+constexpr const char* kMagazinePouchKeys[3] = {"MagazinePouchX", "MagazinePouchY", "MagazinePouchZ"};
 // Secondary grip offset (per weapon): where the off hand holds relative to the barrel line, in the gun's frame, metres
 // -- the two-handed aim targets the off hand's point moved by it (openvr_direct/vr_hands.cpp AimAtOffHand).
 std::atomic<float> g_secondaryGripRight{0.0f};
@@ -203,6 +271,7 @@ std::atomic<float> g_holsterDrop{kDefaultHolsterDrop};
 std::atomic<bool> g_sightDotEnabled{kDefaultSightDotEnabled};
 std::atomic<bool> g_dotsOnlyWithGrip{kDefaultDotsOnlyWithGrip};
 std::atomic<bool> g_gripDoubleTapBumpers{true}; // openvr_direct/vr_input.cpp UpdateGripGesture
+std::atomic<bool> g_thumbTapBumpers{true};      // openvr_direct/vr_input.cpp UpdateThumbTap
 std::atomic<float> g_sightZeroDistance{kDefaultSightZeroDistance};
 std::atomic<float> g_sightDotSizeDeg{kDefaultSightDotSizeDeg};
 std::atomic<bool> g_opticDotEnabled{kDefaultOpticDotEnabled};
@@ -261,6 +330,11 @@ std::atomic<float>* const kProfileFields[] = {
     // Appended 2026-10-15 (lines saved before take the default for these).
     &g_secondaryGripRight, &g_secondaryGripUp, &g_laserStartMeters,
     &g_laserBeamStartRight, &g_laserBeamStartUp,
+    // Appended 2026-11-01.
+    &g_magazineGrabOffset[0], &g_magazineGrabOffset[1], &g_magazineGrabOffset[2],
+    &g_magazineGrabHalfSize[0], &g_magazineGrabHalfSize[1], &g_magazineGrabHalfSize[2],
+    &g_magazineAimPoint[0], &g_magazineAimPoint[1], &g_magazineAimPoint[2],
+    &g_magazineRange, &g_magazineLockRange, &g_magazineSeatRange,
 };
 constexpr int kProfileFieldCount = static_cast<int>(sizeof(kProfileFields) / sizeof(kProfileFields[0]));
 struct WeaponProfile
@@ -372,6 +446,9 @@ void WriteSettingsFileLocked()
     {
         fprintf(f, "%s=%.4f\n", kHandOffsetPosKeys[i], g_handOffsetPos[i].load(std::memory_order_relaxed));
         fprintf(f, "%s=%.2f\n", kHandOffsetRotKeys[i], g_handOffsetRotDeg[i].load(std::memory_order_relaxed));
+        fprintf(f, "%s=%.4f\n", kLeftHandIkPosKeys[i], g_leftHandIkPos[i].load(std::memory_order_relaxed));
+        fprintf(f, "%s=%.2f\n", kLeftHandIkRotKeys[i], g_leftHandIkRotDeg[i].load(std::memory_order_relaxed));
+        fprintf(f, "%s=%.4f\n", kMagazinePouchKeys[i], g_magazinePouch[i].load(std::memory_order_relaxed));
     }
     fprintf(f, "SecondaryGripRight=%.4f\n", DefaultProfileValue(&g_secondaryGripRight));
     fprintf(f, "SecondaryGripUp=%.4f\n", DefaultProfileValue(&g_secondaryGripUp));
@@ -409,6 +486,17 @@ void WriteSettingsFileLocked()
     fprintf(f, "FireViaMouse=%d\n", g_fireViaMouse.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "LeftHanded=%d\n", g_leftHanded.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "WeaponDriveEnabled=%d\n", g_weaponDriveEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ArmIkEnabled=%d\n", g_armIkEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ManualReloadEnabled=%d\n", g_manualReloadEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "NaturalElbow=%d\n", g_naturalElbow.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "BodyUpright=%d\n", g_bodyUpright.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "StabilizeRig=%d\n", g_stabilizeRig.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ShowGrabZones=%d\n", g_showGrabZones.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "KeepGameWindowed=%d\n", g_keepGameWindowed.load(std::memory_order_relaxed) ? 1 : 0);
+    for (const NamedFloat& n : kArmIkKeys)
+        fprintf(f, "%s=%.4f\n", n.key, n.value->load(std::memory_order_relaxed));
+    for (const NamedFloat& n : kMagazineProfileKeys)
+        fprintf(f, "%s=%.4f\n", n.key, DefaultProfileValue(n.value));
     fprintf(f, "HolsterHoldToKeep=%d\n", g_holsterHoldToKeep.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HolsterRadius=%.4f\n", g_holsterRadius.load(std::memory_order_relaxed));
     fprintf(f, "HolsterDrop=%.4f\n", g_holsterDrop.load(std::memory_order_relaxed));
@@ -426,6 +514,7 @@ void WriteSettingsFileLocked()
     fprintf(f, "SightDotEnabled=%d\n", g_sightDotEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "DotsOnlyWithGrip=%d\n", g_dotsOnlyWithGrip.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "GripDoubleTapBumpers=%d\n", g_gripDoubleTapBumpers.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ThumbTapBumpers=%d\n", g_thumbTapBumpers.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "SightZeroDistance=%.4f\n", g_sightZeroDistance.load(std::memory_order_relaxed));
     fprintf(f, "SightDotSize=%.4f\n", g_sightDotSizeDeg.load(std::memory_order_relaxed));
     fprintf(f, "OpticDotEnabled=%d\n", g_opticDotEnabled.load(std::memory_order_relaxed) ? 1 : 0);
@@ -660,6 +749,44 @@ void LoadSettings()
             g_leftHanded.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "WeaponDriveEnabled", &boolValue))
             g_weaponDriveEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ArmIkEnabled", &boolValue))
+            g_armIkEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ManualReloadEnabled", &boolValue))
+            g_manualReloadEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "NaturalElbow", &boolValue))
+            g_naturalElbow.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "BodyUpright", &boolValue))
+            g_bodyUpright.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "StabilizeRig", &boolValue))
+            g_stabilizeRig.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ShowGrabZones", &boolValue))
+            g_showGrabZones.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "KeepGameWindowed", &boolValue))
+            g_keepGameWindowed.store(boolValue, std::memory_order_relaxed);
+        else if ([&] {
+                     for (int k = 0; k < 3; ++k)
+                         if (ParseFloatSetting(line, kOldShoulderKeys[k], &value))
+                         {
+                             g_shoulderOffset[0][k].store(value, std::memory_order_relaxed);
+                             g_shoulderOffset[1][k].store(value, std::memory_order_relaxed);
+                             return true;
+                         }
+                     for (const NamedFloat& n : kArmIkKeys)
+                         if (ParseFloatSetting(line, n.key, &value))
+                         {
+                             n.value->store(value, std::memory_order_relaxed);
+                             return true;
+                         }
+                     for (const NamedFloat& n : kMagazineProfileKeys)
+                         if (ParseFloatSetting(line, n.key, &value))
+                         {
+                             n.value->store(value, std::memory_order_relaxed);
+                             return true;
+                         }
+                     return false;
+                 }())
+        {
+        }
         else if (ParseBoolSetting(line, "HolsterHoldToKeep", &boolValue))
             g_holsterHoldToKeep.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HolsterRadius", &value))
@@ -672,6 +799,8 @@ void LoadSettings()
             g_dotsOnlyWithGrip.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "GripDoubleTapBumpers", &boolValue))
             g_gripDoubleTapBumpers.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ThumbTapBumpers", &boolValue))
+            g_thumbTapBumpers.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SightZeroDistance", &value))
             g_sightZeroDistance.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SightDotSize", &value))
@@ -732,9 +861,12 @@ void LoadSettings()
         else if ([&] {
                      for (int i = 0; i < 3; ++i)
                      {
-                         std::atomic<float>* fields[2] = {&g_handOffsetPos[i], &g_handOffsetRotDeg[i]};
-                         const char* keys[2] = {kHandOffsetPosKeys[i], kHandOffsetRotKeys[i]};
-                         for (int k = 0; k < 2; ++k)
+                         std::atomic<float>* fields[5] = {&g_handOffsetPos[i], &g_handOffsetRotDeg[i],
+                                                          &g_leftHandIkPos[i], &g_leftHandIkRotDeg[i],
+                                                          &g_magazinePouch[i]};
+                         const char* keys[5] = {kHandOffsetPosKeys[i], kHandOffsetRotKeys[i], kLeftHandIkPosKeys[i],
+                                                kLeftHandIkRotKeys[i], kMagazinePouchKeys[i]};
+                         for (int k = 0; k < 5; ++k)
                              if (ParseFloatSetting(line, keys[k], &value))
                              {
                                  fields[k]->store(value, std::memory_order_relaxed);
@@ -1245,6 +1377,100 @@ bool GetHolsterHoldToKeep()
     return g_holsterHoldToKeep.load(std::memory_order_relaxed);
 }
 
+bool GetArmIkEnabled()
+{
+    return g_armIkEnabled.load(std::memory_order_relaxed);
+}
+
+void GetLeftHandIkOffset(float position[3], float rotationDeg[3])
+{
+    for (int i = 0; i < 3; ++i)
+    {
+        position[i] = g_leftHandIkPos[i].load(std::memory_order_relaxed);
+        rotationDeg[i] = g_leftHandIkRotDeg[i].load(std::memory_order_relaxed);
+    }
+}
+
+bool GetManualReloadEnabled()
+{
+    return g_manualReloadEnabled.load(std::memory_order_relaxed);
+}
+
+float GetMagazinePouchRadius()
+{
+    return g_magazinePouchRadius.load(std::memory_order_relaxed);
+}
+
+bool GetKeepGameWindowed()
+{
+    return g_keepGameWindowed.load(std::memory_order_relaxed);
+}
+
+MagazineProfile GetMagazineProfile()
+{
+    MagazineProfile p{};
+    for (int i = 0; i < 3; ++i)
+    {
+        p.grabOffset[i] = g_magazineGrabOffset[i].load(std::memory_order_relaxed);
+        p.grabHalfSize[i] = g_magazineGrabHalfSize[i].load(std::memory_order_relaxed);
+        p.aimPoint[i] = g_magazineAimPoint[i].load(std::memory_order_relaxed);
+    }
+    p.range = g_magazineRange.load(std::memory_order_relaxed);
+    p.lockRange = g_magazineLockRange.load(std::memory_order_relaxed);
+    p.seatRange = g_magazineSeatRange.load(std::memory_order_relaxed);
+    return p;
+}
+
+void GetBodyOffset(float out[3])
+{
+    for (int i = 0; i < 3; ++i)
+        out[i] = g_bodyOffset[i].load(std::memory_order_relaxed);
+}
+
+bool GetBodyUpright()
+{
+    return g_bodyUpright.load(std::memory_order_relaxed);
+}
+
+bool GetStabilizeRig()
+{
+    return g_stabilizeRig.load(std::memory_order_relaxed);
+}
+
+bool GetShowGrabZones()
+{
+    return g_showGrabZones.load(std::memory_order_relaxed);
+}
+
+ArmIkSettings GetArmIkSettings()
+{
+    ArmIkSettings s{};
+    for (int i = 0; i < 3; ++i)
+    {
+        s.rightHandPos[i] = g_rightHandIkPos[i].load(std::memory_order_relaxed);
+        s.rightHandDeg[i] = g_rightHandIkRotDeg[i].load(std::memory_order_relaxed);
+        s.shoulder[0][i] = g_shoulderOffset[0][i].load(std::memory_order_relaxed);
+        s.shoulder[1][i] = g_shoulderOffset[1][i].load(std::memory_order_relaxed);
+    }
+    s.naturalElbow = g_naturalElbow.load(std::memory_order_relaxed);
+    s.elbowSwivelDeg = g_elbowSwivelDeg.load(std::memory_order_relaxed);
+    s.follow = g_elbowFollow.load(std::memory_order_relaxed);
+    s.inKneeDeg = g_elbowInKneeDeg.load(std::memory_order_relaxed);
+    s.inMaxDeg = g_elbowInMaxDeg.load(std::memory_order_relaxed);
+    s.inNearBody = g_elbowInNearBody.load(std::memory_order_relaxed);
+    s.outKneeDeg = g_elbowOutKneeDeg.load(std::memory_order_relaxed);
+    s.outMaxDeg = g_elbowOutMaxDeg.load(std::memory_order_relaxed);
+    s.smoothingMs = g_elbowSmoothingMs.load(std::memory_order_relaxed);
+    s.forearmTwist = g_forearmTwist.load(std::memory_order_relaxed);
+    return s;
+}
+
+void GetMagazinePouchOffset(float out[3])
+{
+    for (int i = 0; i < 3; ++i)
+        out[i] = g_magazinePouch[i].load(std::memory_order_relaxed);
+}
+
 float GetHolsterRadius()
 {
     return g_holsterRadius.load(std::memory_order_relaxed);
@@ -1288,6 +1514,11 @@ void GetControllerAimOffsetDeg(float* up, float* right)
 float GetAdsSwayScale()
 {
     return g_adsSwayScale.load(std::memory_order_relaxed);
+}
+
+bool GetThumbTapBumpers()
+{
+    return g_thumbTapBumpers.load(std::memory_order_relaxed);
 }
 
 bool GetGripDoubleTapBumpers()
@@ -1415,6 +1646,7 @@ const MenuEntry kMenu[] = {
     {"View", "World scale (frustum)", nullptr, &g_frustumScale, 0.5f, 2.0f, 0.02f, 2, "x"},
     {"View", "Rotation smoothing (keep on)", &g_rotationSmoothingEnabled, nullptr, 0, 0, 0, 0, ""},
     {"View", "Smoothing window", nullptr, &g_rotationSmoothingWindowMs, 10.0f, 200.0f, 1.0f, 1, "ms"},
+    {"View", "Keep game out of exclusive fullscreen", &g_keepGameWindowed, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "Stick turn speed", nullptr, &g_vrTurnSpeed, 0.2f, 3.0f, 0.05f, 2, "x"},
     {"Controls", "Stick full deflection", nullptr, &g_vrStickFullDeflection, 0.5f, 1.0f, 0.01f, 2, ""},
     {"Controls", "Two-hand grab radius", nullptr, &g_twoHandGrabRadius, 0.05f, 0.5f, 0.01f, 2, "m"},
@@ -1422,7 +1654,8 @@ const MenuEntry kMenu[] = {
     {"Controls", "Remove shot spread", &g_removeShotSpread, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "ADS sway (0 = none, 1 = game's)", nullptr, &g_adsSwayScale, 0.0f, 1.0f, 0.05f, 2, "x"},
     {"Controls", "Fire / ADS as mouse (off = RT / LT)", &g_fireViaMouse, nullptr, 0, 0, 0, 0, ""},
-    {"Controls", "Grip double-tap = LB / RB", &g_gripDoubleTapBumpers, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Thumbrest double-tap = LB / RB", &g_thumbTapBumpers, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Grip double-tap = LB / RB (no thumbrest)", &g_gripDoubleTapBumpers, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Left-handed", &g_leftHanded, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Hold grip to keep weapon", &g_holsterHoldToKeep, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Holster size", nullptr, &g_holsterRadius, 0.05f, 0.4f, 0.01f, 2, "m"},
@@ -1433,6 +1666,7 @@ const MenuEntry kMenu[] = {
     {"Hands", "Hand rotation pitch (+ up)", nullptr, &g_handOffsetRotDeg[0], -45.0f, 45.0f, 0.5f, 1, "deg"},
     {"Hands", "Hand rotation yaw (+ right)", nullptr, &g_handOffsetRotDeg[1], -45.0f, 45.0f, 0.5f, 1, "deg"},
     {"Hands", "Hand rotation roll (+ right)", nullptr, &g_handOffsetRotDeg[2], -45.0f, 45.0f, 0.5f, 1, "deg"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Show grab zones (setup)", &g_showGrabZones, nullptr, 0, 0, 0, 0, ""},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach X (each side)", nullptr, &g_holsterPos[0][0], 0.0f, 0.6f, 0.01f, 2, "m"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach Y", nullptr, &g_holsterPos[0][1], -1.2f, 0.3f, 0.01f, 2, "m"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach Z", nullptr, &g_holsterPos[0][2], -0.5f, 0.6f, 0.01f, 2, "m"},
@@ -1448,6 +1682,10 @@ const MenuEntry kMenu[] = {
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Right shoulder X", nullptr, &g_holsterPos[4][0], -0.6f, 0.6f, 0.01f, 2, "m"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Right shoulder Y", nullptr, &g_holsterPos[4][1], -1.2f, 0.3f, 0.01f, 2, "m"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Right shoulder Z", nullptr, &g_holsterPos[4][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch X", nullptr, &g_magazinePouch[0], -0.6f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch Y", nullptr, &g_magazinePouch[1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch Z", nullptr, &g_magazinePouch[2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch grab radius", nullptr, &g_magazinePouchRadius, 0.03f, 0.4f, 0.01f, 2, "m"},
     {"Holster actions", "Stomach", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterStomach},
     {"Holster actions", "Hips", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterHip},
     {"Holster actions", "Chest", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterChest},
@@ -1464,7 +1702,42 @@ const MenuEntry kMenu[] = {
     {"Hands", "Laser beam width", nullptr, &g_laserBeamWidthMm, 1.0f, 20.0f, 0.5f, 1, "mm"},
     {"Hands", "Laser raycast every N frames", nullptr, &g_laserRaycastEveryFrames, 1.0f, 30.0f, 1.0f, 0, ""},
     {"Hands", "Dot size", nullptr, &g_sightDotSizeDeg, 0.05f, 2.0f, 0.05f, 2, "deg"},
+    {"Arm IK", "Arms follow the controllers", &g_armIkEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Arm IK", "Right hand right (on the gun)", nullptr, &g_rightHandIkPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Arm IK", "Right hand up", nullptr, &g_rightHandIkPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Arm IK", "Right hand forward", nullptr, &g_rightHandIkPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Arm IK", "Right hand pitch", nullptr, &g_rightHandIkRotDeg[0], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Right hand yaw", nullptr, &g_rightHandIkRotDeg[1], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Right hand roll", nullptr, &g_rightHandIkRotDeg[2], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Left hand right", nullptr, &g_leftHandIkPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Arm IK", "Left hand up", nullptr, &g_leftHandIkPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Arm IK", "Left hand forward", nullptr, &g_leftHandIkPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Arm IK", "Left hand pitch", nullptr, &g_leftHandIkRotDeg[0], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Left hand yaw", nullptr, &g_leftHandIkRotDeg[1], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Left hand roll", nullptr, &g_leftHandIkRotDeg[2], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Left shoulder outward", nullptr, &g_shoulderOffset[0][0], -0.5f, 0.5f, 0.005f, 3, "m"},
+    {"Arm IK", "Left shoulder up", nullptr, &g_shoulderOffset[0][1], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Arm IK", "Left shoulder forward", nullptr, &g_shoulderOffset[0][2], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Arm IK", "Right shoulder outward", nullptr, &g_shoulderOffset[1][0], -0.5f, 0.5f, 0.005f, 3, "m"},
+    {"Arm IK", "Right shoulder up", nullptr, &g_shoulderOffset[1][1], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Arm IK", "Right shoulder forward", nullptr, &g_shoulderOffset[1][2], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Arm IK", "Forearm twist share", nullptr, &g_forearmTwist, 0.0f, 1.0f, 0.05f, 2, ""},
+    {"Arm IK", "Natural elbow model", &g_naturalElbow, nullptr, 0, 0, 0, 0, ""},
+    {"Arm IK", "Elbow swivel (natural model off)", nullptr, &g_elbowSwivelDeg, -90.0f, 90.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow follows wrist roll", nullptr, &g_elbowFollow, 0.0f, 1.0f, 0.05f, 2, ""},
+    {"Arm IK", "Elbow inward: exact up to", nullptr, &g_elbowInKneeDeg, 0.0f, 150.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow inward: at most", nullptr, &g_elbowInMaxDeg, 0.0f, 170.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow inward near the body", nullptr, &g_elbowInNearBody, 0.0f, 1.0f, 0.05f, 2, "x"},
+    {"Arm IK", "Elbow outward: exact up to", nullptr, &g_elbowOutKneeDeg, 0.0f, 150.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow outward: at most", nullptr, &g_elbowOutMaxDeg, 0.0f, 170.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow smoothing", nullptr, &g_elbowSmoothingMs, 0.0f, 300.0f, 10.0f, 0, "ms"},
+    {"Body", "Body right", nullptr, &g_bodyOffset[0], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Body", "Body up", nullptr, &g_bodyOffset[1], -2.0f, 2.0f, 0.005f, 3, "m"},
+    {"Body", "Body forward", nullptr, &g_bodyOffset[2], -2.0f, 2.0f, 0.005f, 3, "m"},
+    {"Body", "Keep body upright (no tilt with the view)", &g_bodyUpright, nullptr, 0, 0, 0, 0, ""},
+    {"Body", "Keep body and gun steady on head turns", &g_stabilizeRig, nullptr, 0, 0, 0, 0, ""},
     {"Weapon", "Gun + shots follow controller (Numpad .)", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Weapon", "Manual reload", &g_manualReloadEnabled, nullptr, 0, 0, 0, 0, ""},
     // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon.
     {kProfileGroup, "Grip offset right", nullptr, &g_weaponGripRight, -0.5f, 0.5f, 0.005f, 3, "m"},
     {kProfileGroup, "Grip offset up", nullptr, &g_weaponGripUp, -0.5f, 0.5f, 0.005f, 3, "m"},
@@ -1477,6 +1750,18 @@ const MenuEntry kMenu[] = {
     {kProfileGroup, "Optic forward (from the hand)", nullptr, &g_opticDistance, 0.0f, 300.0f, 0.01f, 2, "m"},
     {kProfileGroup, "Controller aim offset up", nullptr, &g_controllerAimUpDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
     {kProfileGroup, "Controller aim offset right", nullptr, &g_controllerAimRightDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
+    {kProfileGroup, "Magazine grab box right", nullptr, &g_magazineGrabOffset[0], -0.4f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box up", nullptr, &g_magazineGrabOffset[1], -0.4f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box forward", nullptr, &g_magazineGrabOffset[2], -0.4f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box half width", nullptr, &g_magazineGrabHalfSize[0], 0.01f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box half height", nullptr, &g_magazineGrabHalfSize[1], 0.01f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box half depth", nullptr, &g_magazineGrabHalfSize[2], 0.01f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine aim point right", nullptr, &g_magazineAimPoint[0], -0.5f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine aim point up", nullptr, &g_magazineAimPoint[1], -0.5f, 1.0f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine aim point forward", nullptr, &g_magazineAimPoint[2], -0.5f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine starts turning at", nullptr, &g_magazineRange, 0.02f, 0.8f, 0.01f, 2, "m"},
+    {kProfileGroup, "Magazine locks horizontal at", nullptr, &g_magazineLockRange, 0.005f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine seats within", nullptr, &g_magazineSeatRange, 0.002f, 0.1f, 0.002f, 3, "m"},
     {kProfileGroup, "Secondary grip offset right", nullptr, &g_secondaryGripRight, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Secondary grip offset up", nullptr, &g_secondaryGripUp, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Laser start (forward of the hand)", nullptr, &g_laserStartMeters, 0.0f, 1.5f, 0.01f, 2, "m"},

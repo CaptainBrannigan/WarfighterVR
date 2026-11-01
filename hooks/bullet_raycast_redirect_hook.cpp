@@ -209,6 +209,26 @@ struct ThisCallTrampoline
                                        flags, excluded);
         }
 
+        // THE BULLET'S FIRST SEGMENT STARTS AT THE LASER'S START (2026-11-01): it used to keep the game's own muzzle
+        // point, half a metre from the hand and behind the camera, so the laser could clear a wall edge that the
+        // bullet's real line hit (live: firing past a wall on the left). Later segments carry on from where this one
+        // ended; a bullet's first is the only one this close to the start.
+        constexpr float kFirstSegmentMetres = 3.0f;
+        Vec3 movedStart = origin;
+        Vec3* castStart = start;
+        float laserStart[3];
+        if (GetLaserShotStart(laserStart))
+        {
+            Vec3 shotStart{laserStart[0], laserStart[1], laserStart[2]};
+            Vec3 fromShotStart = origin - shotStart;
+            if (fromShotStart.Dot(fromShotStart) < kFirstSegmentMetres * kFirstSegmentMetres)
+            {
+                movedStart = shotStart;
+                castStart = &movedStart;
+                origin = shotStart;
+            }
+        }
+
         Vec3 newEnd = origin + controllerDir * segLength;
         // The tracer follows the shot to the laser's point (hooks/laser_raycast.h), while that point is still ahead of
         // the bullet; once it's reached (or behind), the controller's direction carries on.
@@ -232,13 +252,13 @@ struct ThisCallTrampoline
                    n, origin.x, origin.y, origin.z, originalEnd.x, originalEnd.y, originalEnd.z, newEnd.x, newEnd.y,
                    newEnd.z);
 
-        unsigned int result = g_originalRayCast(param1, ident, rayCastTest, start, end, hits, maxHitCount, materialFlags,
+        unsigned int result = g_originalRayCast(param1, ident, rayCastTest, castStart, end, hits, maxHitCount, materialFlags,
                                           flags, excluded);
 
         MOHW_LOG(kLogFile, "call #%d: RayCast returned %u hit(s)", n, result);
         if (result > 0) // ground truth for the laser (hooks/laser_raycast.h)
         {
-            float segStart[3] = {start->x, start->y, start->z};
+            float segStart[3] = {castStart->x, castStart->y, castStart->z};
             float segEnd[3] = {end->x, end->y, end->z};
             LaserNoteBulletHits(hits, result, segStart, segEnd);
         }

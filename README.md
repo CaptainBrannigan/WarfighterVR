@@ -12,9 +12,10 @@ hasn't been played all the way through yet; see [Known issues](#known-issues).
 
 - Medal of Honor: Warfighter (the Steam/Origin PC release, 32-bit `MOHW.exe`).
 - SteamVR **2.17 or newer** (the release that added a 32-bit runtime), with a headset and motion controllers.
-  Developed and tested on a Meta Quest 3 over Steam Link with Touch controllers; other headsets should work. Touch and
-  Valve Index controllers get default bindings (including Touch that Virtual Desktop presents as Index); any other
-  controller type has no input until you bind it yourself in SteamVR.
+  Developed and tested on a Meta Quest 3 over Steam Link with Touch controllers; other headsets should work. Default
+  bindings are included for Touch, Valve Index (including Touch that Virtual Desktop presents as Index), Pico, Vive
+  Focus 3, HP Reverb G2, Vive Cosmos, Windows Mixed Reality, Vive wands and Steam Frame. Any other controller type has
+  no input until you bind it yourself in SteamVR.
 - `openvr_api.dll` (32-bit) from your SteamVR install.
 
 ## Installing
@@ -156,11 +157,23 @@ vehicles, the Apache, menus). Default layout:
 | Double-press X / Y / B / A | D-pad left / up / right / down | Items and gadgets |
 | Long-press Y | Start | Pause menu |
 | Grips | - | Holsters, two-handed grip; the steering wheel in driving missions |
-| Double-tap left / right grip | LB / RB | (setting: "Grip double-tap = LB / RB") |
+| Double-tap left / right thumbrest | LB / RB | Keep the second touch down to hold. LB stays on while your thumb moves to the left stick, for peek and lean |
 
 On Index controllers the layout is the same, with the left hand's A / B in place of X / Y (left A = Touch X, left B =
 Touch Y, double presses and the long press included). The grips use squeeze force rather than finger position, because
-an Index grip reads as nearly full just from holding the controller.
+an Index grip reads as nearly full just from holding the controller. The Index has no thumbrest, so LB / RB are a double
+tap of the trackpad, and a double-tap of the grip also works. Controllers with neither use the grip double-tap (setting:
+"Grip double-tap = LB / RB").
+
+Other controllers use the same actions, moved to what each one has:
+
+| Controller | Differences from the Touch layout |
+|---|---|
+| Pico, Vive Focus 3 | None |
+| HP Reverb G2, Vive Cosmos | None, except the grip is bound as a button |
+| Windows Mixed Reality | Trackpad click: right south / north = A / B, left south / north = X / Y, left west / east = D-pad left / right, right west / east = D-pad down / up. Left menu = Start, right menu = Back |
+| Vive wand | Left / right trackpad touch = move / turn. Trackpad click: right south / north = A / B, right east = right stick click, right west = D-pad right; left south / north = X / Y, left west = left stick click, left east = D-pad left. Left menu = Start (double-press = D-pad up), right menu = Back (double-press = D-pad down) |
+| Steam Frame | Real pad buttons: A, B, X, Y and Start on the right, D-pad and Back on the left, bumpers = LB / RB |
 
 Buttons that also have a double press (A, B, X) register a hold after 0.3 s, and a tap just after the double-press
 window; that is how SteamVR tells single from double presses. The grips are bound as their analog pull and the mod
@@ -168,6 +181,10 @@ makes the press and the double-tap itself (SteamVR can't bind a double press on 
 and a double-tap also counts as two quick grabs. Everything is rebindable in SteamVR. Besides the gamepad buttons (including LB, RB and Back, unbound by default),
 every keyboard action the game has (read from your game profile, so in-game rebinds carry over) is available as its
 own SteamVR action, listed as "Keyboard: ...", alongside "Gamepad: ..." for the pad buttons.
+
+To see where everything is, turn on **Show grab zones (setup)** in the settings' Holsters group. Holsters, the magazine
+pouch, the magazine's grab box, its turn and lock ranges, its seat (white dot) and aim point (red dot) and the two-handed
+band all show in the headset, and turn green when your hand is in them, so you can adjust them with the view on.
 
 ### Settings menu
 Open the SteamVR dashboard in the headset and select the **MOHW VR** tab. Every setting is there and applies
@@ -203,9 +220,14 @@ This is a Beta. The rough edges known so far:
   weapon mesh there.
 - **Not every weapon has a profile yet** (the campaign hasn't been played all the way through); those use the default
   grip until you set them up.
-- **Index default bindings are new and untested on real Index controllers**, and on Touch presented as Index by
-  Virtual Desktop. The hand calibration and weapon profiles were tuned on Touch, so Index users may need to adjust
-  "Hand offset" / "Hand rotation" and the grip offsets.
+- **Default bindings other than Touch are untested on real hardware**, including Index and Touch presented as Index by
+  Virtual Desktop. The hand calibration and weapon profiles were tuned on Touch, so other controllers may need
+  "Hand offset" / "Hand rotation" and the grip offsets adjusted. Controllers whose grip is bound as a button have no
+  analog grip, and on HP, Cosmos and WMR two-handed aiming uses the controller's tip instead of the palm.
+- **Arms on the controllers and manual reload are a first draft, untested in the game.** Both can be turned off under
+  "Arm IK" and "Weapon" in the settings; each weapon's magazine is set up in its weapon profile. Manual reload needs a magazine that's a separate part of the gun, so it doesn't
+  apply to pistols yet. With the gun in the left hand the hands mirror the right-handed pose, and the forearms don't
+  twist with the wrists.
 - **The robot-control section** shows the robot's camera head-locked (no head look on it yet); the right stick
   looks around.
 - **Objectives where you shoot something that isn't a soldier** (a target, a device) only count the game's own aim,

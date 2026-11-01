@@ -28,8 +28,106 @@ namespace {
 constexpr const char* kLogFile = "mohwvr_vrinput.log";
 
 constexpr const char* kManifestFileName = "mohwvr_actions.json";
-constexpr const char* kTouchBindingsFileName = "mohwvr_bindings_oculus_touch.json";
-constexpr const char* kIndexBindingsFileName = "mohwvr_bindings_knuckles.json";
+
+// DEFAULT BINDINGS PER CONTROLLER (2026-11-01). A controller type without a default binding gets no input at all, so
+// every type SteamVR ships an input description for has one here. Paths are from SteamVR's own files, not memory:
+// drivers\*\resources\input\*_profile.json where the driver is installed; for WMR, HP and Cosmos (their drivers come
+// separately) resources\input\default_*_remapping.json and resources\config\vrcompositor_bindings_*.json.
+enum class Layout
+{
+    Touch,        // A / B / X / Y and sticks: kPadActions' own paths
+    MixedReality, // sticks, no face buttons: the face buttons are the trackpads' north / south
+    ViveWand,     // no sticks: the trackpads move and turn, and carry the buttons too
+    SteamFrame,   // a whole gamepad: every pad button has its own input
+};
+enum class GripInput
+{
+    Pull,   // analog, "trigger" mode "pull" (GripRight / GripLeft)
+    Force,  // Index: squeeze force, "force_sensor" mode "force" (same actions)
+    Button, // a button, or an input whose type isn't confirmed: "button" mode "click" (GripButtonRight / Left)
+};
+struct ControllerProfile
+{
+    const char* type;     // SteamVR controller_type
+    const char* fileName; // default binding, next to the action manifest
+    const char* name;
+    Layout layout;
+    bool indexPaths;      // thumbstick for joystick, and the left hand's a / b for x / y
+    GripInput grip;
+    const char* palmPose; // the pose that gives the palm, or nullptr where it isn't confirmed (the tip is used then)
+    const char* restInput = nullptr; // the touch-only input for the double-tap bumpers, if it has one
+};
+const ControllerProfile kControllerProfiles[] = {
+    {"oculus_touch", "mohwvr_bindings_oculus_touch.json", "Touch", Layout::Touch, false, GripInput::Pull, "grip",
+     "thumbrest"},
+    // The Index has no thumbrest: the trackpad's touch, as in the AvP mod.
+    {"knuckles", "mohwvr_bindings_knuckles.json", "Index", Layout::Touch, true, GripInput::Force, "grip", "trackpad"},
+    {"pico_controller", "mohwvr_bindings_pico.json", "Pico", Layout::Touch, false, GripInput::Pull, "handgrip"},
+    {"vive_focus3_controller", "mohwvr_bindings_vive_focus3.json", "Vive Focus 3", Layout::Touch, false, GripInput::Pull,
+     "handgrip"},
+    {"hpmotioncontroller", "mohwvr_bindings_hp_reverb.json", "HP Reverb G2", Layout::Touch, false, GripInput::Button,
+     nullptr},
+    {"vive_cosmos_controller", "mohwvr_bindings_vive_cosmos.json", "Vive Cosmos", Layout::Touch, false, GripInput::Button,
+     nullptr},
+    {"holographic_controller", "mohwvr_bindings_wmr.json", "Windows Mixed Reality", Layout::MixedReality, false,
+     GripInput::Button, nullptr},
+    {"vive_controller", "mohwvr_bindings_vive.json", "Vive wand", Layout::ViveWand, false, GripInput::Button, "grip"},
+    {"frame_controller", "mohwvr_bindings_steam_frame.json", "Steam Frame", Layout::SteamFrame, true, GripInput::Pull,
+     "handgrip"},
+};
+
+// The layouts that aren't the Touch one: pad action name, path, mode, input.
+struct LayoutBinding
+{
+    const char* pad;
+    const char* path;
+    const char* mode;
+    const char* input;
+};
+const LayoutBinding kMixedRealityBindings[] = {
+    {"A", "/user/hand/right/input/trackpad", "dpad", "south"},
+    {"B", "/user/hand/right/input/trackpad", "dpad", "north"},
+    {"X", "/user/hand/left/input/trackpad", "dpad", "south"},
+    {"Y", "/user/hand/left/input/trackpad", "dpad", "north"},
+    {"DpadLeft", "/user/hand/left/input/trackpad", "dpad", "west"},
+    {"DpadRight", "/user/hand/left/input/trackpad", "dpad", "east"},
+    {"DpadDown", "/user/hand/right/input/trackpad", "dpad", "west"},
+    {"DpadUp", "/user/hand/right/input/trackpad", "dpad", "east"},
+    {"LeftStick", "/user/hand/left/input/joystick", "joystick", "click"},
+    {"RightStick", "/user/hand/right/input/joystick", "joystick", "click"},
+    {"Start", "/user/hand/left/input/application_menu", "button", "click"},
+    {"Back", "/user/hand/right/input/application_menu", "button", "click"},
+};
+const LayoutBinding kViveWandBindings[] = {
+    {"A", "/user/hand/right/input/trackpad", "dpad", "south"},
+    {"B", "/user/hand/right/input/trackpad", "dpad", "north"},
+    {"RightStick", "/user/hand/right/input/trackpad", "dpad", "east"},
+    {"DpadRight", "/user/hand/right/input/trackpad", "dpad", "west"},
+    {"X", "/user/hand/left/input/trackpad", "dpad", "south"},
+    {"Y", "/user/hand/left/input/trackpad", "dpad", "north"},
+    {"LeftStick", "/user/hand/left/input/trackpad", "dpad", "west"},
+    {"DpadLeft", "/user/hand/left/input/trackpad", "dpad", "east"},
+    {"Start", "/user/hand/left/input/application_menu", "button", "click"},
+    {"DpadUp", "/user/hand/left/input/application_menu", "button", "double"},
+    {"Back", "/user/hand/right/input/application_menu", "button", "click"},
+    {"DpadDown", "/user/hand/right/input/application_menu", "button", "double"},
+};
+const LayoutBinding kSteamFrameBindings[] = {
+    {"A", "/user/hand/right/input/a", "button", "click"},
+    {"B", "/user/hand/right/input/b", "button", "click"},
+    {"X", "/user/hand/right/input/x", "button", "click"},
+    {"Y", "/user/hand/right/input/y", "button", "click"},
+    {"DpadUp", "/user/hand/left/input/dpad_up", "button", "click"},
+    {"DpadDown", "/user/hand/left/input/dpad_down", "button", "click"},
+    {"DpadLeft", "/user/hand/left/input/dpad_left", "button", "click"},
+    {"DpadRight", "/user/hand/left/input/dpad_right", "button", "click"},
+    {"LB", "/user/hand/left/input/bumper", "button", "click"},
+    {"RB", "/user/hand/right/input/bumper", "button", "click"},
+    {"LeftStick", "/user/hand/left/input/thumbstick", "joystick", "click"},
+    {"RightStick", "/user/hand/right/input/thumbstick", "joystick", "click"},
+    {"Start", "/user/hand/right/input/menu", "button", "click"},
+    {"Back", "/user/hand/left/input/view", "button", "click"},
+};
 
 // GAME ACTIONS (2026-09-28): one SteamVR boolean action per game keybinding (a GstKeyBinding concept from the game's
 // own profile, infantry or infantrySP context), holding that action's key for as long as the button is held -- so
@@ -125,10 +223,15 @@ std::string GameActionName(const GameAction& a)
 
 std::string BuildActionManifest()
 {
-    std::string s = R"({
-  "default_bindings": [
-    { "controller_type": "oculus_touch", "binding_url": "mohwvr_bindings_oculus_touch.json" },
-    { "controller_type": "knuckles", "binding_url": "mohwvr_bindings_knuckles.json" }
+    std::string s = "{\n  \"default_bindings\": [\n";
+    bool firstProfile = true;
+    for (const ControllerProfile& c : kControllerProfiles)
+    {
+        s += std::string(firstProfile ? "" : ",\n") + "    { \"controller_type\": \"" + c.type + "\", \"binding_url\": \"" +
+             c.fileName + "\" }";
+        firstProfile = false;
+    }
+    s += R"(
   ],
   "actions": [
     { "name": "/actions/main/in/RightHandAim", "type": "pose" },
@@ -139,6 +242,10 @@ std::string BuildActionManifest()
     { "name": "/actions/main/in/FireLeft", "type": "boolean" },
     { "name": "/actions/main/in/GripRight", "type": "vector1" },
     { "name": "/actions/main/in/GripLeft", "type": "vector1" },
+    { "name": "/actions/main/in/GripButtonRight", "type": "boolean" },
+    { "name": "/actions/main/in/GripButtonLeft", "type": "boolean" },
+    { "name": "/actions/main/in/ThumbTapRight", "type": "boolean" },
+    { "name": "/actions/main/in/ThumbTapLeft", "type": "boolean" },
     { "name": "/actions/main/in/Recenter", "type": "boolean" },
     { "name": "/actions/main/in/Move", "type": "vector2" },
     { "name": "/actions/main/in/Turn", "type": "vector2" })";
@@ -163,6 +270,10 @@ std::string BuildActionManifest()
       "/actions/main/in/FireLeft": "Fire - left hand",
       "/actions/main/in/GripRight": "Grip - right hand (pull): holsters, two-handed, double-tap RB",
       "/actions/main/in/GripLeft": "Grip - left hand (pull): holsters, two-handed, double-tap LB",
+      "/actions/main/in/GripButtonRight": "Grip button - right hand: for controllers without an analog grip",
+      "/actions/main/in/GripButtonLeft": "Grip button - left hand: for controllers without an analog grip",
+      "/actions/main/in/ThumbTapRight": "Thumb tap - right hand: double tap = RB",
+      "/actions/main/in/ThumbTapLeft": "Thumb tap - left hand: double tap = LB",
       "/actions/main/in/Recenter": "Recenter view",
       "/actions/main/in/Move": "Move",
       "/actions/main/in/Turn": "Turn")";
@@ -191,15 +302,8 @@ struct DefaultBinding
 // button is held for real until release.
 constexpr const char* kHoldLongPressDelay = "0.3";
 
-enum class Controller
-{
-    Touch,
-    Index, // "knuckles": real Index controllers, and Virtual Desktop's Index emulation of Touch controllers
-};
-
 // The Index layout from the tables' Touch paths: left A / B stand where X / Y are, thumbstick for joystick. (2026-10-31:
-// a controller type without a default binding gets no input at all, and that includes Virtual Desktop users, whose
-// driver can present Touch as Index.)
+// this includes Virtual Desktop users, whose driver can present Touch as Index.)
 std::string IndexPath(std::string path)
 {
     const auto swap = [&path](const char* from, const char* to) {
@@ -215,25 +319,56 @@ std::string IndexPath(std::string path)
 
 // A controller's default binding, grouped into one source per path+mode (a button can carry several inputs, e.g. A =
 // click A + double press D-pad down).
-std::string BuildBindings(Controller controller)
+std::string BuildBindings(const ControllerProfile& c)
 {
-    const bool index = controller == Controller::Index;
+    const bool index = c.indexPaths;
     const auto path = [index](const char* touchPath) { return index ? IndexPath(touchPath) : std::string(touchPath); };
     // An Index grip reads near full just from being held, so it takes the squeeze force ("force_sensor" mode "force").
-    const std::string gripMode = index ? "force_sensor" : "trigger", gripInput = index ? "force" : "pull";
+    // A button grip feeds its own boolean actions (UpdateVrInput makes them a full pull).
+    const bool gripButton = c.grip == GripInput::Button;
+    const std::string gripMode = c.grip == GripInput::Force ? "force_sensor" : gripButton ? "button" : "trigger";
+    const std::string gripInput = c.grip == GripInput::Force ? "force" : gripButton ? "click" : "pull";
+    const std::string gripAction = gripButton ? "/actions/main/in/GripButton" : "/actions/main/in/Grip";
     std::vector<DefaultBinding> bindings = {
         {"/user/hand/right/input/trigger", "trigger", "click", "/actions/main/in/FireRight"},
         {"/user/hand/left/input/trigger", "trigger", "click", "/actions/main/in/FireLeft"},
         // Grips: the analog pull ("trigger" mode "pull", a vector1 action); the press and the double-tap bumpers are
         // made in UpdateGripGesture, as SteamVR can't bind a double press on the Touch grip (see there).
-        {"/user/hand/right/input/grip", gripMode, gripInput, "/actions/main/in/GripRight"},
-        {"/user/hand/left/input/grip", gripMode, gripInput, "/actions/main/in/GripLeft"},
-        {path("/user/hand/left/input/joystick"), "joystick", "position", "/actions/main/in/Move"},
-        {path("/user/hand/right/input/joystick"), "joystick", "position", "/actions/main/in/Turn"},
+        {"/user/hand/right/input/grip", gripMode, gripInput, gripAction + "Right"},
+        {"/user/hand/left/input/grip", gripMode, gripInput, gripAction + "Left"},
     };
-    for (const PadAction& a : kPadActions)
-        if (a.defaultPath)
-            bindings.push_back({path(a.defaultPath), a.defaultMode, a.defaultInput, PadActionName(a)});
+    if (c.layout == Layout::ViveWand)
+    {
+        bindings.push_back({"/user/hand/left/input/trackpad", "trackpad", "position", "/actions/main/in/Move"});
+        bindings.push_back({"/user/hand/right/input/trackpad", "trackpad", "position", "/actions/main/in/Turn"});
+    }
+    else
+    {
+        bindings.push_back({path("/user/hand/left/input/joystick"), "joystick", "position", "/actions/main/in/Move"});
+        bindings.push_back({path("/user/hand/right/input/joystick"), "joystick", "position", "/actions/main/in/Turn"});
+    }
+    if (c.restInput)
+    {
+        bindings.push_back({std::string("/user/hand/right/input/") + c.restInput, "button", "touch",
+                            "/actions/main/in/ThumbTapRight"});
+        bindings.push_back({std::string("/user/hand/left/input/") + c.restInput, "button", "touch",
+                            "/actions/main/in/ThumbTapLeft"});
+    }
+    const auto addLayout = [&bindings](const LayoutBinding* table, size_t count) {
+        for (size_t i = 0; i < count; ++i)
+            bindings.push_back({table[i].path, table[i].mode, table[i].input,
+                                std::string("/actions/main/in/Pad") + table[i].pad});
+    };
+    if (c.layout == Layout::MixedReality)
+        addLayout(kMixedRealityBindings, sizeof(kMixedRealityBindings) / sizeof(kMixedRealityBindings[0]));
+    else if (c.layout == Layout::ViveWand)
+        addLayout(kViveWandBindings, sizeof(kViveWandBindings) / sizeof(kViveWandBindings[0]));
+    else if (c.layout == Layout::SteamFrame)
+        addLayout(kSteamFrameBindings, sizeof(kSteamFrameBindings) / sizeof(kSteamFrameBindings[0]));
+    else
+        for (const PadAction& a : kPadActions)
+            if (a.defaultPath)
+                bindings.push_back({path(a.defaultPath), a.defaultMode, a.defaultInput, PadActionName(a)});
     for (const GameAction& a : kGameActions)
         if (a.defaultPath)
             bindings.push_back({path(a.defaultPath), a.defaultMode, a.defaultInput, GameActionName(a)});
@@ -264,22 +399,27 @@ std::string BuildBindings(Controller controller)
             inputs += ", \"long\": { \"output\": \"" + clickOutput + "\" }"; // see kHoldLongPressDelay
             parameters = std::string(",\n          \"parameters\": { \"long_press_delay\": \"") + kHoldLongPressDelay + "\" }";
         }
+        if (bindings[i].mode == "dpad") // a direction counts when the pad is clicked there, not just touched
+            parameters = ",\n          \"parameters\": { \"sub_mode\": \"click\" }";
         if (!sources.empty())
             sources += ",\n";
         sources += "        {\n          \"path\": \"" + bindings[i].path + "\",\n          \"mode\": \"" + bindings[i].mode +
                    "\",\n          \"inputs\": { " + inputs + " }" + parameters + "\n        }";
     }
 
-    std::string s = std::string("{\n  \"controller_type\": \"") + (index ? "knuckles" : "oculus_touch") + R"(",
+    std::string s = std::string("{\n  \"controller_type\": \"") + c.type + R"(",
   "name": "MOHW VR defaults",
-  "description": "Default MOHW VR bindings for )" + (index ? "Index" : "Touch") + R"( controllers",
+  "description": "Default MOHW VR bindings for )" + c.name + R"( controllers",
   "bindings": {
     "/actions/main": {
       "poses": [
         { "output": "/actions/main/in/RightHandAim", "path": "/user/hand/right/pose/tip" },
-        { "output": "/actions/main/in/LeftHandAim", "path": "/user/hand/left/pose/tip" },
-        { "output": "/actions/main/in/RightHandPalm", "path": "/user/hand/right/pose/grip" },
-        { "output": "/actions/main/in/LeftHandPalm", "path": "/user/hand/left/pose/grip" }
+        { "output": "/actions/main/in/LeftHandAim", "path": "/user/hand/left/pose/tip" })";
+    if (c.palmPose)
+        s += std::string(",\n        { \"output\": \"/actions/main/in/RightHandPalm\", \"path\": \"/user/hand/right/pose/") +
+             c.palmPose + "\" },\n        { \"output\": \"/actions/main/in/LeftHandPalm\", \"path\": \"/user/hand/left/pose/" +
+             c.palmPose + "\" }";
+    s += R"(
       ],
       "sources": [
 )";
@@ -368,6 +508,8 @@ uint64_t g_leftAimAction = 0;
 uint64_t g_palmAction[2] = {0, 0};
 uint64_t g_fireAction[2] = {0, 0}; // [kLeftHand], [kRightHand]
 uint64_t g_gripAction[2] = {0, 0};
+uint64_t g_gripButtonAction[2] = {0, 0}; // a grip that's a button: reads as a full pull
+uint64_t g_thumbTapAction[2] = {0, 0};   // the thumbrest's touch, UpdateThumbTap
 uint64_t g_recenterAction = 0;
 uint64_t g_gameActionHandles[kGameActionCount] = {};
 uint64_t g_padActionHandles[kPadActionCount] = {};
@@ -424,6 +566,10 @@ struct GripGesture
 };
 GripGesture g_gripGesture[2]; // submit thread only
 bool g_handIsIndex[2] = {false, false}; // submit thread only: its grip action carries force (RefreshControllerTypes)
+// Submit thread only: a double tap of the grip means nothing here: the bumpers are the thumbrest's double tap (Touch),
+// or real buttons (Steam Frame). The Index keeps both, as Virtual Desktop's emulation reports no trackpad touch.
+bool g_handHasThumbrestBumper[2] = {false, false};
+bool g_handHasRealBumper[2] = {false, false};
 
 // Each hand's controller type, every 2 s: a controller can switch on after the game connects, and Virtual Desktop can
 // present Touch as Index. Each change goes to the startup log.
@@ -442,8 +588,13 @@ void RefreshControllerTypes()
             continue;
         known[h] = type;
         g_handIsIndex[h] = known[h] == "knuckles";
+        g_handHasThumbrestBumper[h] = known[h] == "oculus_touch";
+        g_handHasRealBumper[h] = known[h] == "frame_controller";
+        bool haveBinding = false;
+        for (const ControllerProfile& c : kControllerProfiles)
+            haveBinding = haveBinding || known[h] == c.type;
         MOHW_LOG(StartupLogFile(), "%s hand controller type: %s%s", h == kLeftHand ? "left" : "right", type,
-                 known[h] == "knuckles" || known[h] == "oculus_touch" ? "" : " -- no default binding, bind it in SteamVR");
+                 haveBinding ? "" : " -- no default binding, bind it in SteamVR");
     }
 }
 
@@ -458,7 +609,9 @@ bool UpdateGripGesture(int hand, float pull, bool* bumper)
     if (down && !g.down)
     {
         g.pressedAtMs = now;
-        g.bumper = GetGripDoubleTapBumpers() && g.lastTapReleaseMs != 0 && now - g.lastTapReleaseMs <= kGripDoubleTapMs;
+        const bool gripTaps = GetGripDoubleTapBumpers() && !g_handHasRealBumper[hand] &&
+                              !(g_handHasThumbrestBumper[hand] && GetThumbTapBumpers());
+        g.bumper = gripTaps && g.lastTapReleaseMs != 0 && now - g.lastTapReleaseMs <= kGripDoubleTapMs;
         g.lastTapReleaseMs = 0;
         if (g.bumper)
             MOHW_LOG(kLogFile, "grip double-tap (%s hand) -> %s", hand == kLeftHand ? "left" : "right",
@@ -473,6 +626,66 @@ bool UpdateGripGesture(int hand, float pull, bool* bumper)
     g.down = down;
     *bumper = g.bumper;
     return down;
+}
+
+// THUMBREST BUMPERS (2026-11-01): a double tap of the thumbrest holds that hand's bumper, timed here as in the AvP mod,
+// since the thumbrest is touch-only and SteamVR's double press needs a click. A tap = a touch shorter than kTapMaxMs
+// after at least kTapGapMs off the rest (a resting thumb's flicker doesn't count); the second touch within kDoubleTapMs of
+// the first starts the bumper, and it lasts as long as that touch. LB also has to survive the thumb leaving the rest:
+// peek and lean is LB + the left stick, under the same thumb. So it stays on for kStickReachMs after the touch ends, and
+// for as long as the stick is off centre after that.
+constexpr unsigned long long kTapMaxMs = 300, kTapGapMs = 40, kDoubleTapMs = 450;
+constexpr unsigned long long kStickReachMs = 600;
+constexpr float kStickInUse = 0.15f;
+
+struct ThumbTap
+{
+    bool touched = false;
+    bool bumper = false;
+    bool heldByTouch = false;
+    unsigned long long touchSince = 0, releasedAt = 0, tapAt = 0, reachUntil = 0;
+};
+ThumbTap g_thumbTap[2]; // submit thread only
+
+// Returns whether the bumper is held. stick: how far that hand's stick is off centre.
+bool UpdateThumbTap(int hand, bool touched, float stick)
+{
+    ThumbTap& t = g_thumbTap[hand];
+    unsigned long long now = GetTickCount64();
+    if (touched && !t.touched)
+    {
+        bool afterGap = t.releasedAt == 0 || now - t.releasedAt >= kTapGapMs;
+        if (t.tapAt != 0 && afterGap && now - t.tapAt <= kDoubleTapMs)
+        {
+            t.bumper = t.heldByTouch = true;
+            t.tapAt = 0;
+            t.touchSince = 0; // this touch completed the double tap: it doesn't start another
+            MOHW_LOG(kLogFile, "thumbrest double tap (%s hand) -> %s", hand == kLeftHand ? "left" : "right",
+                     hand == kLeftHand ? "LB" : "RB");
+        }
+        else
+        {
+            t.touchSince = afterGap ? now : 0; // a flicker's touch isn't a tap
+        }
+    }
+    else if (!touched && t.touched)
+    {
+        t.releasedAt = now;
+        if (t.touchSince != 0 && now - t.touchSince <= kTapMaxMs && !t.bumper)
+            t.tapAt = t.touchSince; // a short touch: the first tap
+        t.touchSince = 0;
+        if (t.heldByTouch)
+        {
+            t.heldByTouch = false;
+            t.reachUntil = hand == kLeftHand ? now + kStickReachMs : now; // the right stick does nothing with RB
+        }
+    }
+    if (t.tapAt != 0 && now - t.tapAt > kDoubleTapMs)
+        t.tapAt = 0; // the second tap didn't come
+    t.touched = touched;
+    if (t.bumper && !t.heldByTouch && now >= t.reachUntil && !(hand == kLeftHand && stick > kStickInUse))
+        t.bumper = false;
+    return t.bumper;
 }
 
 bool GetNamedHandle(PFN_GetHandle fn, const char* name, uint64_t* out)
@@ -563,11 +776,10 @@ bool InitVrInput(void* input, int trackingUniverse)
     g_trackingUniverse = trackingUniverse;
 
     std::string manifestPath = LogFilePath(kManifestFileName);
-    std::string touchBindingsPath = LogFilePath(kTouchBindingsFileName);
-    std::string indexBindingsPath = LogFilePath(kIndexBindingsFileName);
-    if (!WriteTextFile(manifestPath, BuildActionManifest().c_str()) ||
-        !WriteTextFile(touchBindingsPath, BuildBindings(Controller::Touch).c_str()) ||
-        !WriteTextFile(indexBindingsPath, BuildBindings(Controller::Index).c_str()))
+    bool wrote = WriteTextFile(manifestPath, BuildActionManifest().c_str());
+    for (const ControllerProfile& c : kControllerProfiles)
+        wrote = WriteTextFile(LogFilePath(c.fileName), BuildBindings(c).c_str()) && wrote;
+    if (!wrote)
     {
         MOHW_LOG(kLogFile, "FAILED to write the action manifest/bindings next to the DLL (%s)", manifestPath.c_str());
         return false;
@@ -610,6 +822,11 @@ bool InitVrInput(void* input, int trackingUniverse)
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/FireRight", &g_fireAction[kRightHand]) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/GripLeft", &g_gripAction[kLeftHand]) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/GripRight", &g_gripAction[kRightHand]) && ok;
+    // Optional too: only the controllers whose grip is a button use them.
+    GetNamedHandle(getActionHandle, "/actions/main/in/GripButtonLeft", &g_gripButtonAction[kLeftHand]);
+    GetNamedHandle(getActionHandle, "/actions/main/in/GripButtonRight", &g_gripButtonAction[kRightHand]);
+    GetNamedHandle(getActionHandle, "/actions/main/in/ThumbTapLeft", &g_thumbTapAction[kLeftHand]);
+    GetNamedHandle(getActionHandle, "/actions/main/in/ThumbTapRight", &g_thumbTapAction[kRightHand]);
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/Recenter", &g_recenterAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/Move", &g_moveAction) && ok;
     ok = GetNamedHandle(getActionHandle, "/actions/main/in/Turn", &g_turnAction) && ok;
@@ -662,13 +879,24 @@ void UpdateVrInput()
         memcpy(hands[h].pose, poses[h].pose.deviceToAbsoluteTracking, sizeof(hands[h].pose));
         PoseActionData palm{};
         hands[h].havePalm = g_palmAction[h] && ReadHandPose(g_palmAction[h], &palm);
+        static int lastPalm[2] = {-1, -1};
+        if (hands[h].tracked && lastPalm[h] != (hands[h].havePalm ? 1 : 0))
+        {
+            lastPalm[h] = hands[h].havePalm ? 1 : 0;
+            MOHW_LOG(kLogFile, "%s palm pose: %s", h == kLeftHand ? "left" : "right",
+                     hands[h].havePalm ? "live" : "not available, the tip is used");
+        }
         for (int k = 0; k < 3; ++k)
             hands[h].palm[k] = palm.pose.deviceToAbsoluteTracking[k][3];
         DigitalActionData fire{};
         AnalogActionData gripPull{};
         bool gripReadOk =
             g_getAnalog(g_input, g_gripAction[h], &gripPull, sizeof(gripPull), 0) == 0 && gripPull.active;
-        hands[h].grip = UpdateGripGesture(h, gripReadOk ? gripPull.x : 0.0f, &gripBumper[h]);
+        DigitalActionData gripButton{};
+        bool gripButtonDown = g_gripButtonAction[h] &&
+                              g_getDigital(g_input, g_gripButtonAction[h], &gripButton, sizeof(gripButton), 0) == 0 &&
+                              gripButton.active && gripButton.state;
+        hands[h].grip = UpdateGripGesture(h, gripButtonDown ? 1.0f : gripReadOk ? gripPull.x : 0.0f, &gripBumper[h]);
         hands[h].trigger =
             g_getDigital(g_input, g_fireAction[h], &fire, sizeof(fire), 0) == 0 && fire.active && fire.state;
     }
@@ -778,14 +1006,21 @@ void UpdateVrInput()
             if (down || nowMs < heldUntil[i])
                 buttons |= kPadActions[i].mask;
         }
-        // Grip double-taps: LB / RB, with the same minimum hold.
+        // Double-tap bumpers, the grips' and the thumbrests': LB / RB, with the same minimum hold.
         constexpr unsigned short kBumperMask[2] = {0x0100, 0x0200}; // [kLeftHand] = LB, [kRightHand] = RB
         static unsigned long long bumperHeldUntil[2] = {0, 0};
+        const float stick[2] = {sqrtf(state.moveX * state.moveX + state.moveY * state.moveY),
+                                sqrtf(state.turnX * state.turnX + state.turnY * state.turnY)};
         for (int h = 0; h < 2; ++h)
         {
-            if (gripBumper[h] && nowMs >= bumperHeldUntil[h])
+            DigitalActionData thumb{};
+            bool touched = GetThumbTapBumpers() && g_thumbTapAction[h] &&
+                           g_getDigital(g_input, g_thumbTapAction[h], &thumb, sizeof(thumb), 0) == 0 && thumb.active &&
+                           thumb.state;
+            bool bumper = UpdateThumbTap(h, touched, stick[h]) || gripBumper[h];
+            if (bumper && nowMs >= bumperHeldUntil[h])
                 bumperHeldUntil[h] = nowMs + kPadMinHoldMs;
-            if (gripBumper[h] || nowMs < bumperHeldUntil[h])
+            if (bumper || nowMs < bumperHeldUntil[h])
                 buttons |= kBumperMask[h];
         }
         bool triggersToPad = !GetFireViaMouse();

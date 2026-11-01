@@ -10,7 +10,12 @@
 #include "head_position.h"
 #include "../sdk/settings.h"
 #include "fov_scale_hook.h"
+#include "aiming_controller_hook.h"
+#include "first_person_rig.h"
+#include "laser_raycast.h"
+#include "../sdk/rigid.h"
 #include "../openvr_direct/vr_hands.h"
+#include "../openvr_direct/vr_reload.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -78,66 +83,16 @@ void* g_submitAddress = nullptr;
 // minus this eye's IPD offset, see GetActiveEyeOffsetAlongRow0) + TrackingOffsetToGameWorld(controller - head).
 // Row-vector convention throughout: world = local * R + t, and "A * B" means apply A, then B.
 // Replaces v2 (2026-09-20), which derived its own XR->game alignment at calibration and auto-guessed axis signs.
-struct Rigid
-{
-    float R[3][3]; // rows = axes
-    float t[3];
-};
-
 // The drive itself is the WeaponDriveEnabled setting (default on, so it applies from the first weapon draw after a
 // character loads); Numpad . toggles and saves it.
 std::atomic<bool> g_weaponGripLogRequested{true}; // log the hand's pose in camera space once, on the next weapon draw
 
-// a then b.
-Rigid Compose(const Rigid& a, const Rigid& b)
-{
-    Rigid out{};
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            out.R[i][j] = a.R[i][0] * b.R[0][j] + a.R[i][1] * b.R[1][j] + a.R[i][2] * b.R[2][j];
-    for (int j = 0; j < 3; ++j)
-        out.t[j] = a.t[0] * b.R[0][j] + a.t[1] * b.R[1][j] + a.t[2] * b.R[2][j] + b.t[j];
-    return out;
-}
-
-Rigid Inverse(const Rigid& a)
-{
-    Rigid out{};
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            out.R[i][j] = a.R[j][i];
-    for (int j = 0; j < 3; ++j)
-        out.t[j] = -(a.t[0] * out.R[0][j] + a.t[1] * out.R[1][j] + a.t[2] * out.R[2][j]);
-    return out;
-}
-
-Rigid FromMatrix(const float m[16])
-{
-    Rigid out{};
-    for (int i = 0; i < 3; ++i)
-    {
-        for (int j = 0; j < 3; ++j)
-            out.R[i][j] = m[i * 4 + j];
-        out.t[i] = m[12 + i];
-    }
-    return out;
-}
-
-void ToMatrix(const Rigid& a, float m[16])
-{
-    for (int i = 0; i < 3; ++i)
-    {
-        for (int j = 0; j < 3; ++j)
-            m[i * 4 + j] = a.R[i][j];
-        m[12 + i] = a.t[i];
-    }
-}
-
-bool ControllerFrame(const float m[16], Rigid* out)
+// The weapon hand's controller (the "right" slot), or the off hand's.
+bool ControllerFrame(const float m[16], bool offHand, Rigid* out)
 {
     mohwvr::ipc::ControllerPoseBlock controller{};
     mohwvr::ipc::HeadPoseBlock head{};
-    if (!GetRightControllerPose(&controller) || !GetHeadPose(&head))
+    if (!(offHand ? GetLeftControllerPose(&controller) : GetRightControllerPose(&controller)) || !GetHeadPose(&head))
         return false;
 
     Quat q{controller.orientationX, controller.orientationY, controller.orientationZ, controller.orientationW};
@@ -196,7 +151,7 @@ Rigid GripInCamera()
 // the view; the world is seen through Rq * M (Rq = that roll) from an eye e along the view's right of the head centre,
 // so the rig should be at L * Rq^-1 * T(-e), giving M' = T(e) * Rq * M. The weapon drive builds the same head-centre
 // correction into its controller frame instead (ControllerFrame subtracts the eye offset).
-void AnchorRigToHead(float m[16], bool addRoll)
+void AnchorRigToHead(float m[16], const Rigid& rigCamera, bool addRoll)
 {
     Rigid shiftAndRoll{};
     for (int i = 0; i < 3; ++i)
@@ -219,17 +174,51 @@ void AnchorRigToHead(float m[16], bool addRoll)
         }
     }
     shiftAndRoll.t[0] = GetActiveEyeOffsetAlongRow0(); // T(e) then Rq: the shift is along the unrolled right
-    ToMatrix(Compose(shiftAndRoll, FromMatrix(m)), m);
+    ToMatrix(Compose(shiftAndRoll, rigCamera), m);
+}
+
+// THE RIG'S OWN CAMERA (2026-11-01): the rig's bones are posed at the game's 30 Hz tick, against the game's own camera,
+// but the camera it's drawn from is the mod's smoothed one, updated every frame. Head still, they agree; turning, the
+// rig sits behind and then catches up each tick, which reads as jitter on everything attached to it, and only on head
+// turns (the 2026-08 smoothing fixed the world, and left this). So what's "camera-relative" in the rig is measured from
+// the game's camera: rotation only, as the two share a position bar the head offset. A big gap means it isn't this
+// camera's frame (a cutscene, a transition): left alone.
+constexpr float kRigCameraMaxDegrees = 25.0f;
+std::atomic<float> g_rigGapDegrees{0.0f};
+std::atomic<unsigned long long> g_rigGapLogMs{0};
+
+void AlignRigCamera(Rigid* rigCamera)
+{
+    float rows[3][3];
+    if (!GetStabilizeRig() || !GetGameCameraRows(rows))
+        return;
+    float back = 0.0f, up = 0.0f;
+    for (int k = 0; k < 3; ++k)
+    {
+        back += rows[2][k] * rigCamera->R[2][k];
+        up += rows[1][k] * rigCamera->R[1][k];
+    }
+    const float lowest = back < up ? back : up;
+    const float gap = acosf(lowest > 1.0f ? 1.0f : lowest < -1.0f ? -1.0f : lowest) * 57.29578f;
+    if (gap > g_rigGapDegrees.load(std::memory_order_relaxed))
+        g_rigGapDegrees.store(gap, std::memory_order_relaxed);
+    unsigned long long now = GetTickCount64(), due = g_rigGapLogMs.load(std::memory_order_relaxed);
+    if (now >= due && g_rigGapLogMs.compare_exchange_strong(due, now + 2000))
+        MOHW_LOG(kLogFile, "rig camera: largest gap to the drawn camera %.2f deg in the last 2 s%s",
+                 g_rigGapDegrees.exchange(0.0f), gap > kRigCameraMaxDegrees ? " (over the limit: not used)" : "");
+    if (gap > kRigCameraMaxDegrees)
+        return;
+    memcpy(rigCamera->R, rows, sizeof(rows));
 }
 
 // Rewrites m (a weapon batch's local camera matrix) so the gun follows the controller. Returns false, leaving m
 // untouched, while the drive is off or a pose is unavailable.
-bool DriveWeaponFromController(float m[16])
+bool DriveWeaponFromController(float m[16], const Rigid& rigCamera)
 {
     if (!GetWeaponDriveEnabled())
         return false;
     Rigid c{};
-    if (!ControllerFrame(m, &c))
+    if (!ControllerFrame(m, false, &c))
         return false;
     Rigid cam = FromMatrix(m);
 
@@ -245,8 +234,185 @@ bool DriveWeaponFromController(float m[16])
                  h.R[2][1], h.R[2][2]);
     }
 
-    ToMatrix(Compose(Compose(Compose(cam, Inverse(c)), GripInCamera()), cam), m);
+    ToMatrix(Compose(Compose(Compose(cam, Inverse(c)), GripInCamera()), rigCamera), m);
     return true;
+}
+
+// The pouch as a frame like a controller's (rows: right, up, back): the body's axes at the pouch.
+bool PouchFrame(const float m[16], const openvr_direct::MagazineView& view, Rigid* out)
+{
+    const float up[3] = {0.0f, 1.0f, 0.0f};
+    float offset[3];
+    if (!TrackingDirectionToGameWorld(view.bodyRight[0], view.bodyRight[1], view.bodyRight[2], out->R[0]) ||
+        !TrackingDirectionToGameWorld(up[0], up[1], up[2], out->R[1]) ||
+        !TrackingDirectionToGameWorld(view.bodyBack[0], view.bodyBack[1], view.bodyBack[2], out->R[2]) ||
+        !TrackingOffsetToGameWorld(view.pouchFromHead[0], view.pouchFromHead[1], view.pouchFromHead[2], offset))
+        return false;
+    float eyeOffset = GetActiveEyeOffsetAlongRow0();
+    for (int k = 0; k < 3; ++k)
+        out->t[k] = m[12 + k] - m[k] * eyeOffset + offset[k];
+    return true;
+}
+
+float BlendStep(float from, float to, float x)
+{
+    float t = (x - from) / (to - from);
+    t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+    return t * t * (3.0f - 2.0f * t);
+}
+
+float Length3(const float v[3])
+{
+    return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+}
+
+// MANUAL RELOAD (2026-10-31, openvr_direct/vr_reload.h): a magazine part's batch, drawn where the magazine is now. Any
+// part drawn with M' = M * W^-1 shows at P * W, so W is "the move this part takes". Rest = the gun's move, as the weapon
+// drive. Held = the bone's point on the off hand's controller, turned with it as the gun turns with its own.
+// In range of the seat (the weapon's MagazineProfile, 2026-11-01), the magazine stays where the hand has it and only
+// turns: its top, the line from the seat to the aim point at rest, turns to point at the aim point from wherever it is,
+// by alpha, 0 at the range's edge and 1 at the lock range. There the point is on that line and the turn is the rest
+// pose. At alpha 1 the horizontal locks: it can only move along the line, and not past the seat. kLockEaseMetres eases
+// the last stretch in, so reaching the lock doesn't jump. False = draw it with the gun.
+constexpr float kLockEaseMetres = 0.03f;
+bool DriveMagazine(float m[16], const Rigid& rigCamera)
+{
+    if (!GetManualReloadEnabled() || !GetWeaponDriveEnabled())
+        return false;
+    float bone[3];
+    Rigid c{};
+    if (!GetMagazineBonePoint(bone) || !ControllerFrame(m, false, &c))
+        return false;
+    const Rigid cam = FromMatrix(m);
+    const Rigid camInverse = Inverse(rigCamera);
+    const Rigid toController = Compose(camInverse, Inverse(GripInCamera()));
+    const Rigid rest = Compose(toController, c);
+    const MagazineProfile profile = GetMagazineProfile();
+    const float aimOffset[3] = {profile.aimPoint[0], profile.aimPoint[1], -profile.aimPoint[2]}; // right, up, back
+    float inCamera[3], aimInCamera[3];
+    PointTimes(bone, camInverse, inCamera);
+    for (int k = 0; k < 3; ++k)
+        aimInCamera[k] = inCamera[k] + aimOffset[k];
+    openvr_direct::MagazineGeometry geometry{};
+    const Rigid gripInverse = Inverse(GripInCamera());
+    PointTimes(inCamera, gripInverse, geometry.seat);
+    PointTimes(aimInCamera, gripInverse, geometry.aim);
+    for (int i = 0; i < 3; ++i)
+        for (int k = 0; k < 3; ++k)
+            geometry.axes[i][k] = gripInverse.R[i][k];
+    openvr_direct::PublishMagazineGeometry(geometry);
+
+    const openvr_direct::MagazineView view = openvr_direct::GetMagazineView();
+    if (view.state == openvr_direct::MagazineState::InGun)
+        return false;
+    Rigid holder{};
+    const bool held = view.state == openvr_direct::MagazineState::Held;
+    if (!(held ? ControllerFrame(m, true, &holder) : PouchFrame(m, view, &holder)))
+        return false;
+    Rigid grip = RigidIdentity();
+    for (int k = 0; k < 3; ++k)
+        grip.t[k] = inCamera[k];
+    Rigid w = Compose(Compose(camInverse, Inverse(grip)), holder);
+    if (held)
+    {
+        float atRest[3], atHand[3], aimPoint[3], fromSeat[3], axis[3];
+        PointTimes(bone, rest, atRest);
+        PointTimes(bone, w, atHand);
+        PointTimes(aimInCamera, Compose(gripInverse, c), aimPoint);
+        for (int k = 0; k < 3; ++k)
+        {
+            fromSeat[k] = atHand[k] - atRest[k];
+            axis[k] = aimPoint[k] - atRest[k];
+        }
+        const float axisLength = Length3(axis);
+        const float d = Length3(fromSeat);
+        const float span = profile.range - profile.lockRange;
+        float alpha = span > 1e-4f ? (profile.range - d) / span : (d <= profile.range ? 1.0f : 0.0f);
+        alpha = alpha < 0.0f ? 0.0f : alpha > 1.0f ? 1.0f : alpha;
+        if (alpha > 0.0f && axisLength > 1e-3f)
+        {
+            float along = 0.0f;
+            for (int k = 0; k < 3; ++k)
+            {
+                axis[k] /= axisLength;
+                along += fromSeat[k] * axis[k];
+            }
+            along = along > 0.0f ? 0.0f : along;
+            const float lock = BlendStep(profile.lockRange + kLockEaseMetres, profile.lockRange, d);
+            float position[3], toAim[3], turn[3][3];
+            for (int k = 0; k < 3; ++k)
+            {
+                position[k] = atHand[k] + (atRest[k] + axis[k] * along - atHand[k]) * lock;
+                toAim[k] = aimPoint[k] - position[k];
+            }
+            const float toAimLength = Length3(toAim);
+            Rigid pointed = rest;
+            if (toAimLength > 1e-3f)
+            {
+                for (int k = 0; k < 3; ++k)
+                    toAim[k] /= toAimLength;
+                if (RotationBetween(axis, toAim, turn))
+                    for (int i = 0; i < 3; ++i)
+                        for (int j = 0; j < 3; ++j)
+                            pointed.R[i][j] =
+                                rest.R[i][0] * turn[0][j] + rest.R[i][1] * turn[1][j] + rest.R[i][2] * turn[2][j];
+            }
+            Rigid blended{};
+            BlendRotation(w.R, pointed.R, alpha, blended.R);
+            float turned[3];
+            PointTimes(bone, blended, turned);
+            for (int k = 0; k < 3; ++k)
+                blended.t[k] = position[k] - turned[k];
+            w = blended;
+        }
+    }
+    ToMatrix(Compose(cam, Inverse(w)), m);
+    return true;
+}
+
+// ARMS (2026-10-31): the body batch's arms onto the controllers, hooks/first_person_rig.h. The weapon hand goes with the
+// gun, so it needs no calibration of its own: wherever the gun's grip offset puts the gun, the game's hand is on it.
+void DriveArms(const unsigned char* batch, const float original[16], const float drawn[16], const Rigid& rigCamera)
+{
+    if (!GetArmIkEnabled() || !GetWeaponDriveEnabled() || !IsPlayerAimActive())
+        return;
+    Rigid c{}, off{};
+    if (!ControllerFrame(original, false, &c))
+        return;
+    const bool haveOff = ControllerFrame(original, true, &off);
+    const Rigid gun = Compose(Compose(Inverse(rigCamera), Inverse(GripInCamera())), c);
+    ApplyArmIk(batch, FromMatrix(original), rigCamera, FromMatrix(drawn), gun, off, haveOff,
+               openvr_direct::IsWeaponTwoHanded(), openvr_direct::IsWeaponHandLeft());
+}
+
+// THE BODY (2026-11-01): moves the body batch (legs, torso, arms) as a whole. Shown from M' it appears at P * M'^-1 * M;
+// to take a further move B there it's drawn from M * B^-1 * M^-1 * M'. B: the BodyOffset settings along the level body
+// frame, and with BodyUpright the camera's tilt taken out, about the camera. The arms' IK works through the camera drawn
+// here, so the hands stay on the controllers and only the shoulders move.
+void MoveBody(float drawn[16], const float original[16])
+{
+    float offset[3];
+    GetBodyOffset(offset);
+    const bool upright = GetBodyUpright();
+    if (offset[0] == 0.0f && offset[1] == 0.0f && offset[2] == 0.0f && !upright)
+        return;
+    const Rigid cam = FromMatrix(original);
+    float forward[3] = {-cam.R[2][0], 0.0f, -cam.R[2][2]}, right[3] = {cam.R[0][0], 0.0f, cam.R[0][2]};
+    const float forwardLength = Length3(forward), rightLength = Length3(right);
+    if (forwardLength < 1e-3f || rightLength < 1e-3f)
+        return;
+    Rigid b = RigidIdentity();
+    if (upright)
+    {
+        const float up[3] = {0.0f, 1.0f, 0.0f};
+        RotationBetween(cam.R[1], up, b.R);
+    }
+    float turned[3];
+    PointTimes(cam.t, b, turned);
+    for (int k = 0; k < 3; ++k)
+        b.t[k] = cam.t[k] - turned[k] + right[k] / rightLength * offset[0] + (k == 1 ? offset[1] : 0.0f) +
+                 forward[k] / forwardLength * offset[2];
+    ToMatrix(Compose(Compose(Compose(cam, Inverse(b)), Inverse(cam)), FromMatrix(drawn)), drawn);
 }
 
 // DISABLED 2026-09-22 ("get rid of the camera test hook for now"): every hotkey this diagnostic used (top-row/numpad
@@ -461,8 +627,24 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     // Weapon batches follow the controller when the drive is on (parallax included). Everything else in the rig is
     // anchored to the head centre: the body+hands batch without the head's roll, the weapon with the drive off with
     // it (it's the view's gun then, and should roll with the view).
-    if (!patchThis || !DriveWeaponFromController(m))
-        AnchorRigToHead(m, isBody);
+    Rigid rigCamera = FromMatrix(m);
+    AlignRigCamera(&rigCamera);
+    bool driven = false;
+    if (patchThis)
+    {
+        uintptr_t mesh0 = 0, second0 = 0, vtable0 = 0;
+        if (!isBody && ReadInstance(b, 0, &mesh0, &second0, &vtable0) && IsMagazineMesh(mesh0))
+            driven = DriveMagazine(m, rigCamera);
+        driven = driven || DriveWeaponFromController(m, rigCamera);
+    }
+    if (!driven)
+        AnchorRigToHead(m, rigCamera, isBody);
+    if (isBody)
+    {
+        NoteBodyBatch(b);
+        MoveBody(m, matrix);
+        DriveArms(b, matrix, m, rigCamera);
+    }
 
     ++g_patched;
     int lastLogged = g_lastLoggedSelected.load();
@@ -506,16 +688,17 @@ bool ResolveBodyInstance(void* item, int* outIndex, void** outMesh)
 
 void __cdecl HookedSubmit(void* item, void* drawState)
 {
-    // With the gun on the controller, the game's arms and hands are left reaching for where the gun used to be; they
-    // share the body batch's one view block with the legs, so they can't be moved on their own yet -- the parts picked
-    // in the settings (HideBodyPart1..4) are skipped instead.
+    // With the gun on the controller, the game's arms and hands are left reaching for where the gun used to be: the
+    // parts picked in the settings (HideBodyPart1..4) are skipped, except the arms while the IK has them on the
+    // controllers (DriveArms).
     if (GetWeaponDriveEnabled() &&
         reinterpret_cast<uintptr_t>(_ReturnAddress()) ==
             reinterpret_cast<uintptr_t>(Offset<void*>(OFFSET_DRAWITEMSUBMIT_CALLER_INSTANCELOOP)))
     {
         int idx = -1;
         void* mesh = nullptr;
-        if (ResolveBodyInstance(item, &idx, &mesh) && GetHideBodyPart(idx))
+        if (ResolveBodyInstance(item, &idx, &mesh) && GetHideBodyPart(idx) &&
+            !(GetArmIkEnabled() && ShouldDrawArmMesh(reinterpret_cast<uintptr_t>(mesh))))
         {
             static std::atomic<int> hideLogs{0};
             if (hideLogs.fetch_add(1) < 8)

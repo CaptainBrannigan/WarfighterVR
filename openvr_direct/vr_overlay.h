@@ -13,6 +13,29 @@ namespace mohw::openvr_direct {
 // (the game runs on without the menu).
 bool InitVrOverlay(void* overlay, int trackingUniverse);
 
+// The grab zone view (ShowGrabZones): one overlay per slot, tracking space. A billboard faces the head at pos; otherwise
+// m is its 3x4 (columns = its axes, +Z its face). active: a hand is in it, drawn green.
+constexpr int kDebugZoneFirst = 0;  // the seven holster zones, in vr_hands.cpp's kZones order
+constexpr int kDebugPouch = 7;
+constexpr int kDebugBoxFirst = 8;   // the magazine grab box's six faces
+constexpr int kDebugTurnRange = 14;
+constexpr int kDebugLockRange = 15;
+constexpr int kDebugSeat = 16;
+constexpr int kDebugAimPoint = 17;
+constexpr int kDebugTwoHand = 18;
+constexpr int kGrabDebugSlotCount = 19;
+struct GrabDebugShape
+{
+    bool visible = false;
+    bool billboard = false;
+    bool active = false;
+    float pos[3] = {};
+    float m[12] = {};
+    float width = 0.0f, height = 0.0f; // metres
+};
+// Submit thread, every frame while the view is on, and once to clear it.
+void UpdateGrabDebug(const GrabDebugShape shapes[kGrabDebugSlotCount], const float headPos[3]);
+
 // Submit thread, every frame: places the optic dot (the weapon hand's forward turned by the optic zero, at
 // OpticDistance) and the aim ray dot (straight along it, at SightZeroDistance), facing the head, all tracking space;
 // or hides them (visible false, or each dot's own setting off).

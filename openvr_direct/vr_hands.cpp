@@ -1,6 +1,8 @@
 #include "vr_hands.h"
 
 #include "openvr_types.h"
+#include "vr_overlay.h"
+#include "vr_reload.h"
 #include "../sdk/logging.h"
 #include "../sdk/settings.h"
 
@@ -244,29 +246,34 @@ void UpdateBodyForward(const Quat& headOrientation)
     g_bodyForward.z = cosf(g_bodyYaw);
 }
 
+// A zone's centre, tracking space.
+Vec3 ZoneCentre(const Zone& z, const float headPos[3])
+{
+    Vec3 up{};
+    up.y = 1.0f;
+    Vec3 fwd = g_bodyForward;
+    Vec3 right = Cross(fwd, up); // forward x up = right for a right-handed, Y-up frame
+    float offset[3];
+    GetHolsterOffset(z.zone, offset);
+    float r = z.mirror != 0.0f ? z.mirror * fabsf(offset[0]) : offset[0];
+    Vec3 centre{};
+    centre.x = headPos[0] + right.x * r + fwd.x * offset[2];
+    centre.y = headPos[1] + offset[1] - GetHolsterDrop();
+    centre.z = headPos[2] + right.z * r + fwd.z * offset[2];
+    return centre;
+}
+
 // The zone the hand is in (nearest centre within HolsterRadius), or nullptr.
 const Zone* FindZone(const Vec3& handPos, const float headPos[3])
 {
     if (!g_haveBody)
         return nullptr;
-    Vec3 up{};
-    up.y = 1.0f;
-    Vec3 fwd = g_bodyForward;
-    Vec3 right = Cross(fwd, up); // forward x up = right for a right-handed, Y-up frame
     float radius = GetHolsterRadius();
-    float drop = GetHolsterDrop();
     const Zone* best = nullptr;
     float bestDistSq = radius * radius;
     for (const Zone& z : kZones)
     {
-        float offset[3];
-        GetHolsterOffset(z.zone, offset);
-        float r = z.mirror != 0.0f ? z.mirror * fabsf(offset[0]) : offset[0];
-        Vec3 centre{};
-        centre.x = headPos[0] + right.x * r + fwd.x * offset[2];
-        centre.y = headPos[1] + offset[1] - drop;
-        centre.z = headPos[2] + right.z * r + fwd.z * offset[2];
-        Vec3 d = VecSub(handPos, centre);
+        Vec3 d = VecSub(handPos, ZoneCentre(z, headPos));
         float distSq = VecDot(d, d);
         if (distSq <= bestDistSq)
         {
@@ -275,6 +282,19 @@ const Zone* FindZone(const Vec3& handPos, const float headPos[3])
         }
     }
     return best;
+}
+
+// The magazine pouch: placed like a holster zone, tracking space. Its axes from the same lazy body frame.
+void MagazinePouch(const float headPos[3], Vec3* centre, Vec3* right)
+{
+    Vec3 up{};
+    up.y = 1.0f;
+    *right = Cross(g_bodyForward, up);
+    float offset[3];
+    GetMagazinePouchOffset(offset);
+    centre->x = headPos[0] + right->x * offset[0] + g_bodyForward.x * offset[2];
+    centre->y = headPos[1] + offset[1] - GetHolsterDrop();
+    centre->z = headPos[2] + right->z * offset[0] + g_bodyForward.z * offset[2];
 }
 
 // The off hand's point for two-handed aiming: its position only (2026-10-16, the user's call: the secondary grip
@@ -363,6 +383,124 @@ bool AimAtOffHand(const HandInput& weapon, const HandInput& off, Quat* out)
     return true;
 }
 
+// ---- The grab zone view (2026-11-01, ShowGrabZones): every place a grip does something, drawn where it really is ----
+void SetPoint(GrabDebugShape& s, const Vec3& p, float width, bool active)
+{
+    s.visible = true;
+    s.billboard = true;
+    s.active = active;
+    s.pos[0] = p.x;
+    s.pos[1] = p.y;
+    s.pos[2] = p.z;
+    s.width = s.height = width;
+}
+
+void SetPlane(GrabDebugShape& s, const Vec3& centre, const Vec3& x, const Vec3& y, const Vec3& z, float width, float height,
+              bool active)
+{
+    s.visible = true;
+    s.active = active;
+    s.width = width;
+    s.height = height;
+    const Vec3* axes[3] = {&x, &y, &z};
+    for (int col = 0; col < 3; ++col)
+    {
+        s.m[0 * 4 + col] = axes[col]->x;
+        s.m[1 * 4 + col] = axes[col]->y;
+        s.m[2 * 4 + col] = axes[col]->z;
+    }
+    s.m[0 * 4 + 3] = centre.x;
+    s.m[1 * 4 + 3] = centre.y;
+    s.m[2 * 4 + 3] = centre.z;
+}
+
+void PublishGrabZones(const HandInput hands[2], bool haveHead, const float headPos[3], int weaponHand)
+{
+    static bool wasShown = false;
+    static GrabDebugShape shapes[kGrabDebugSlotCount];
+    const bool show = GetShowGrabZones() && haveHead && g_haveBody;
+    if (!show)
+    {
+        if (wasShown)
+        {
+            for (GrabDebugShape& s : shapes)
+                s.visible = false;
+            UpdateGrabDebug(shapes, headPos);
+        }
+        wasShown = false;
+        return;
+    }
+    wasShown = true;
+    for (GrabDebugShape& s : shapes)
+        s = GrabDebugShape{};
+
+    auto handWithin = [&hands](const Vec3& centre, float radius) {
+        for (int h = 0; h < 2; ++h)
+        {
+            if (!hands[h].tracked)
+                continue;
+            Vec3 d = VecSub(Column(hands[h].pose, 3), centre);
+            if (VecDot(d, d) <= radius * radius)
+                return true;
+        }
+        return false;
+    };
+    const float holsterRadius = GetHolsterRadius();
+    for (int i = 0; i < 7; ++i)
+    {
+        Vec3 centre = ZoneCentre(kZones[i], headPos);
+        SetPoint(shapes[kDebugZoneFirst + i], centre, holsterRadius * 2.0f, handWithin(centre, holsterRadius));
+    }
+
+    const HandInput& weapon = hands[weaponHand];
+    const HandInput& off = hands[1 - weaponHand];
+    Vec3 pouchCentre{}, bodyRight{};
+    MagazinePouch(headPos, &pouchCentre, &bodyRight);
+    const float pouchRadius = GetMagazinePouchRadius();
+    SetPoint(shapes[kDebugPouch], pouchCentre, pouchRadius * 2.0f, handWithin(pouchCentre, pouchRadius));
+
+    MagazineDebug mag{};
+    if (GetMagazineDebug(weapon, off, &mag))
+    {
+        // The box's six faces: each one's plane spanned by the other two axes.
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            const int a = (axis + 1) % 3, b = (axis + 2) % 3;
+            for (int side = 0; side < 2; ++side)
+            {
+                const float sign = side ? -1.0f : 1.0f;
+                Vec3 centre = VecAdd(mag.boxCentre, VecScale(mag.axes[axis], sign * mag.boxHalf[axis]));
+                SetPlane(shapes[kDebugBoxFirst + axis * 2 + side], centre, mag.axes[a], VecScale(mag.axes[b], sign),
+                         VecScale(mag.axes[axis], sign), mag.boxHalf[a] * 2.0f, mag.boxHalf[b] * 2.0f, mag.inBox);
+            }
+        }
+        SetPoint(shapes[kDebugTurnRange], mag.seat, mag.range * 2.0f, mag.handDistance <= mag.range);
+        SetPoint(shapes[kDebugLockRange], mag.seat, mag.lockRange * 2.0f, mag.handDistance <= mag.lockRange);
+        SetPoint(shapes[kDebugSeat], mag.seat, 0.02f, false);
+        SetPoint(shapes[kDebugAimPoint], mag.aim, 0.02f, false);
+    }
+
+    // The two-handed grab: a band along the barrel, its flat side to the head.
+    if (weapon.tracked)
+    {
+        const float start = 0.05f, reach = GetTwoHandReach(), radius = GetTwoHandGrabRadius();
+        Vec3 forward = VecScale(Column(weapon.pose, 2), -1.0f);
+        Vec3 middle = VecAdd(Column(weapon.pose, 3), VecScale(forward, (start + reach) * 0.5f));
+        Vec3 toHead{};
+        toHead.x = headPos[0] - middle.x;
+        toHead.y = headPos[1] - middle.y;
+        toHead.z = headPos[2] - middle.z;
+        Vec3 z = VecSub(toHead, VecScale(forward, VecDot(toHead, forward)));
+        if (Normalize(&z))
+        {
+            float along = 0.0f, perp = 0.0f;
+            const bool onBarrel = off.tracked && OnBarrel(weapon, off, &along, &perp);
+            SetPlane(shapes[kDebugTwoHand], middle, forward, Cross(z, forward), z, reach - start, radius * 2.0f, onBarrel);
+        }
+    }
+    UpdateGrabDebug(shapes, headPos);
+}
+
 const char* HandName(int hand)
 {
     return hand == kLeftHand ? "left" : "right";
@@ -378,6 +516,7 @@ bool g_prevGrip[2] = {false, false};
 bool g_offGripIsTwoHand = false; // the off hand's current grip press is (or may become) a two-handed grip
 bool g_weaponGripToggled = false; // HandsResult::weaponGripped when not HolsterHoldToKeep
 std::atomic<bool> g_weaponHandLeft{false};
+std::atomic<bool> g_weaponTwoHanded{false};
 
 } // namespace
 
@@ -400,6 +539,10 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
         MOHW_LOG(kLogFile, "weapon hand: %s (default, %s-handed)", HandName(g_weaponHand), leftHanded ? "left" : "right");
     }
 
+    Vec3 pouchCentre{}, bodyRight{};
+    if (haveHead)
+        MagazinePouch(headPos, &pouchCentre, &bodyRight);
+
     for (int h = 0; h < 2; ++h)
     {
         bool pressed = hands[h].grip && !g_prevGrip[h];
@@ -407,6 +550,9 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
         g_prevGrip[h] = hands[h].grip;
         int off = 1 - g_weaponHand;
 
+        // The magazine comes first: its grab is close to the gun, where the two-handed grab would also take the grip.
+        if (pressed && h == off && ManualReloadGripPressed(hands[g_weaponHand], hands[h], pouchCentre, haveHead))
+            continue;
         if (pressed && hands[h].tracked)
         {
             float along = 0.0f, perp = 0.0f;
@@ -461,6 +607,7 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
         {
             if (h == 1 - g_weaponHand)
             {
+                ManualReloadGripReleased(hands[g_weaponHand], hands[h]);
                 g_offGripIsTwoHand = false;
                 if (g_twoHanded)
                 {
@@ -494,15 +641,23 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
 
     out->weaponHand = g_weaponHand;
     out->twoHanded = g_twoHanded && AimAtOffHand(hands[g_weaponHand], hands[off], &out->weaponOrientation);
-    out->fire = hands[g_weaponHand].trigger;
+    UpdateManualReload(hands, g_weaponHand, haveHead, headPos, pouchCentre, bodyRight, g_bodyForward);
+    out->fire = hands[g_weaponHand].trigger && !ManualReloadBlocksFire();
     out->ads = hands[off].trigger;
     out->weaponGripped = GetHolsterHoldToKeep() ? hands[g_weaponHand].grip : g_weaponGripToggled;
     g_weaponHandLeft.store(g_weaponHand == kLeftHand, std::memory_order_relaxed);
+    g_weaponTwoHanded.store(out->twoHanded, std::memory_order_relaxed);
+    PublishGrabZones(hands, haveHead, headPos, g_weaponHand);
 }
 
 bool IsWeaponHandLeft()
 {
     return g_weaponHandLeft.load(std::memory_order_relaxed);
+}
+
+bool IsWeaponTwoHanded()
+{
+    return g_weaponTwoHanded.load(std::memory_order_relaxed);
 }
 
 // Held game keys: when each went down, so a release comes at least kMinHoldMs later. SteamVR's long-press input can

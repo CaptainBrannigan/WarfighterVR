@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 
 namespace mohw {
 namespace {
@@ -44,6 +45,10 @@ std::atomic<float> g_hitTracking{0.0f};
 std::atomic<unsigned long long> g_hitMs{0};
 // The laser's world point for the shots (GetLaserAimPoint): its hit, or its end when nothing's hit.
 std::atomic<float> g_aimX{0.0f}, g_aimY{0.0f}, g_aimZ{0.0f};
+std::atomic<float> g_startX{0.0f}, g_startY{0.0f}, g_startZ{0.0f}; // GetLaserShotStart
+std::mutex g_gameRowsMutex;
+float g_gameRows[3][3] = {};            // guarded by g_gameRowsMutex
+unsigned long long g_gameRowsMs = 0;    // likewise
 std::atomic<unsigned long long> g_aimMs{0};
 // The view direction is MINUS the camera's row 2 (row 2 = back, see LaserOnCommit's toWorld; an earlier "dot ~0.97
 // with row 2" reading came from fire-hook calls that weren't the player's shots). No automatic flip: one keyed to the
@@ -175,6 +180,13 @@ void LaserCaptureGameCamera(const float* gameTransform)
     float m[16];
     if (!gameTransform || !CopyFloats16(m, gameTransform))
         return;
+    {
+        std::lock_guard<std::mutex> lock(g_gameRowsMutex);
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                g_gameRows[r][c] = m[r * 4 + c];
+        g_gameRowsMs = GetTickCount64();
+    }
     g_forwardX.store(-m[8], std::memory_order_relaxed);
     g_forwardY.store(-m[9], std::memory_order_relaxed);
     g_forwardZ.store(-m[10], std::memory_order_relaxed);
@@ -387,6 +399,9 @@ void LaserOnCommit(const float* renderTransform)
         g_aimZ.store(end[2], std::memory_order_relaxed);
     }
     g_aimMs.store(nowMs, std::memory_order_relaxed);
+    g_startX.store(start[0], std::memory_order_relaxed);
+    g_startY.store(start[1], std::memory_order_relaxed);
+    g_startZ.store(start[2], std::memory_order_relaxed);
 
     if (!ok && g_castLogs < 20)
     {
@@ -451,6 +466,27 @@ void LaserNoteBulletHits(const void* hits, unsigned int count, const float* segm
         MOHW_LOG(kLogFile, "    bullet hit %u at (%.2f, %.2f, %.2f), %.2f m from the laser point, material flags %08X, %s", i,
                   pos[0], pos[1], pos[2], sqrtf(dx * dx + dy * dy + dz * dz), materialFlags, entityType);
     }
+}
+
+bool GetGameCameraRows(float rows[3][3])
+{
+    constexpr unsigned long long kStaleMs = 200;
+    std::lock_guard<std::mutex> lock(g_gameRowsMutex);
+    if (GetTickCount64() - g_gameRowsMs > kStaleMs)
+        return false;
+    memcpy(rows, g_gameRows, sizeof(g_gameRows));
+    return true;
+}
+
+bool GetLaserShotStart(float worldPoint[3])
+{
+    float unused[3];
+    if (!GetLaserAimPoint(unused)) // the same freshness
+        return false;
+    worldPoint[0] = g_startX.load(std::memory_order_relaxed);
+    worldPoint[1] = g_startY.load(std::memory_order_relaxed);
+    worldPoint[2] = g_startZ.load(std::memory_order_relaxed);
+    return true;
 }
 
 bool GetLaserAimPoint(float worldPoint[3])

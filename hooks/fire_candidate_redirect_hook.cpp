@@ -121,6 +121,15 @@ struct ThisCallTrampoline
         Vec3 handOffset{};
         bool fromHand = GetControllerOriginOffset(&handOffset);
         Vec3 newOrigin = fromHand ? origin + handOffset : origin;
+        // From the laser's own start when it's running (2026-11-01): the game's origin isn't the head, so origin + the
+        // hand's offset from the head landed about a metre from the hand (live: {343.59, 70.56, 206.28}, the hand at
+        // {344.57, 70.72, 206.14}).
+        float laserStart[3];
+        if (GetLaserShotStart(laserStart))
+        {
+            newOrigin = Vec3{laserStart[0], laserStart[1], laserStart[2]};
+            fromHand = true;
+        }
         Vec3 newEnd = newOrigin + controllerDir * rayLength;
         // SHOTS FOLLOW THE LASER (2026-10-15): aimed from the hand at the laser's point (hooks/laser_raycast.h -- its
         // hit, or its end), so a shot lands on the dot, whatever small difference the shot's own origin or the

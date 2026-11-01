@@ -44,6 +44,8 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
 
 // Any thread: whether the weapon is currently in the left hand (the weapon drive mirrors its grip offset).
 bool IsWeaponHandLeft();
+// Any thread: whether both hands hold the weapon (the off hand's arm then stays on the gun).
+bool IsWeaponTwoHanded();
 
 // Reads the game's own key bindings (Documents\MOHW\settings\PROF_SAVE_profile) now rather than at the first holster
 // grab, so that grab never waits on disk. Called once from InitVrInput.

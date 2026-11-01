@@ -118,6 +118,8 @@
     <ClCompile Include="..\hooks\fire_candidate_redirect_hook.cpp" />
     <ClCompile Include="..\hooks\controller_trigger_hook.cpp" />
     <ClCompile Include="..\hooks\camera_matrix_test_hook.cpp" />
+    <ClCompile Include="..\hooks\first_person_rig.cpp" />
+    <ClCompile Include="..\openvr_direct\vr_reload.cpp" />
     <ClCompile Include="..\sdk\settings.cpp" />
     <ClCompile Include="..\third_party\minhook\src\buffer.c" />
     <ClCompile Include="..\third_party\minhook\src\hook.c" />
@@ -170,6 +172,9 @@
     <ClInclude Include="..\hooks\fire_candidate_redirect_hook.h" />
     <ClInclude Include="..\hooks\controller_trigger_hook.h" />
     <ClInclude Include="..\hooks\camera_matrix_test_hook.h" />
+    <ClInclude Include="..\hooks\first_person_rig.h" />
+    <ClInclude Include="..\openvr_direct\vr_reload.h" />
+    <ClInclude Include="..\sdk\rigid.h" />
     <ClInclude Include="..\shared\ipc_protocol.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

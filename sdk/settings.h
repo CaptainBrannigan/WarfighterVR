@@ -189,6 +189,51 @@ float GetTwoHandReach();
 // the gun, the laser and shots, the dots, holsters, two-handed aim (openvr_direct/vr_input.cpp). Mirrored for the left
 // hand. HandOffsetRight/Up/Forward, HandOffsetPitch/Yaw/Roll, default 0.
 void GetHandOffset(float position[3], float rotationDeg[3]);
+// The arms on the controllers (hooks/first_person_rig.cpp), default on. The left hand's own calibration: position
+// {right, up, forward} (m) and rotation {pitch, yaw, roll} (deg) on its controller. ArmIkEnabled,
+// LeftHandIkRight/Up/Forward, LeftHandIkPitch/Yaw/Roll.
+bool GetArmIkEnabled();
+void GetLeftHandIkOffset(float position[3], float rotationDeg[3]);
+// The rest of the arm IK (hooks/first_person_rig.cpp). rightHand: added to where the gun puts the weapon hand, in the
+// gun's rest view, turned about the hand's centre; shoulder: each shoulder ([0] left, [1] right) moved {outward, up,
+// forward}, as the game's sit a long way from a hand on the controller, and not evenly: the right sits further back.
+// naturalElbow = AvP's elbow model, its angle limits below; off, the
+// plain IK with elbowSwivelDeg. Every field is a row of the menu's "Arm IK" group.
+struct ArmIkSettings
+{
+    float rightHandPos[3], rightHandDeg[3];
+    float shoulder[2][3];
+    bool naturalElbow;
+    float elbowSwivelDeg;
+    float follow, inKneeDeg, inMaxDeg, inNearBody, outKneeDeg, outMaxDeg, smoothingMs;
+    float forearmTwist;
+};
+ArmIkSettings GetArmIkSettings();
+// The whole first-person body (hooks/camera_matrix_test_hook.cpp MoveBody): moved {right, up, forward} along the level
+// body frame, metres, and BodyUpright keeps it from tilting with the view. BodyOffsetRight/Up/Forward, BodyUpright.
+void GetBodyOffset(float out[3]);
+bool GetBodyUpright();
+// The rig measured from the game's 30 Hz camera, so it doesn't jitter on head turns (hooks/camera_matrix_test_hook.cpp
+// AlignRigCamera). StabilizeRig, default on.
+bool GetStabilizeRig();
+// Draws every grab zone in the headset, for setting them up (openvr_direct/vr_hands.cpp). ShowGrabZones, default off.
+bool GetShowGrabZones();
+// Manual reload (openvr_direct/vr_reload.h), default on, and the pouch: head-relative like the holsters, with its grab
+// radius. ManualReloadEnabled, MagazinePouchX/Y/Z, MagazinePouchRadius.
+bool GetManualReloadEnabled();
+void GetMagazinePouchOffset(float out[3]);
+float GetMagazinePouchRadius();
+// The equipped weapon's magazine (per weapon, SetWeaponProfile), metres from its seat in the gun, in the gun's frame
+// {right, up, forward}. grabOffset / grabHalfSize: the box the off hand grabs it in. aimPoint: what the magazine's top
+// points at. range: how far out it starts turning, alpha 0; lockRange: alpha 1, its horizontal locks and only vertical
+// movement is left; seatRange: how close to the seat, along that line, counts as in.
+struct MagazineProfile
+{
+    float grabOffset[3], grabHalfSize[3];
+    float aimPoint[3];
+    float range, lockRange, seatRange;
+};
+MagazineProfile GetMagazineProfile();
 // Secondary grip offset (per weapon, SetWeaponProfile): where the off hand holds relative to the barrel line, metres
 // in the gun's frame (+ right, + up). The two-handed aim targets the off hand's point moved by it, so a hand below the
 // bore (a vertical foregrip) doesn't tilt the gun. SecondaryGripRight / SecondaryGripUp, default 0.
@@ -252,6 +297,8 @@ bool GetHideReticle();
 constexpr int kMaxBodyParts = 32;
 bool GetHideBodyPart(int index);
 void SetBodyPartCountSeen(int count);
+// In VR the game never takes the display in exclusive fullscreen (hooks/present_hook.cpp). KeepGameWindowed, default on.
+bool GetKeepGameWindowed();
 // Moves the HUD rectangle off head-forward: degrees, + = right / up (HudOffsetX / HudOffsetY).
 void GetHudOffsetDeg(float* x, float* y);
 // The HUD's eye separation as a multiple of the rendering IPD (the eye offset the world is drawn with, IpdScale
@@ -305,6 +352,9 @@ bool GetDotsOnlyWithGrip();
 // A grip double-tap holds that hand's bumper (left LB, right RB) for the second press (openvr_direct/vr_input.cpp).
 // GripDoubleTapBumpers, default on.
 bool GetGripDoubleTapBumpers();
+// A double tap of the thumbrest = that hand's bumper (openvr_direct/vr_input.cpp UpdateThumbTap), and with it on, Touch
+// grips no longer double-tap. ThumbTapBumpers, default on.
+bool GetThumbTapBumpers();
 
 // Controller aim offset (sdk/motion_controller_aim.h ApplyControllerAimOffset), degrees in the controller's own frame:
 // + up, + right. Turns the shots and the aim-ray dot, not the gun (and so not the optic dot). ControllerAimUp /

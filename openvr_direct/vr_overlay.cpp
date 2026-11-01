@@ -25,6 +25,7 @@ constexpr const char* kLogFile = "mohwvr_overlay.log";
 // IVROverlay_028 vtable slots, counted from openvr.h's class IVROverlay declaration order.
 constexpr int kCreateOverlayIndex = 1;
 constexpr int kSetOverlayFlagIndex = 11;
+constexpr int kSetOverlayColorIndex = 14;
 constexpr int kSetOverlayTexelAspectIndex = 18; // between SetOverlayFlag (11) and SetOverlayWidthInMeters (22) in that order
 constexpr int kSetOverlayWidthInMetersIndex = 22;
 constexpr int kSetOverlayTransformAbsoluteIndex = 33;
@@ -51,6 +52,7 @@ using PFN_SetOverlayWidthInMeters = int(__thiscall*)(void* self, uint64_t handle
 using PFN_SetOverlayTexelAspect = int(__thiscall*)(void* self, uint64_t handle, float texelAspect);
 using PFN_SetOverlayInputMethod = int(__thiscall*)(void* self, uint64_t handle, int method);
 using PFN_SetOverlayMouseScale = int(__thiscall*)(void* self, uint64_t handle, const float* scale);
+using PFN_SetOverlayColor = int(__thiscall*)(void* self, uint64_t handle, float red, float green, float blue);
 using PFN_SetOverlayRaw = int(__thiscall*)(void* self, uint64_t handle, void* buffer, uint32_t width, uint32_t height,
                                            uint32_t bytesPerPixel);
 using PFN_PollNextOverlayEvent = bool(__thiscall*)(void* self, uint64_t handle, void* event, uint32_t size);
@@ -123,6 +125,7 @@ PFN_SetOverlayTexelAspect g_setTexelAspect = nullptr;
 PFN_SetOverlayTransformAbsolute g_setTransform = nullptr;
 PFN_ShowHideOverlay g_show = nullptr;
 PFN_ShowHideOverlay g_hide = nullptr;
+PFN_SetOverlayColor g_setColor = nullptr;
 int g_trackingUniverse = 1;
 // The sight dots are ready (handles created, thread started); g_dotHandles below are written before it is set.
 std::atomic<bool> g_sightReady{false};
@@ -649,8 +652,178 @@ void UploadDotColour(int dot, bool green)
         UploadDotTexture(g_dotHandles[dot], 255, 30, 30);
 }
 
+// ---- The grab zone view ----
+// White textures tinted with SetOverlayColor: a ring with its name for a sphere (a sphere's outline from any side), a
+// box face, a dot, a band. Made the first time a slot shows.
+enum class DebugLook
+{
+    Ring,
+    Face,
+    Dot,
+    Band,
+};
+struct DebugSlot
+{
+    const char* key;
+    DebugLook look;
+    const char* label;
+    float r, g, b;
+};
+const DebugSlot kDebugSlots[kGrabDebugSlotCount] = {
+    {"mohwvr.zone0", DebugLook::Ring, "Stomach L", 0.3f, 0.8f, 1.0f},
+    {"mohwvr.zone1", DebugLook::Ring, "Stomach R", 0.3f, 0.8f, 1.0f},
+    {"mohwvr.zone2", DebugLook::Ring, "Hip L", 0.3f, 0.8f, 1.0f},
+    {"mohwvr.zone3", DebugLook::Ring, "Hip R", 0.3f, 0.8f, 1.0f},
+    {"mohwvr.zone4", DebugLook::Ring, "Chest", 0.3f, 0.8f, 1.0f},
+    {"mohwvr.zone5", DebugLook::Ring, "L shoulder", 0.3f, 0.8f, 1.0f},
+    {"mohwvr.zone6", DebugLook::Ring, "R shoulder", 0.3f, 0.8f, 1.0f},
+    {"mohwvr.pouch", DebugLook::Ring, "Mag pouch", 1.0f, 0.6f, 0.1f},
+    {"mohwvr.box0", DebugLook::Face, nullptr, 1.0f, 0.9f, 0.2f},
+    {"mohwvr.box1", DebugLook::Face, nullptr, 1.0f, 0.9f, 0.2f},
+    {"mohwvr.box2", DebugLook::Face, nullptr, 1.0f, 0.9f, 0.2f},
+    {"mohwvr.box3", DebugLook::Face, nullptr, 1.0f, 0.9f, 0.2f},
+    {"mohwvr.box4", DebugLook::Face, nullptr, 1.0f, 0.9f, 0.2f},
+    {"mohwvr.box5", DebugLook::Face, nullptr, 1.0f, 0.9f, 0.2f},
+    {"mohwvr.turn", DebugLook::Ring, "Turn range", 0.5f, 0.5f, 1.0f},
+    {"mohwvr.lock", DebugLook::Ring, "Lock", 1.0f, 0.3f, 1.0f},
+    {"mohwvr.seat", DebugLook::Dot, nullptr, 1.0f, 1.0f, 1.0f},
+    {"mohwvr.aim", DebugLook::Dot, nullptr, 1.0f, 0.2f, 0.2f},
+    {"mohwvr.twohand", DebugLook::Band, nullptr, 0.3f, 1.0f, 0.6f},
+};
+uint64_t g_debugHandles[kGrabDebugSlotCount] = {}; // written once before g_sightReady
+GrabDebugShape g_debugShapes[kGrabDebugSlotCount]; // guarded by g_sightMutex
+float g_debugHead[3] = {};                         // guarded by g_sightMutex
+bool g_debugDirty = false;                         // guarded by g_sightMutex
+
+// The label, white, into a square RGBA texture, centred: GDI text on black, its coverage taken as alpha.
+void DrawDebugLabel(std::vector<uint8_t>& rgba, int size, const char* text)
+{
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = size;
+    bi.bmiHeader.biHeight = -size;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    HDC dc = CreateCompatibleDC(nullptr);
+    uint8_t* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, reinterpret_cast<void**>(&bits), nullptr, 0);
+    if (dc && bitmap && bits)
+    {
+        HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+        HFONT font = CreateFontA(size / 7, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                 CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, "Segoe UI");
+        HGDIOBJ oldFont = SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        RECT r = {0, 0, size, size};
+        DrawTextA(dc, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        GdiFlush();
+        for (int i = 0; i < size * size; ++i)
+            if (bits[i * 4 + 1] > rgba[i * 4 + 3])
+                rgba[i * 4 + 3] = bits[i * 4 + 1];
+        SelectObject(dc, oldFont);
+        SelectObject(dc, oldBitmap);
+        DeleteObject(font);
+    }
+    if (bitmap)
+        DeleteObject(bitmap);
+    if (dc)
+        DeleteDC(dc);
+}
+
+void UploadDebugTexture(int slot)
+{
+    constexpr int kSize = 256;
+    const DebugSlot& d = kDebugSlots[slot];
+    std::vector<uint8_t> rgba(kSize * kSize * 4, 255);
+    for (int y = 0; y < kSize; ++y)
+        for (int x = 0; x < kSize; ++x)
+        {
+            float u = (x + 0.5f) / kSize * 2.0f - 1.0f, v = (y + 0.5f) / kSize * 2.0f - 1.0f;
+            float r = sqrtf(u * u + v * v), edge = fabsf(u) > fabsf(v) ? fabsf(u) : fabsf(v);
+            float alpha = 0.0f;
+            if (d.look == DebugLook::Ring)
+                alpha = r > 1.0f ? 0.0f : (r > 0.965f ? 1.0f : 0.07f);
+            else if (d.look == DebugLook::Face)
+                alpha = edge > 0.96f ? 1.0f : 0.09f;
+            else if (d.look == DebugLook::Dot)
+                alpha = r > 1.0f ? 0.0f : 1.0f;
+            else
+                alpha = fabsf(v) > 0.92f ? 0.9f : 0.16f;
+            rgba[(y * kSize + x) * 4 + 3] = static_cast<uint8_t>(alpha * 255.0f);
+        }
+    if (d.label)
+        DrawDebugLabel(rgba, kSize, d.label);
+    std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+    g_setRaw(g_overlay, g_debugHandles[slot], rgba.data(), kSize, kSize, 4);
+}
+
+void UpdateDebugOverlays(bool shown[kGrabDebugSlotCount], bool uploaded[kGrabDebugSlotCount], int tint[kGrabDebugSlotCount])
+{
+    GrabDebugShape shapes[kGrabDebugSlotCount];
+    float head[3];
+    {
+        std::lock_guard<std::mutex> lock(g_sightMutex);
+        if (!g_debugDirty)
+            return;
+        g_debugDirty = false;
+        memcpy(shapes, g_debugShapes, sizeof(shapes));
+        memcpy(head, g_debugHead, sizeof(head));
+    }
+    for (int i = 0; i < kGrabDebugSlotCount; ++i)
+    {
+        const uint64_t handle = g_debugHandles[i];
+        if (handle == 0)
+            continue;
+        const GrabDebugShape& s = shapes[i];
+        float m[12];
+        bool placed = s.visible && s.width > 0.0f && s.height > 0.0f;
+        if (placed && s.billboard)
+            placed = BillboardMatrix(s.pos, head, m);
+        else if (placed)
+            memcpy(m, s.m, sizeof(m));
+        if (!placed)
+        {
+            if (shown[i])
+            {
+                std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+                g_hide(g_overlay, handle);
+                shown[i] = false;
+            }
+            continue;
+        }
+        if (!uploaded[i])
+        {
+            UploadDebugTexture(i);
+            uploaded[i] = true;
+        }
+        std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+        const int wanted = s.active ? 1 : 0;
+        if (tint[i] != wanted)
+        {
+            const DebugSlot& d = kDebugSlots[i];
+            g_setColor(g_overlay, handle, s.active ? 0.15f : d.r, s.active ? 1.0f : d.g, s.active ? 0.25f : d.b);
+            tint[i] = wanted;
+        }
+        g_setWidth(g_overlay, handle, s.width);
+        if (g_setTexelAspect)
+            g_setTexelAspect(g_overlay, handle, s.width / s.height);
+        g_setTransform(g_overlay, handle, g_trackingUniverse, m);
+        if (!shown[i])
+        {
+            g_show(g_overlay, handle);
+            shown[i] = true;
+        }
+    }
+}
+
 void SightThreadProc()
 {
+    bool debugShown[kGrabDebugSlotCount] = {}, debugUploaded[kGrabDebugSlotCount] = {};
+    int debugTint[kGrabDebugSlotCount];
+    for (int& t : debugTint)
+        t = -1;
     bool green[kDotCount] = {GetOpticDotGreen(), GetRayDotGreen()};
     for (int d = 0; d < kDotCount; ++d)
         UploadDotColour(d, green[d]);
@@ -664,6 +837,7 @@ void SightThreadProc()
     for (;;)
     {
         WaitForSingleObject(g_sightEvent, 200);
+        UpdateDebugOverlays(debugShown, debugUploaded, debugTint);
         WheelPlacement wheel;
         BeamPlacement beam;
         {
@@ -889,6 +1063,19 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
     SetEvent(g_sightEvent);
 }
 
+void UpdateGrabDebug(const GrabDebugShape shapes[kGrabDebugSlotCount], const float headPos[3])
+{
+    if (!g_sightReady.load(std::memory_order_acquire))
+        return;
+    {
+        std::lock_guard<std::mutex> lock(g_sightMutex);
+        memcpy(g_debugShapes, shapes, sizeof(g_debugShapes));
+        memcpy(g_debugHead, headPos, sizeof(g_debugHead));
+        g_debugDirty = true;
+    }
+    SetEvent(g_sightEvent);
+}
+
 void UpdateWheelOverlay(bool visible, const Vec3& centre, const Vec3& right, const Vec3& up, float angle, float radius,
                         float thickness, float opacity)
 {
@@ -1005,6 +1192,14 @@ bool InitVrOverlay(void* overlay, int trackingUniverse)
                   static_cast<unsigned long long>(g_beamHandle));
         if (beamErr != 0)
             g_beamHandle = 0;
+        // The grab zone view: optional too.
+        g_setColor = reinterpret_cast<PFN_SetOverlayColor>(vtable[kSetOverlayColorIndex]);
+        for (int i = 0; i < kGrabDebugSlotCount; ++i)
+        {
+            std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+            if (createOverlay(overlay, kDebugSlots[i].key, kDebugSlots[i].key, &g_debugHandles[i]) != 0)
+                g_debugHandles[i] = 0;
+        }
         g_sightEvent = CreateEventA(nullptr, FALSE, FALSE, nullptr);
         g_sightReady.store(true, std::memory_order_release);
         std::thread(SightThreadProc).detach();

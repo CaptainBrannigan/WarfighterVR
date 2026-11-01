@@ -20,6 +20,7 @@
 #include "eye_matched_fov.h"
 #include "../openvr_direct/openvr_direct.h"
 #include "../sdk/d3d_util.h"
+#include "../sdk/settings.h"
 #include <atomic>
 #include <thread>
 #include <mutex>
@@ -32,11 +33,14 @@ constexpr wchar_t kDummyWindowClass[] = L"MohwVrDummyWindow";
 
 using PresentFn = HRESULT(__stdcall*)(IDXGISwapChain*, UINT, UINT);
 using ResizeBuffersFn = HRESULT(__stdcall*)(IDXGISwapChain*, UINT, UINT, UINT, DXGI_FORMAT, UINT);
+using SetFullscreenStateFn = HRESULT(__stdcall*)(IDXGISwapChain*, BOOL, IDXGIOutput*);
 
 PresentFn g_originalPresent = nullptr;
 ResizeBuffersFn g_originalResizeBuffers = nullptr;
+SetFullscreenStateFn g_originalSetFullscreenState = nullptr;
 void* g_presentAddress = nullptr;
 void* g_resizeBuffersAddress = nullptr;
+void* g_setFullscreenStateAddress = nullptr;
 
 // FIX (2026-08-23): the left eye's cross-process copy source used to be
 // the REAL swap-chain backbuffer directly (self->GetBuffer(0)). Confirmed
@@ -237,11 +241,43 @@ void LogD3DFailure(IDXGISwapChain* self, const char* what, HRESULT hr)
     }
 }
 
+// NO EXCLUSIVE FULLSCREEN (2026-11-01): the game takes the display in exclusive fullscreen (GstRender.FullscreenEnabled
+// 1), and the Steam Link stream resets line up with its mode switches: at launch (SteamVR takes focus, clicking back into
+// the game switches 1280x720 -> 3840x2160) and at exit. Each stops the GPU for about half a second, so the compositor
+// times out on the driver's sync texture and vrlink gets no video ("Timed out waiting for another accepted video
+// packet"; its NVENC reconfigure errors follow from that recovery). In VR the desktop window doesn't matter, so the game
+// stays windowed: the request is answered S_OK and not carried out (setting KeepGameWindowed). These hooks only exist
+// with VR on, so desktop play is untouched.
+HRESULT __stdcall Hooked_SetFullscreenState(IDXGISwapChain* self, BOOL fullscreen, IDXGIOutput* target)
+{
+    static std::atomic<int> logs{0};
+    bool refuse = fullscreen && GetKeepGameWindowed();
+    if (logs.fetch_add(1) < 12)
+        MOHW_LOG(kLogFile, "SetFullscreenState(%s) from the game%s", fullscreen ? "fullscreen" : "windowed",
+                 refuse ? ", refused: stays windowed" : "");
+    if (refuse)
+        return S_OK;
+    return g_originalSetFullscreenState(self, fullscreen, target);
+}
+
+// A swap chain created fullscreen, or one that went there before the hook was in.
+void LeaveExclusiveFullscreen(IDXGISwapChain* self)
+{
+    BOOL fullscreen = FALSE;
+    if (!g_originalSetFullscreenState || !GetKeepGameWindowed() || FAILED(self->GetFullscreenState(&fullscreen, nullptr)) ||
+        !fullscreen)
+        return;
+    HRESULT hr = g_originalSetFullscreenState(self, FALSE, nullptr);
+    MOHW_LOG(kLogFile, "swap chain was in exclusive fullscreen: left it (0x%08X)", static_cast<unsigned>(hr));
+}
+
 HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT flags)
 {
     PaceToDisplayFrequency();
 
     long long n = ++g_presentCalls;
+    if (n == 1 || n % 300 == 0)
+        LeaveExclusiveFullscreen(self);
     if (n == 1 || n % 300 == 0)
         MOHW_LOG(kLogFile, "Present #%lld self=%p syncInterval=%u flags=%u", n, static_cast<void*>(self),
                   syncInterval, flags);
@@ -416,7 +452,7 @@ HRESULT __stdcall Hooked_ResizeBuffers(IDXGISwapChain* self, UINT bufferCount, U
 // then tears everything down. The vtable is shared per-driver across every
 // swapchain instance of the same kind, so patching it here affects the
 // game's own real swapchain too -- we never need to intercept its creation.
-bool GetRealSwapChainVtableSlots(void** outPresent, void** outResizeBuffers)
+bool GetRealSwapChainVtableSlots(void** outPresent, void** outResizeBuffers, void** outSetFullscreenState)
 {
     MOHW_LOG(kLogFile, "GetRealSwapChainVtableSlots: creating dummy window");
     WNDCLASSEXW wc{};
@@ -464,6 +500,7 @@ bool GetRealSwapChainVtableSlots(void** outPresent, void** outResizeBuffers)
     void** vtable = *reinterpret_cast<void***>(swapChain);
     *outPresent = vtable[8];        // IDXGISwapChain::Present
     *outResizeBuffers = vtable[13]; // IDXGISwapChain::ResizeBuffers
+    *outSetFullscreenState = vtable[10]; // IDXGISwapChain::SetFullscreenState
 
     swapChain->Release();
     context->Release();
@@ -487,7 +524,8 @@ void InstallThreadProc()
 {
     void* presentAddr = nullptr;
     void* resizeBuffersAddr = nullptr;
-    if (!GetRealSwapChainVtableSlots(&presentAddr, &resizeBuffersAddr))
+    void* setFullscreenStateAddr = nullptr;
+    if (!GetRealSwapChainVtableSlots(&presentAddr, &resizeBuffersAddr, &setFullscreenStateAddr))
         return;
 
     MH_STATUS initStatus = MH_Initialize();
@@ -532,6 +570,15 @@ void InstallThreadProc()
 
     MOHW_LOG(kLogFile, "Present hook installed @ %p, ResizeBuffers hook installed @ %p", g_presentAddress,
               g_resizeBuffersAddress);
+
+    // Not fatal: without it the game just switches modes as before.
+    s = MH_CreateHook(setFullscreenStateAddr, &Hooked_SetFullscreenState,
+                      reinterpret_cast<void**>(&g_originalSetFullscreenState));
+    if (s == MH_OK)
+        s = MH_EnableHook(setFullscreenStateAddr);
+    if (s == MH_OK)
+        g_setFullscreenStateAddress = setFullscreenStateAddr;
+    MOHW_LOG(kLogFile, "SetFullscreenState hook @ %p: %s", setFullscreenStateAddr, MH_StatusToString(s));
 }
 
 } // namespace
