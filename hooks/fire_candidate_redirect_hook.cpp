@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 
 namespace mohw {
 namespace {
@@ -44,6 +45,69 @@ FireCandidateFn g_originalFireCandidate = nullptr;
 void* g_hookAddress = nullptr;
 
 int g_callCount = 0;
+
+thread_local bool t_raysPlaced = false; // SetRaysAlreadyPlaced
+
+// WHAT THIS FUNCTION SEES (live 2026-11-01): it tests one ray against one soldier's hit capsules, inside every
+// GameWorld::RayCast that can hit soldiers, so it's handed each cast's own segment, once per soldier near it:
+// - the client bullet's and the laser's casts, already where they belong (SetRaysAlreadyPlaced). Sending them to the laser's
+//   start kept each one's length, so a slow-motion bullet's 1.9 m segment beside a soldier tested the 1.9 m at the hand,
+//   and the laser's second 11.6 m step tested the first again: nothing past the first step could hit a soldier.
+// - a copy of the player's shot that steps natively along the game's aim, 11.6 m a tick from the soldier's eye, and no
+//   RayCast of ours. Followed here from step to step: each runs on the laser's line as far along as the shot has come.
+// - other soldiers' shots, left alone while the laser runs.
+struct ShotStep
+{
+    Vec3 from, to;
+    float travelled;
+};
+constexpr int kShotSteps = 32;
+std::mutex g_shotStepsMutex;
+ShotStep g_shotSteps[kShotSteps];
+int g_nextShotStep = 0;
+
+bool SamePoint(const Vec3& a, const Vec3& b)
+{
+    constexpr float kSameMetres = 0.01f;
+    Vec3 d = a - b;
+    return d.Dot(d) < kSameMetres * kSameMetres;
+}
+
+// False for a shot that isn't the player's.
+bool FollowPlayerShot(const Vec3& from, const Vec3& to, float* travelled)
+{
+    constexpr float kMuzzleFromEyeMetres = 1.5f;
+    std::lock_guard<std::mutex> lock(g_shotStepsMutex);
+    float carried = -1.0f;
+    for (const ShotStep& step : g_shotSteps)
+    {
+        if (SamePoint(step.from, from) && SamePoint(step.to, to))
+        {
+            *travelled = step.travelled; // the same step, for the next soldier near it
+            return true;
+        }
+        if (SamePoint(step.to, from))
+        {
+            Vec3 length = step.to - step.from;
+            carried = step.travelled + sqrtf(length.Dot(length));
+        }
+    }
+    if (carried < 0.0f)
+    {
+        float eye[3];
+        if (GetGameCameraPosition(eye))
+        {
+            Vec3 fromEye = from - Vec3{eye[0], eye[1], eye[2]};
+            if (fromEye.Dot(fromEye) > kMuzzleFromEyeMetres * kMuzzleFromEyeMetres)
+                return false;
+        }
+        carried = 0.0f;
+    }
+    g_shotSteps[g_nextShotStep] = ShotStep{from, to, carried};
+    g_nextShotStep = (g_nextShotStep + 1) % kShotSteps;
+    *travelled = carried;
+    return true;
+}
 
 bool SehSafeTouch(const void* addr)
 {
@@ -99,6 +163,12 @@ struct ThisCallTrampoline
             return result;
         }
 
+        float laserStart[3];
+        const bool fromLaser = GetLaserShotStart(laserStart);
+        float travelled = 0.0f;
+        if (t_raysPlaced || (fromLaser && !FollowPlayerShot(origin, end, &travelled)))
+            return g_originalFireCandidate(param1, param2, param3);
+
         LaserNoteShotDirection(direction.x, direction.y, direction.z); // hooks/laser_raycast.h: the camera's forward sign
 
         Vec3 controllerDir;
@@ -124,13 +194,12 @@ struct ThisCallTrampoline
         // From the laser's own start when it's running (2026-11-01): the game's origin isn't the head, so origin + the
         // hand's offset from the head landed about a metre from the hand (live: {343.59, 70.56, 206.28}, the hand at
         // {344.57, 70.72, 206.14}).
-        float laserStart[3];
-        if (GetLaserShotStart(laserStart))
+        if (fromLaser)
         {
             newOrigin = Vec3{laserStart[0], laserStart[1], laserStart[2]};
             fromHand = true;
         }
-        Vec3 newEnd = newOrigin + controllerDir * rayLength;
+        Vec3 aimDirection = controllerDir;
         // SHOTS FOLLOW THE LASER (2026-10-15): aimed from the hand at the laser's point (hooks/laser_raycast.h -- its
         // hit, or its end), so a shot lands on the dot, whatever small difference the shot's own origin or the
         // spread mapping would otherwise leave. Without a running laser, the controller's direction as before.
@@ -143,10 +212,13 @@ struct ThisCallTrampoline
             // Only a point AHEAD along the controller: a laser cast that went wrong (live 2026-10-15 18:17, one cast
             // behind the player) must not turn the shot around -- the controller's direction then, like the tracer.
             if (toPointLength > 0.05f && toPoint.Dot(controllerDir) > 0.0f)
-                newEnd = newOrigin + toPoint * (rayLength / toPointLength);
+                aimDirection = toPoint * (1.0f / toPointLength);
             else
                 onLaser = false;
         }
+        if (fromLaser)
+            newOrigin = newOrigin + aimDirection * travelled;
+        Vec3 newEnd = newOrigin + aimDirection * rayLength;
 
         originPtr[0] = newOrigin.x;
         originPtr[1] = newOrigin.y;
@@ -190,6 +262,11 @@ struct ThisCallTrampoline
 };
 
 } // namespace
+
+void SetRaysAlreadyPlaced(bool placed)
+{
+    t_raysPlaced = placed;
+}
 
 bool InstallFireCandidateRedirectHook()
 {

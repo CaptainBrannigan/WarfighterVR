@@ -402,8 +402,13 @@ void __fastcall HookedPlacePart(void* entry, void* /*edx*/, int firstPerson, int
 // knowing this function leaves ECX alone: FUN_0083B130 calls it and then FUN_00831170 with no ECX of its own, so a C++
 // detour, free to use ECX, crashed there (live 2026-11-01, fault at 0x00831170). This touches only EAX, which the original
 // overwrites first thing. Only FUN_0083B130's own calls: FUN_00835620 divides by the time.
+// The same code also runs on the server's copy of the firing (ticked by FUN_00BB3C90), which is no object of the client's
+// and goes by the firing data (+0x94) the two share, for the moment around a seat only: left at full length it finished
+// seconds after the magazine went in.
 uintptr_t g_reloadTimeCallersFirst = 0;
 volatile uintptr_t g_instantReloadFiring = 0;
+volatile uintptr_t g_instantReloadData = 0;
+volatile uintptr_t g_otherReloadFiring = 0;
 void* g_originalReloadTime = nullptr;
 void* g_reloadTimeAddress = nullptr;
 
@@ -415,7 +420,12 @@ __declspec(naked) void ReloadTimeStub()
         cmp eax, 0xCA6 // FUN_0083B130's size
         jae original
         cmp ecx, g_instantReloadFiring
+        je instant
+        mov eax, dword ptr [ecx + 0x94]
+        cmp eax, g_instantReloadData
         jne original
+        mov g_otherReloadFiring, ecx
+    instant:
         fldz
         ret
     original:
@@ -1109,9 +1119,17 @@ void AlignRigToBones(Rigid* rigCamera)
                                  average[0][2][i] * rows[0][2][j];
 }
 
-void SetInstantReloadFiring(uintptr_t firing)
+void SetInstantReload(uintptr_t firing, uintptr_t otherFiringsData)
 {
     g_instantReloadFiring = firing;
+    g_instantReloadData = otherFiringsData;
+    if (!otherFiringsData)
+        g_otherReloadFiring = 0;
+}
+
+uintptr_t GetOtherInstantReloadFiring()
+{
+    return g_otherReloadFiring;
 }
 
 void NoteBodyBatch(const unsigned char* batch)

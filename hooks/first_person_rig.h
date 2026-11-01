@@ -29,8 +29,11 @@ void RemoveFirstPersonRigHooks();
 // rig's bones were posed against, read from the skeleton's camera bone. Logs how far the rig wobbles against it.
 void AlignRigToBones(Rigid* rigCamera);
 
-// Submit thread: the WeaponFiring whose reloads take no time, 0 for none (openvr_direct/vr_reload.cpp).
-void SetInstantReloadFiring(uintptr_t firing);
+// Submit thread: the WeaponFiring whose reloads take no time, 0 for none (openvr_direct/vr_reload.cpp), and the firing
+// data (+0x94) of any other firing that reloads in no time just now, 0 for none: the server's copy, around a seat.
+void SetInstantReload(uintptr_t firing, uintptr_t otherFiringsData);
+// The other firing that last took a reload that way, 0 for none since the data was cleared.
+uintptr_t GetOtherInstantReloadFiring();
 
 // Every first-person body batch, from the camera hook, before anything rewrites it: settles which skeleton is the
 // first-person one, by matching the batch's bones against what the game read for each soldier.

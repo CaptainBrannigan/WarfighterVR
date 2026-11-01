@@ -2,6 +2,7 @@
 
 #include "aiming_controller_hook.h"
 #include "bullet_raycast_redirect_hook.h"
+#include "fire_candidate_redirect_hook.h"
 #include "render_pose_stamp.h"
 #include "weapon_identity.h"
 #include "../sdk/logging.h"
@@ -171,6 +172,14 @@ unsigned int SafeRayCast(RayCastFn fn, void* world, float* start, float* end, vo
 
 } // namespace
 
+bool GetGameCameraPosition(float worldPoint[3])
+{
+    worldPoint[0] = g_gameCamX.load(std::memory_order_relaxed);
+    worldPoint[1] = g_gameCamY.load(std::memory_order_relaxed);
+    worldPoint[2] = g_gameCamZ.load(std::memory_order_relaxed);
+    return worldPoint[0] != 0.0f || worldPoint[1] != 0.0f || worldPoint[2] != 0.0f;
+}
+
 void LaserCaptureGameCamera(const float* gameTransform)
 {
     float m[16];
@@ -302,6 +311,7 @@ void LaserOnCommit(const float* renderTransform)
     int casts = 0;
     bool ok = true;
     float from = startOffset;
+    SetRaysAlreadyPlaced(true);
     while (from < range && casts < kMaxCasts && ok && best < 0.0f)
     {
         float to = from + (from < 10.0f * kBulletStep * scale ? kBulletStep * scale : kFarStep * scale);
@@ -358,6 +368,7 @@ void LaserOnCommit(const float* renderTransform)
         }
         from = to;
     }
+    SetRaysAlreadyPlaced(false);
 
     // What it hit, every 2 s (to check the dot against the scene).
     static unsigned long long nextHitLogMs = 0;

@@ -24,6 +24,7 @@ constexpr const char* kLogFile = "mohwvr_reload.log";
 // back to 0xB until the magazine is full (FUN_00830260). (2026-11-01: this first cut 0xD / 0xE short, which aren't the
 // reload.)
 constexpr uint32_t kWeaponFiring = 0x44C;
+constexpr uint32_t kFiringData = 0x94;
 constexpr uint32_t kFiringState = 0xB0;
 constexpr uint32_t kFiringTimer = 0xC4;
 constexpr uint32_t kFiringAmmoTable = 0x134;
@@ -38,7 +39,7 @@ constexpr unsigned long long kAfterSeatMs = 6000;      // after a seat, a reload
 struct Firing
 {
     int state = 0, loaded = 0, reserve = 0;
-    uintptr_t object = 0;
+    uintptr_t object = 0, data = 0;
 };
 
 // SEH-safe.
@@ -53,6 +54,7 @@ bool ReadFiring(Firing* out)
         if (!firing)
             return false;
         out->object = firing;
+        out->data = *reinterpret_cast<const uintptr_t*>(firing + kFiringData);
         out->state = *reinterpret_cast<const int*>(firing + kFiringState);
         const char* table = *reinterpret_cast<const char* const*>(firing + kFiringAmmoTable);
         const int mode = *reinterpret_cast<const int*>(firing + kFiringMode);
@@ -71,6 +73,20 @@ void EndStateNow(uintptr_t firing)
     __try
     {
         *reinterpret_cast<float*>(firing + kFiringTimer) = 0.0f;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
+
+// The firing's reload now, if it's in one: an empty magazine's reload waits longer, with no reload time of its own.
+void EndReloadNow(uintptr_t firing)
+{
+    __try
+    {
+        const int state = *reinterpret_cast<const int*>(firing + kFiringState);
+        if (state >= kStateReloadFirst && state <= kStateReloadLast)
+            *reinterpret_cast<float*>(firing + kFiringTimer) = 0.0f;
     }
     __except (EXCEPTION_EXECUTE_HANDLER)
     {
@@ -98,6 +114,7 @@ bool g_ourReloadStarted = false;
 unsigned long long g_ourReloadStartBy = 0;
 unsigned long long g_seatedAt = 0; // a new magazine's seat
 bool g_wasReloading = false;
+uintptr_t g_otherFiringLogged = 0;
 
 void SetState(MagazineState state, const char* why)
 {
@@ -191,8 +208,10 @@ void Seat()
     if (!g_heldIsNew)
         return;
     Firing f{};
-    if (ReadFiring(&f))
+    const bool haveFiring = ReadFiring(&f);
+    if (haveFiring)
         MOHW_LOG(kLogFile, "ammo at the seat: %d in the magazine, %d in reserve", f.loaded, f.reserve);
+    SetInstantReload(haveFiring ? f.object : 0, haveFiring ? f.data : 0);
     int dik = SetGameActionKey("ConceptReload", true);
     if (dik < 0)
     {
@@ -257,7 +276,16 @@ void UpdateManualReload(const HandInput hands[2], int weaponHand, bool haveHead,
     g_weaponGeneration = generation;
     Firing firing{};
     const bool haveFiring = available && ReadFiring(&firing);
-    SetInstantReloadFiring(haveFiring ? firing.object : 0);
+    SetInstantReload(haveFiring ? firing.object : 0, haveFiring && now < g_ourReloadStartBy ? firing.data : 0);
+    const uintptr_t otherFiring = GetOtherInstantReloadFiring();
+    if (otherFiring)
+    {
+        EndReloadNow(otherFiring);
+        if (otherFiring != g_otherFiringLogged)
+            MOHW_LOG(kLogFile, "the server's firing %p takes the reload too, %llu ms after the seat",
+                     reinterpret_cast<void*>(otherFiring), now - g_seatedAt);
+    }
+    g_otherFiringLogged = otherFiring;
     if (!available)
         return;
     state = static_cast<MagazineState>(g_state.load(std::memory_order_relaxed));
@@ -274,13 +302,13 @@ void UpdateManualReload(const HandInput hands[2], int weaponHand, bool haveHead,
         }
         else if (state == MagazineState::InGun)
         {
-            // A second reload follows ours 1.5-2.6 s later with no input (live 2026-11-01), presumably when the server's
-            // copy of the weapon finishes its own, at full length: not the magazine going anywhere. Only an empty one is.
+            // A reload showed up 1.5-2.6 s after the seat with no input (live 2026-11-01), while the server's copy of the
+            // weapon was on its full-length one, the HUD's ammo changing a second later: not the magazine going anywhere.
+            if (!g_wasReloading)
+                MOHW_LOG(kLogFile, "reload not ours: %d in the magazine, %d in reserve, %llu ms after the seat", f.loaded,
+                         f.reserve, now - g_seatedAt);
             if (now - g_seatedAt >= kAfterSeatMs || f.loaded <= 0)
                 SetState(MagazineState::Out, "the game started a reload");
-            else if (!g_wasReloading)
-                MOHW_LOG(kLogFile, "reload after the seat ignored: %d in the magazine, %d in reserve, %llu ms on", f.loaded,
-                         f.reserve, now - g_seatedAt);
         }
         EndStateNow(f.object);
     }

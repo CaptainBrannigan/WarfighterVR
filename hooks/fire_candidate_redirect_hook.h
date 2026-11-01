@@ -26,4 +26,8 @@ namespace mohw {
 bool InstallFireCandidateRedirectHook();
 void RemoveFireCandidateRedirectHook();
 
+// This thread's GameWorld::RayCast calls carry a ray that's already where it belongs, while true (the .cpp's WHAT THIS
+// FUNCTION SEES): the bullet's segments (hooks/bullet_raycast_redirect_hook.cpp) and the laser's casts.
+void SetRaysAlreadyPlaced(bool placed);
+
 } // namespace mohw

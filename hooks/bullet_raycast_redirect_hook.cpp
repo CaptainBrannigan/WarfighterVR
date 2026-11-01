@@ -7,6 +7,7 @@
 #include "../sdk/vr_math.h"
 #include "../sdk/motion_controller_aim.h"
 #include "../openvr_direct/vr_input.h"
+#include "fire_candidate_redirect_hook.h"
 #include "laser_raycast.h"
 
 #include <windows.h>
@@ -153,6 +154,33 @@ void LogOtherRaycast(const char* ident, const Vec3* start, const Vec3* end, uint
               now - lastFire, name, callerRva, s.x, s.y, s.z, e.x, e.y, e.z, len, dir.x, dir.y, dir.z);
 }
 
+// Where each redirected segment ended, which is where that bullet's next one starts (*end isn't restored): how a later
+// segment is told from a bullet's first, with no bullet to go by here.
+constexpr int kSegmentEnds = 64;
+std::mutex g_segmentEndsMutex;
+Vec3 g_segmentEnds[kSegmentEnds];
+int g_nextSegmentEnd = 0;
+
+bool ContinuesASegment(const Vec3& start)
+{
+    constexpr float kSameMetres = 0.01f;
+    std::lock_guard<std::mutex> lock(g_segmentEndsMutex);
+    for (const Vec3& end : g_segmentEnds)
+    {
+        Vec3 d = start - end;
+        if (d.Dot(d) < kSameMetres * kSameMetres)
+            return true;
+    }
+    return false;
+}
+
+void NoteSegmentEnd(const Vec3& end)
+{
+    std::lock_guard<std::mutex> lock(g_segmentEndsMutex);
+    g_segmentEnds[g_nextSegmentEnd] = end;
+    g_nextSegmentEnd = (g_nextSegmentEnd + 1) % kSegmentEnds;
+}
+
 // Same established __thiscall-hooking workaround as this project's other
 // hooks (engine_function_hook.cpp, shot_redirect_hook.cpp,
 // player_hitscan_redirect_hook.cpp): a non-static member function on a
@@ -212,12 +240,14 @@ struct ThisCallTrampoline
         // THE BULLET'S FIRST SEGMENT STARTS AT THE LASER'S START (2026-11-01): it used to keep the game's own muzzle
         // point, half a metre from the hand and behind the camera, so the laser could clear a wall edge that the
         // bullet's real line hit (live: firing past a wall on the left). Later segments carry on from where this one
-        // ended; a bullet's first is the only one this close to the start.
+        // ended. Being close to the start doesn't make a segment the first: in a breach's slow motion a segment is 1.9 m,
+        // not 11.7, and every one was sent back to the hand, holding each bullet there until the game's time came back
+        // (live 2026-11-01: hundreds of casts a second from the hand, no hits until the slow motion ended).
         constexpr float kFirstSegmentMetres = 3.0f;
         Vec3 movedStart = origin;
         Vec3* castStart = start;
         float laserStart[3];
-        if (GetLaserShotStart(laserStart))
+        if (!ContinuesASegment(origin) && GetLaserShotStart(laserStart))
         {
             Vec3 shotStart{laserStart[0], laserStart[1], laserStart[2]};
             Vec3 fromShotStart = origin - shotStart;
@@ -246,14 +276,17 @@ struct ThisCallTrampoline
         // the trajectory change compounds naturally on the next tick
         // rather than snapping back to the original path.
         *end = newEnd;
+        NoteSegmentEnd(newEnd);
 
         MOHW_LOG(kLogFile, "call #%d: origin={%.3f,%.3f,%.3f} original end={%.3f,%.3f,%.3f} redirected "
                              "end={%.3f,%.3f,%.3f}",
                    n, origin.x, origin.y, origin.z, originalEnd.x, originalEnd.y, originalEnd.z, newEnd.x, newEnd.y,
                    newEnd.z);
 
+        SetRaysAlreadyPlaced(true);
         unsigned int result = g_originalRayCast(param1, ident, rayCastTest, castStart, end, hits, maxHitCount, materialFlags,
                                           flags, excluded);
+        SetRaysAlreadyPlaced(false);
 
         MOHW_LOG(kLogFile, "call #%d: RayCast returned %u hit(s)", n, result);
         if (result > 0) // ground truth for the laser (hooks/laser_raycast.h)

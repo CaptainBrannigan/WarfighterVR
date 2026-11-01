@@ -17,6 +17,9 @@ namespace mohw {
 void LaserCaptureGameCamera(const float* gameTransform);
 void LaserOnCommit(const float* renderTransform);
 
+// Any thread: the game's own camera position from LaserCaptureGameCamera. False before the first one.
+bool GetGameCameraPosition(float worldPoint[3]);
+
 // hooks/fire_candidate_redirect_hook.cpp, every call: the direction it was handed, compared with the camera's view
 // direction (-row 2) and logged only (an automatic flip on disagreement turned the laser around -- that hook also sees calls that
 // aren't the player's shots).

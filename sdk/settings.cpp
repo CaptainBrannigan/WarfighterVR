@@ -182,7 +182,7 @@ const NamedFloat kMagazineProfileKeys[] = {
 };
 std::atomic<float> g_rightHandIkPos[3] = {{0.0f}, {0.0f}, {0.0f}};
 std::atomic<float> g_rightHandIkRotDeg[3] = {{0.0f}, {0.0f}, {0.0f}};
-std::atomic<float> g_shoulderOffset[2][3] = {{{0.0f}, {0.0f}, {0.0f}}, {{0.0f}, {0.0f}, {0.0f}}}; // [0] left, [1] right
+std::atomic<float> g_shoulderOffset[2][3] = {{{0.0f}, {0.0f}, {-0.23f}}, {{0.0f}, {0.0f}, {0.0f}}}; // [0] left, [1] right
 // Saved before the shoulders were separate (2026-11-01): read into both.
 constexpr const char* kOldShoulderKeys[3] = {"ShoulderOutward", "ShoulderUp", "ShoulderForward"};
 std::atomic<bool> g_naturalElbow{true};
@@ -195,7 +195,7 @@ std::atomic<float> g_elbowOutKneeDeg{100.0f};
 std::atomic<float> g_elbowOutMaxDeg{130.0f};
 std::atomic<float> g_elbowSmoothingMs{50.0f};
 std::atomic<float> g_forearmTwist{0.5f};
-std::atomic<float> g_bodyOffset[3] = {{0.0f}, {0.0f}, {0.0f}};
+std::atomic<float> g_bodyOffset[3] = {{0.0f}, {0.0f}, {0.30f}};
 std::atomic<bool> g_bodyUpright{false};
 std::atomic<bool> g_stabilizeRig{true};
 std::atomic<bool> g_showGrabZones{false};

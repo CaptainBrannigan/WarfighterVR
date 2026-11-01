@@ -6,7 +6,7 @@ from inside the game: stereo rendering at the headset's real field of view, head
 controllers for aiming, a gun held in your hand, arms that follow your hands, manual magazine reloads, body holsters,
 and an in-headset settings menu.
 
-**Status: v1.1, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
+**Status: v1.2, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
 hasn't been played all the way through yet; see [Known issues](#known-issues).
 
 ## Requirements
@@ -270,6 +270,7 @@ The rough edges known so far:
   Virtual Desktop. The hand calibration and weapon profiles were tuned on Touch, so other controllers may need
   "Hand offset" / "Hand rotation" and the grip offsets adjusted. Controllers whose grip is bound as a button have no
   analog grip, and on HP, Cosmos and WMR two-handed aiming uses the controller's tip instead of the palm.
+- **Manual reload works but is unrefined,** and has only been tested on a single rifle in a single level.
 - **Manual reload needs a magazine that's a separate part of the gun,** so it doesn't apply to pistols yet. They reload
   as the game does. Taking the magazine out of a gun and switching weapons refills it, and the HUD's count can change
   before you've seated a new magazine.
