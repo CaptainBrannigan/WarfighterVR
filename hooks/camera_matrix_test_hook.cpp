@@ -658,8 +658,12 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     if (patchThis)
     {
         uintptr_t mesh0 = 0, second0 = 0, vtable0 = 0;
-        if (!isBody && ReadInstance(b, 0, &mesh0, &second0, &vtable0) && IsMagazineMesh(mesh0))
-            driven = DriveMagazine(m, rigCamera);
+        if (!isBody && ReadInstance(b, 0, &mesh0, &second0, &vtable0))
+        {
+            NoteWeaponMesh(mesh0);
+            if (IsMagazineMesh(mesh0))
+                driven = DriveMagazine(m, rigCamera);
+        }
         driven = driven || DriveWeaponFromController(m, rigCamera);
     }
     if (!driven)

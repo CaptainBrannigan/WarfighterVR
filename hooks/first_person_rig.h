@@ -29,6 +29,10 @@ void RemoveFirstPersonRigHooks();
 // rig's bones were posed against, read from the skeleton's camera bone. Logs how far the rig wobbles against it.
 void AlignRigToBones(Rigid* rigCamera);
 
+// Render threads, every weapon batch (hooks/camera_matrix_test_hook.cpp): logs once per mesh whether it's skinned to
+// Wep_Mag -- a magazine inside the gun's own mesh, as the pistols have (mohwvr_rig.log).
+void NoteWeaponMesh(uintptr_t mesh);
+
 // Submit thread: the WeaponFiring whose reloads take no time, 0 for none (openvr_direct/vr_reload.cpp), and the firing
 // data (+0x94) of any other firing that reloads in no time just now, 0 for none: the server's copy, around a seat.
 void SetInstantReload(uintptr_t firing, uintptr_t otherFiringsData);

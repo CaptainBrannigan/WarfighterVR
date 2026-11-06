@@ -107,6 +107,8 @@ struct Skeleton
     bool armsValid = false;
     int magBone = -1, magAmmoBone = -1;
     int gunBone = -1;                               // Wep_Root
+    int ikHand[2] = {-1, -1};                       // IK_Joint_LeftHand / IK_Joint_RightHand: where the gun holds the hands
+    int aimBone = -1;                               // Wep_Aim
     int frameBones[3] = {-1, -1, -1};               // kRigFrameBoneNames
     std::vector<std::pair<int, int>> mirroredHands; // each left hand bone and its right one
     int mirrorAxis = 0;                             // the bind pose's left-right axis
@@ -191,6 +193,12 @@ bool ReadSkeleton(uintptr_t skeleton)
             next.magBone = static_cast<int>(i);
         else if (_stricmp(name, "Wep_Mag_Ammo") == 0)
             next.magAmmoBone = static_cast<int>(i);
+        else if (_stricmp(name, "IK_Joint_LeftHand") == 0)
+            next.ikHand[0] = static_cast<int>(i);
+        else if (_stricmp(name, "IK_Joint_RightHand") == 0)
+            next.ikHand[1] = static_cast<int>(i);
+        else if (_stricmp(name, "Wep_Aim") == 0)
+            next.aimBone = static_cast<int>(i);
         char entry[96];
         snprintf(entry, sizeof(entry), " %u=%s", i, name);
         line += entry;
@@ -230,6 +238,8 @@ bool ReadSkeleton(uintptr_t skeleton)
              static_cast<unsigned>(next.mirroredHands.size()), next.mirrorAxis, next.gunBone);
     MOHW_LOG(kLogFile, "magazine bones: Wep_Mag %d, Wep_Mag_Ammo %d; arm IK %s", next.magBone, next.magAmmoBone,
              next.armsValid ? "ready" : "NOT available: arm bones missing, see the names above");
+    MOHW_LOG(kLogFile, "hand sockets: IK_Joint_LeftHand %d, IK_Joint_RightHand %d, Wep_Aim %d", next.ikHand[0],
+             next.ikHand[1], next.aimBone);
     g_magBone.store(next.magBone, std::memory_order_relaxed);
     g_magAmmoBone.store(next.magAmmoBone, std::memory_order_relaxed);
     g_skeleton = std::move(next);
@@ -1203,6 +1213,83 @@ void NoteBodyBatch(const unsigned char* batch)
     }
 }
 
+// WEAPON SOCKETS (2026-11-06): the first-person skeleton carries the points the game's own animation holds the hands on
+// each gun with, IK_Joint_RightHand (the pistol grip) and IK_Joint_LeftHand (the secondary grip), beside Wep_Root (the
+// gun's root, about mid-length and a foot below it), Wep_Aim and Wep_Mag. Once per weapon, 1.5 s after it's equipped
+// (the draw animation over), they're measured in the game's own pose, before the arm IK moves anything, and logged to
+// mohwvr_weaponsockets.log: relative to Wep_Root, and in the camera's frame (right, up, back -- the frame of the
+// weapon grip profile, printed alongside). Under g_skeletonMutex.
+void LogWeaponSockets(float* bones, const Skeleton& sk, const Rigid& rigCamera)
+{
+    constexpr const char* kSocketLog = "mohwvr_weaponsockets.log";
+    static unsigned seenGeneration = ~0u, loggedGeneration = ~0u;
+    static DWORD changedAt = 0;
+    const unsigned generation = GetEquippedWeaponGeneration();
+    if (generation == loggedGeneration)
+        return;
+    const DWORD now = GetTickCount();
+    if (generation != seenGeneration)
+    {
+        seenGeneration = generation;
+        changedAt = now;
+        return;
+    }
+    if (now - changedAt < 1500)
+        return;
+    loggedGeneration = generation;
+    char key[160] = "", display[64] = "";
+    if (!GetEquippedWeapon(key, sizeof(key), display, sizeof(display)))
+        return;
+    const Rigid rigInverse = Inverse(rigCamera);
+    auto inCamera = [&](int bone, float out[3]) {
+        if (bone < 0 || bone >= sk.boneCount || bone >= static_cast<int>(sk.bind.size()))
+            return false;
+        float s[16], p[3];
+        ReadBone(BoneSlot(bones, bone), s);
+        PointThrough(sk.bind[bone].data(), s, p);
+        PointTimes(p, rigInverse, out);
+        return true;
+    };
+    float root[3];
+    if (!inCamera(sk.gunBone, root))
+        return;
+    std::string line;
+    char entry[160];
+    snprintf(entry, sizeof(entry), "Wep_Root at (%.3f, %.3f, %.3f) in the camera", root[0], root[1], root[2]);
+    line += entry;
+    const struct
+    {
+        const char* name;
+        int bone;
+    } points[] = {{"IK_Joint_RightHand", sk.ikHand[1]}, {"IK_Joint_LeftHand", sk.ikHand[0]}, {"Wep_Aim", sk.aimBone},
+                  {"Wep_Mag", sk.magBone}};
+    for (const auto& pt : points)
+    {
+        float q[3];
+        if (!inCamera(pt.bone, q))
+            continue;
+        snprintf(entry, sizeof(entry), "; %s %+.3f %+.3f %+.3f from Wep_Root (camera %.3f, %.3f, %.3f)", pt.name,
+                 q[0] - root[0], q[1] - root[1], q[2] - root[2], q[0], q[1], q[2]);
+        line += entry;
+    }
+    for (int h = 1; h >= 0; --h)
+    {
+        float centre[3], q[3];
+        if (!HandCentre(bones, sk, sk.arms[h], centre))
+            continue;
+        PointTimes(centre, rigInverse, q);
+        snprintf(entry, sizeof(entry), "; %s hand centre (camera %.3f, %.3f, %.3f)", h ? "right" : "left", q[0], q[1], q[2]);
+        line += entry;
+    }
+    int magazineParts = 0;
+    for (const auto& slot : g_magazineMeshes)
+        magazineParts += slot.load(std::memory_order_relaxed) != 0 ? 1 : 0;
+    float grip[3];
+    GetWeaponGripOffset(grip);
+    MOHW_LOG(kSocketLog, "%s (%s): %s; magazine parts %d; grip profile now (%.3f, %.3f, %.3f)", display, key, line.c_str(),
+             magazineParts, grip[0], grip[1], grip[2]);
+}
+
 bool ApplyArmIk(const unsigned char* batch, const Rigid& cam, const Rigid& rigCamera, const Rigid& drawn, const Rigid& gun,
                 const Rigid& offHand, bool haveOffHand, bool twoHanded, bool gunInLeftHand)
 {
@@ -1223,6 +1310,7 @@ bool ApplyArmIk(const unsigned char* batch, const Rigid& cam, const Rigid& rigCa
     // Several views draw one batch, each through this hook (and from several threads).
     if (g_ikOnceDone && memcmp(BoneSlot(bones, sk.arms[1].hand), g_lastWrittenHand, sizeof(g_lastWrittenHand)) == 0)
         return true;
+    LogWeaponSockets(bones, sk, rigCamera); // the game's own pose, before anything below moves it
 
     // A point P of this batch shows at P * drawn^-1 * cam; to show it at P * G it has to hold P * G * cam^-1 * drawn.
     const Rigid rigInverse = Inverse(rigCamera);
@@ -1300,7 +1388,7 @@ bool ShouldDrawArmMesh(uintptr_t mesh)
             if (g_meshClasses[i].mesh == mesh)
                 return g_meshClasses[i].arm;
     }
-    int wanted[4];
+    int wanted[4], magazine[2];
     {
         std::lock_guard<std::mutex> lock(g_skeletonMutex);
         if (!g_skeleton.armsValid)
@@ -1309,13 +1397,61 @@ bool ShouldDrawArmMesh(uintptr_t mesh)
         wanted[1] = g_skeleton.arms[1].fore;
         wanted[2] = g_skeleton.arms[0].hand;
         wanted[3] = g_skeleton.arms[1].hand;
+        magazine[0] = g_skeleton.magBone;
+        magazine[1] = g_skeleton.magAmmoBone;
     }
     const bool arm = MeshUsesBones(mesh, wanted, 4);
+    // A gun whose magazine is no separate part (the pistols) may have it skinned to Wep_Mag in its own mesh, a part of
+    // this batch: moving that bone in the batch, as the arm IK moves the hands, would move the magazine.
+    const bool skinnedMagazine = magazine[0] >= 0 && MeshUsesBones(mesh, magazine, magazine[1] >= 0 ? 2 : 1);
     std::lock_guard<std::mutex> lock(g_meshClassMutex);
     if (g_meshClassCount < kMaxMeshClasses)
         g_meshClasses[g_meshClassCount++] = MeshClass{mesh, arm};
-    MOHW_LOG(kLogFile, "body part mesh %p: %s", reinterpret_cast<void*>(mesh), arm ? "arms / hands" : "not the arms");
+    char weapon[160] = "", display[64] = "";
+    GetEquippedWeapon(weapon, sizeof(weapon), display, sizeof(display));
+    MOHW_LOG(kLogFile, "body part mesh %p: %s%s (weapon %s)", reinterpret_cast<void*>(mesh), arm ? "arms / hands" : "not the arms",
+             skinnedMagazine ? ", SKINNED TO Wep_Mag (the magazine is in this mesh)" : "", display[0] ? display : "?");
     return arm;
+}
+
+void NoteWeaponMesh(uintptr_t mesh)
+{
+    // Once per mesh: the guns with no separate magazine part (the pistols: one first-person mesh each in the data) may
+    // carry it skinned to Wep_Mag, which a bone rewrite could move.
+    constexpr int kMaxSeen = 64;
+    static std::atomic<uintptr_t> seen[kMaxSeen];
+    if (!mesh)
+        return;
+    for (auto& slot : seen)
+    {
+        uintptr_t held = slot.load(std::memory_order_relaxed);
+        if (held == mesh)
+            return;
+        if (held == 0)
+        {
+            uintptr_t expected = 0;
+            if (!slot.compare_exchange_strong(expected, mesh, std::memory_order_relaxed))
+            {
+                if (expected == mesh)
+                    return;
+                continue;
+            }
+            int magazine[2];
+            {
+                std::lock_guard<std::mutex> lock(g_skeletonMutex);
+                magazine[0] = g_skeleton.magBone;
+                magazine[1] = g_skeleton.magAmmoBone;
+            }
+            if (magazine[0] < 0)
+                return;
+            const bool skinned = MeshUsesBones(mesh, magazine, magazine[1] >= 0 ? 2 : 1);
+            char weapon[160] = "", display[64] = "";
+            GetEquippedWeapon(weapon, sizeof(weapon), display, sizeof(display));
+            MOHW_LOG(kLogFile, "weapon mesh %p (weapon %s): %s", reinterpret_cast<void*>(mesh), display[0] ? display : "?",
+                     skinned ? "SKINNED TO Wep_Mag (the magazine is in this mesh)" : "not skinned to Wep_Mag");
+            return;
+        }
+    }
 }
 
 bool IsMagazineMesh(uintptr_t mesh)
