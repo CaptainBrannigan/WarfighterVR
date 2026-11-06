@@ -135,6 +135,10 @@
 #define RENDERVIEW_ASPECT 0x58u
 #define RENDERVIEW_VIEWPORTOFFSET 0x6Cu
 #define RENDERVIEW_DIRTY 0x90u
+// THE UI PASS (2026-11-06; docs/ui_render_path.md): replays one of the Scaleform UI's two command lists (FUN_00CBB4E0).
+// __thiscall (ECX = the UI's movie manager), 1 stack arg: {renderer, ?, movie manager, list (0 = before the world,
+// 1 = the HUD over the frame), screen renderer, target of list 0, flag}, RET 4. Called from FUN_008F42F0.
+#define OFFSET_UI_PASS 0xCBE3D0u
 // Camera-class matrix setter (2026-09-19, found via Cheat Engine "what writes"
 // on the camera object): FUN_006FC2A0, __thiscall(this=camera, float* 4x4),
 // RET 4; copies 16 dwords to this+0 and ORs 9 into this+0x90 (dirty flags).

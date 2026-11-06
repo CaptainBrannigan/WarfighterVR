@@ -9,6 +9,7 @@
 #include "projection_aspect_hook.h"
 #include "aiming_controller_hook.h"
 #include "driving_camera_hook.h"
+#include "ui_pass.h"
 #include "../sdk/mohw_offsets.h"
 #include "../sdk/d3d_util.h"
 
@@ -611,6 +612,7 @@ void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT s, 
     if (!skip)
         g_origDrawIndexed(c, n, s, b);
     CountDraw(c, n);
+    UiPassNoteDraw();
 }
 void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
 {
@@ -620,6 +622,7 @@ void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
     if (!skip)
         g_origDraw(c, n, s);
     CountDraw(c, n);
+    UiPassNoteDraw();
 }
 void STDMETHODCALLTYPE Hook_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT n, UINT i, UINT s, INT b, UINT si)
 {

@@ -39,6 +39,7 @@
 #include "../hooks/camera_matrix_test_hook.h"
 #include "../hooks/first_person_rig.h"
 #include "../hooks/native_stereo.h"
+#include "../hooks/ui_pass.h"
 #include "../hooks/memory_dump.h"
 #include "../hooks/driving_camera_hook.h"
 #include "../third_party/minhook/include/MinHook.h"
@@ -159,6 +160,10 @@ void InstallGameHooks()
     // EXPERIMENTAL: both eyes from the engine's own two-view path, off unless NativeStereo (hooks/native_stereo.h).
     if (!mohw::InstallNativeStereoHook())
         MOHW_LOG(kLogFile, "InstallNativeStereoHook FAILED -- see mohwvr_nativestereo.log");
+
+    // Marks the Scaleform UI's pass, to find the HUD's exact draws (hooks/ui_pass.h). Logging only.
+    if (!mohw::InstallUiPassHook())
+        MOHW_LOG(kLogFile, "InstallUiPassHook FAILED -- see mohwvr_uipass.log");
 
     // ADS sway: scales the weapons' zoomed sway (GunSwayData) by AdsSwayScale -- see hooks/weapon_sway_patch.h.
     mohw::StartWeaponSwayPatch();

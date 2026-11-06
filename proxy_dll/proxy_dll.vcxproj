@@ -121,6 +121,7 @@
     <ClCompile Include="..\hooks\first_person_rig.cpp" />
     <ClCompile Include="..\hooks\native_stereo.cpp" />
     <ClCompile Include="..\hooks\player_control.cpp" />
+    <ClCompile Include="..\hooks\ui_pass.cpp" />
     <ClCompile Include="..\openvr_direct\vr_reload.cpp" />
     <ClCompile Include="..\sdk\settings.cpp" />
     <ClCompile Include="..\third_party\minhook\src\buffer.c" />
@@ -177,6 +178,7 @@
     <ClInclude Include="..\hooks\first_person_rig.h" />
     <ClInclude Include="..\hooks\native_stereo.h" />
     <ClInclude Include="..\hooks\player_control.h" />
+    <ClInclude Include="..\hooks\ui_pass.h" />
     <ClInclude Include="..\openvr_direct\vr_reload.h" />
     <ClInclude Include="..\sdk\rigid.h" />
     <ClInclude Include="..\shared\ipc_protocol.h" />
