@@ -206,6 +206,11 @@ inline bool GetControllerAimDirection(const Vec3& nativeDirection, Vec3* outDire
     // own aim: some objectives (shooting a target that isn't a soldier) only count the AimingController's aim.
     if (!GetWeaponDriveEnabled())
         return false;
+    // Only the soldier's own shots (2026-11-06): while something else has the controls (the robot section, where the
+    // soldier's AimingController stops), the last head-aim yaw/pitch is stale and the shots come from that thing's
+    // own gun and camera, so steering them along the controller sent them astray ("shots not registering always").
+    if (!IsPlayerAimActive())
+        return false;
     mohwvr::ipc::ControllerPoseBlock pose{};
     if (!GetRightControllerPose(&pose))
         return false;
@@ -259,7 +264,7 @@ inline bool GetControllerAimDirection(const Vec3& nativeDirection, Vec3* outDire
 inline bool GetControllerOriginOffset(Vec3* outOffset)
 {
     constexpr float kMaxOffsetMeters = 1.5f;
-    if (!GetWeaponDriveEnabled()) // see GetControllerAimDirection
+    if (!GetWeaponDriveEnabled() || !IsPlayerAimActive()) // see GetControllerAimDirection
         return false;
     mohwvr::ipc::ControllerPoseBlock controller{};
     mohwvr::ipc::HeadPoseBlock head{};

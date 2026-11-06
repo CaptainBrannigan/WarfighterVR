@@ -203,9 +203,18 @@ public class Fb2Dump {
             out.append(fd.name).append(' ');
             switch (fd.kind()) {
                 case 2: out.append("::").append(complexes.get(fd.ref).name).append('\n'); complex(out, fd.ref, pos, depth + 1); return;
-                case 3: { int v = b.getInt(pos); if (v == 0) out.append("*null"); else if ((v & 0x80000000) != 0) out.append("*ext ").append(externals.get(v & 0x7FFFFFFF)); else out.append("*").append(instanceNames.get(v - 1)).append(' ').append(instanceGuids.get(v - 1)); break; }
+                case 3: {
+                    int v = b.getInt(pos);
+                    if (v == 0) out.append("*null");
+                    else if ((v & 0x80000000) != 0) { int e = v & 0x7FFFFFFF; out.append("*ext ").append(e < externals.size() ? externals.get(e) : "<import " + e + ">"); }
+                    else if (v - 1 < instanceNames.size()) out.append("*").append(instanceNames.get(v - 1)).append(' ').append(instanceGuids.get(v - 1));
+                    else out.append("<instance ").append(v).append('>');
+                    break;
+                }
                 case 4: {
-                    Array a = arrays.get(b.getInt(pos)); Complex ac = complexes.get(fd.ref); Field member = fields.get(ac.fieldStart);
+                    int index = b.getInt(pos);
+                    if (index < 0 || index >= arrays.size()) { out.append("<array ").append(index).append(">\n"); return; }
+                    Array a = arrays.get(index); Complex ac = complexes.get(fd.ref); Field member = fields.get(ac.fieldStart);
                     out.append("::").append(ac.name).append(" [").append(a.count).append("]\n");
                     int esize = elementSize(member);
                     for (int i = 0; i < a.count && i < 4096; i++) field(out, new Field("member(" + i + ")", member.type, member.ref, 0), arrayStart + a.offset + i * esize, depth + 1);

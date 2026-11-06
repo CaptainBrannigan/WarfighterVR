@@ -19,6 +19,7 @@
 #include "projection_aspect_hook.h"
 #include "eye_matched_fov.h"
 #include "native_stereo.h"
+#include "player_control.h"
 #include "../openvr_direct/openvr_direct.h"
 #include "../sdk/d3d_util.h"
 #include "../sdk/settings.h"
@@ -319,6 +320,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
 {
     // One frame per display frame when the engine renders both eyes at once (hooks/native_stereo.h), two otherwise.
     NativeStereoOnPresent();
+    PlayerControlOnPresent(); // logs every change of what the player controls (hooks/player_control.h)
     PaceToDisplayFrequency(IsNativeStereoActive() ? 1.0 : 2.0);
 
     long long n = ++g_presentCalls;
