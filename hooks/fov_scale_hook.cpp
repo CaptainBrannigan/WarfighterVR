@@ -12,6 +12,8 @@
 #include "render_pose_stamp.h"
 #include "head_position.h"
 #include "laser_raycast.h"
+#include "native_stereo.h"
+#include "projection_aspect_hook.h"
 
 #include <windows.h>
 #include <cmath>
@@ -548,7 +550,18 @@ struct ThisCallTrampoline
             // sets fovY from the headset's real per-eye frustum. The old method is
             // ApplyFovScale(param2) (FovScale multiplier, still defined above) -- swap back
             // by changing this one call (and the matching #if in companion/main.cpp).
-            applied = ApplyEyeMatchedFov(param2);
+            // NATIVE TWO-VIEW (hooks/native_stereo.h): the engine renders both eyes from this one camera, each view
+            // with its own eye's frustum, so the camera stays the head centre and the per-eye projection hook is off.
+            const bool nativeStereo = IsNativeStereoActive();
+            if (nativeStereo)
+            {
+                SetTrueFrustumProjection(0.0f, 0.0f, 0.0f, 0.0f, -1);
+                SetInnerEdgeProjection(0.0f, 0.0f);
+            }
+            else
+            {
+                applied = ApplyEyeMatchedFov(param2);
+            }
             LogOrderingComparisonIfDue(param2); // TEMPORARY DIAGNOSTIC, read-only
             // No-op unless RotationSmoothingEnabled is on -- see its own
             // declaration comment. Runs BEFORE head-roll so roll's already-
@@ -562,7 +575,8 @@ struct ThisCallTrampoline
             ComputeRenderPoseStamp(param2);
             // The laser: cast through the camera as rendered for the centre eye (hooks/laser_raycast.h).
             LaserOnCommit(static_cast<const float*>(param2));
-            ApplyEyeOffset(param2);
+            if (!nativeStereo)
+                ApplyEyeOffset(param2);
         }
 
         LogIfDue(param2, applied);

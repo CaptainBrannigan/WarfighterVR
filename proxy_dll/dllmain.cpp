@@ -38,6 +38,7 @@
 #include "../hooks/fire_candidate_redirect_hook.h"
 #include "../hooks/camera_matrix_test_hook.h"
 #include "../hooks/first_person_rig.h"
+#include "../hooks/native_stereo.h"
 #include "../hooks/memory_dump.h"
 #include "../hooks/driving_camera_hook.h"
 #include "../third_party/minhook/include/MinHook.h"
@@ -154,6 +155,10 @@ void InstallGameHooks()
     // The arms on the controllers and the magazine parts (hooks/first_person_rig.h).
     if (!mohw::InstallFirstPersonRigHooks())
         MOHW_LOG(kLogFile, "InstallFirstPersonRigHooks FAILED -- see mohwvr_rig.log");
+
+    // EXPERIMENTAL: both eyes from the engine's own two-view path, off unless NativeStereo (hooks/native_stereo.h).
+    if (!mohw::InstallNativeStereoHook())
+        MOHW_LOG(kLogFile, "InstallNativeStereoHook FAILED -- see mohwvr_nativestereo.log");
 
     // ADS sway: scales the weapons' zoomed sway (GunSwayData) by AdsSwayScale -- see hooks/weapon_sway_patch.h.
     mohw::StartWeaponSwayPatch();

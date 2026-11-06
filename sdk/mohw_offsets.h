@@ -107,6 +107,34 @@
 // timers from it; FUN_00835620 calls it too, and is left alone.
 #define OFFSET_RELOAD_TIME 0x831080u
 #define OFFSET_RELOAD_TIME_CALLERS_FIRST 0x83B130u // FUN_0083B130
+
+// THE ENGINE'S VIEW LIST (2026-11-06, Ghidra; docs/native_stereo_render_path.md). Per frame GameRenderer::joinUpdateJob
+// (FUN_008B4A30) runs each render module at GameRenderer+0xEDC; the client world module's (FUN_00A70EF0, vtable
+// 027AC1B4 +0x08) builds the frame's views with FUN_00A6BDC0 and hands them to the world renderer (vtable 02831CC8
+// +0x08, FUN_0101CFA0), which has state for two views. __thiscall (ECX = the module), 3 stack args (the
+// GameRenderViewParams, uint32* view count, the view array), RET 0xC.
+#define OFFSET_VIEW_LIST_BUILD 0xA6BDC0u
+// GameRenderer+0x3C = GameRenderSettings (what getSettings, vtable +0x34, returns); +0x44 = SplitScreenTestViewCount
+// (uint32, reflected field record at 02BD06A8). 2 makes the builder add a second view in the right half of the frame:
+// both views half the width, half the aspect. Read at a level's world-module creation too (FUN_00A6B510).
+#define GAMERENDERER_SETTINGS 0x3Cu
+#define GAMERENDERSETTINGS_SPLITSCREENTESTVIEWCOUNT 0x44u
+// One view of the list: 0xE80 bytes. +0x04 name (char*: "Root", "SecondaryRoot", "RootLeft", "RootRight"), +0x10/+0x14
+// target width/height, +0x20 viewport x/y/w/h (uint16 each), +0x30 stereo eye (1 = right, 2 = left, NVAPI's values),
+// +0x40 the view's RenderView (0x490 bytes), +0x4D0 a second copy of it, +0x960 the previous frame's RenderView.
+#define VIEWDESC_SIZE 0xE80u
+#define VIEWDESC_VIEWPORT 0x20u
+#define VIEWDESC_RENDERVIEW 0x40u
+#define VIEWDESC_RENDERVIEW_COPY 0x4D0u
+#define VIEWDESC_RENDERVIEW_PREV 0x960u
+// RenderView: the RenderViewDesc first (transform 16 floats at +0, fovY +0x48, near/far +0x50/+0x54, aspect +0x58,
+// stereo separation/convergence +0x64/+0x68, viewport offset +0x6C, viewport scale +0x74 -- all inputs of the
+// projection builder FUN_00704C70, called from UpdateMatrices), then dirty flags at +0x90 (FUN_00701340 sets 0xD,
+// RenderView::setTransform FUN_006FC2A0 ORs 9 in, UpdateMatrices clears bit 0).
+#define RENDERVIEW_FOVY 0x48u
+#define RENDERVIEW_ASPECT 0x58u
+#define RENDERVIEW_VIEWPORTOFFSET 0x6Cu
+#define RENDERVIEW_DIRTY 0x90u
 // Camera-class matrix setter (2026-09-19, found via Cheat Engine "what writes"
 // on the camera object): FUN_006FC2A0, __thiscall(this=camera, float* 4x4),
 // RET 4; copies 16 dwords to this+0 and ORs 9 into this+0x90 (dirty flags).

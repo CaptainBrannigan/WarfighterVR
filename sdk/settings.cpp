@@ -160,6 +160,7 @@ std::atomic<bool> g_manualReloadEnabled{true};
 std::atomic<float> g_magazinePouchRadius{0.12f};
 std::atomic<float> g_magazinePouch[3] = {{-0.14f}, {-0.42f}, {0.16f}};
 std::atomic<bool> g_keepGameWindowed{true};
+std::atomic<bool> g_nativeStereo{false}; // hooks/native_stereo.cpp, EXPERIMENTAL
 // Per weapon (kProfileFields, MagazineProfile).
 std::atomic<float> g_magazineGrabOffset[3] = {{0.0f}, {-0.06f}, {0.0f}};
 std::atomic<float> g_magazineGrabHalfSize[3] = {{0.08f}, {0.10f}, {0.08f}};
@@ -493,6 +494,7 @@ void WriteSettingsFileLocked()
     fprintf(f, "StabilizeRig=%d\n", g_stabilizeRig.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "ShowGrabZones=%d\n", g_showGrabZones.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "KeepGameWindowed=%d\n", g_keepGameWindowed.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "NativeStereo=%d\n", g_nativeStereo.load(std::memory_order_relaxed) ? 1 : 0);
     for (const NamedFloat& n : kArmIkKeys)
         fprintf(f, "%s=%.4f\n", n.key, n.value->load(std::memory_order_relaxed));
     for (const NamedFloat& n : kMagazineProfileKeys)
@@ -763,6 +765,8 @@ void LoadSettings()
             g_showGrabZones.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "KeepGameWindowed", &boolValue))
             g_keepGameWindowed.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "NativeStereo", &boolValue))
+            g_nativeStereo.store(boolValue, std::memory_order_relaxed);
         else if ([&] {
                      for (int k = 0; k < 3; ++k)
                          if (ParseFloatSetting(line, kOldShoulderKeys[k], &value))
@@ -1406,6 +1410,11 @@ bool GetKeepGameWindowed()
     return g_keepGameWindowed.load(std::memory_order_relaxed);
 }
 
+bool GetNativeStereoEnabled()
+{
+    return g_nativeStereo.load(std::memory_order_relaxed);
+}
+
 MagazineProfile GetMagazineProfile()
 {
     MagazineProfile p{};
@@ -1647,6 +1656,7 @@ const MenuEntry kMenu[] = {
     {"View", "Rotation smoothing (keep on)", &g_rotationSmoothingEnabled, nullptr, 0, 0, 0, 0, ""},
     {"View", "Smoothing window", nullptr, &g_rotationSmoothingWindowMs, 10.0f, 200.0f, 1.0f, 1, "ms"},
     {"View", "Keep game out of exclusive fullscreen", &g_keepGameWindowed, nullptr, 0, 0, 0, 0, ""},
+    {"View", "Engine two-view stereo (experimental, reload the level)", &g_nativeStereo, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "Stick turn speed", nullptr, &g_vrTurnSpeed, 0.2f, 3.0f, 0.05f, 2, "x"},
     {"Controls", "Stick full deflection", nullptr, &g_vrStickFullDeflection, 0.5f, 1.0f, 0.01f, 2, ""},
     {"Controls", "Two-hand grab radius", nullptr, &g_twoHandGrabRadius, 0.05f, 0.5f, 0.01f, 2, "m"},

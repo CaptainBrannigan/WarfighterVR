@@ -18,6 +18,7 @@
 #include "driving_camera_hook.h"
 #include "projection_aspect_hook.h"
 #include "eye_matched_fov.h"
+#include "native_stereo.h"
 #include "../openvr_direct/openvr_direct.h"
 #include "../sdk/d3d_util.h"
 #include "../sdk/settings.h"
@@ -136,6 +137,48 @@ bool EnsurePairLeftTexture(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& sou
     return true;
 }
 
+// NATIVE TWO-VIEW (hooks/native_stereo.h): the left and right halves of a frame the engine rendered both eyes into.
+// Game thread only.
+ID3D11Texture2D* g_nativeHalves[2] = {nullptr, nullptr};
+
+bool EnsureNativeHalfTextures(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& sourceDesc)
+{
+    const UINT width = sourceDesc.Width / 2;
+    for (ID3D11Texture2D*& half : g_nativeHalves)
+    {
+        if (half)
+        {
+            D3D11_TEXTURE2D_DESC existing{};
+            half->GetDesc(&existing);
+            if (existing.Width == width && existing.Height == sourceDesc.Height && existing.Format == sourceDesc.Format &&
+                TextureOnDevice(half, device))
+                continue;
+            half->Release();
+            half = nullptr;
+        }
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = sourceDesc.Height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = sourceDesc.Format;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        HRESULT hr = device->CreateTexture2D(&desc, nullptr, &half);
+        if (FAILED(hr))
+        {
+            MOHW_LOG(kLogFile, "EnsureNativeHalfTextures: CreateTexture2D(%ux%u fmt=%d) FAILED 0x%08lX", desc.Width,
+                      desc.Height, static_cast<int>(desc.Format), hr);
+            half = nullptr;
+            return false;
+        }
+        MOHW_LOG(kLogFile, "EnsureNativeHalfTextures: created %ux%u fmt=%d", desc.Width, desc.Height,
+                  static_cast<int>(desc.Format));
+    }
+    return true;
+}
+
 std::atomic<long long> g_presentCalls{0};
 std::atomic<long long> g_resizeBuffersCalls{0};
 
@@ -171,7 +214,7 @@ void CheckLogMarkerHotkey()
 // uncapped, original behavior) until a real display frequency has actually been detected -- never falls back to
 // a hardcoded guess. Single-threaded (game thread only, same thread Present always runs on), so plain statics
 // are safe with no atomics needed.
-void PaceToDisplayFrequency()
+void PaceToDisplayFrequency(double framesPerDisplayFrame)
 {
     float displayHz = mohw::openvr_direct::GetDetectedDisplayFrequencyHz();
     if (displayHz <= 1.0f)
@@ -188,7 +231,8 @@ void PaceToDisplayFrequency()
     static LARGE_INTEGER lastPresent{};
     static bool haveLast = false;
 
-    long long targetPeriodTicks = static_cast<long long>(static_cast<double>(freq.QuadPart) / (displayHz * 2.0));
+    long long targetPeriodTicks =
+        static_cast<long long>(static_cast<double>(freq.QuadPart) / (displayHz * framesPerDisplayFrame));
 
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -273,7 +317,9 @@ void LeaveExclusiveFullscreen(IDXGISwapChain* self)
 
 HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT flags)
 {
-    PaceToDisplayFrequency();
+    // One frame per display frame when the engine renders both eyes at once (hooks/native_stereo.h), two otherwise.
+    NativeStereoOnPresent();
+    PaceToDisplayFrequency(IsNativeStereoActive() ? 1.0 : 2.0);
 
     long long n = ++g_presentCalls;
     if (n == 1 || n % 300 == 0)
@@ -368,6 +414,36 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
             // this Present call ever ran). Route it to the matching slot and leave the OTHER slot's shared
             // texture untouched (nullptr) -- UpdateOpenVrDirect treats a null source that way, which is exactly
             // temporal stereo's "other eye still shows its last frame" semantics.
+            if (IsNativeStereoActive())
+            {
+                // NATIVE TWO-VIEW (hooks/native_stereo.h): this one frame holds both eyes, the left eye in the left
+                // half and the right eye in the right, rendered from the same head pose: handed over as one pair with
+                // that frame's stamp. The parity stays on the left eye (it's what the not-yet-adapted per-eye code
+                // reads), and every frame goes to the desktop.
+                if (IsRightEyeActive())
+                    AdvanceEyeToNextFrame();
+                PublishRenderPoseForEye(false);
+                mohw::openvr_direct::PairStamp stamp{};
+                stamp.valid = GetPendingRenderPoseStamp(false, stamp.quat, stamp.pos, &stamp.posValid);
+                if (immediateContext && EnsureNativeHalfTextures(device, backbufferDesc))
+                {
+                    const UINT half = backbufferDesc.Width / 2;
+                    D3D11_BOX left{0, 0, 0, half, backbufferDesc.Height, 1};
+                    D3D11_BOX right{half, 0, 0, half * 2, backbufferDesc.Height, 1};
+                    immediateContext->CopySubresourceRegion(g_nativeHalves[0], 0, 0, 0, 0, leftEye, 0, &left);
+                    immediateContext->CopySubresourceRegion(g_nativeHalves[1], 0, 0, 0, 0, leftEye, 0, &right);
+                    mohw::openvr_direct::UpdateOpenVrDirectPair(device, g_nativeHalves[0], g_nativeHalves[1], stamp);
+                }
+                g_pairLeftStaged = false;
+                if (immediateContext)
+                    immediateContext->Release();
+                backbuffer->Release();
+                device->Release();
+                HRESULT hr = g_originalPresent(self, syncInterval, flags);
+                LogD3DFailure(self, "Present", hr);
+                return hr;
+            }
+
             bool rightEye = IsRightEyeActive();
             DrivingStereoOnPresent(rightEye); // driving missions: eye trace (no-op elsewhere)
             // PublishRenderPoseForEye must run BEFORE UpdateOpenVrDirect, not after -- UpdateOpenVrDirect's

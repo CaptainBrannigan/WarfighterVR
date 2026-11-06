@@ -299,6 +299,9 @@ bool GetHideBodyPart(int index);
 void SetBodyPartCountSeen(int count);
 // In VR the game never takes the display in exclusive fullscreen (hooks/present_hook.cpp). KeepGameWindowed, default on.
 bool GetKeepGameWindowed();
+// EXPERIMENTAL (2026-11-06): both eyes rendered by the engine in one frame, through its own two-view split-screen path
+// (hooks/native_stereo.h), instead of one eye per frame. NativeStereo, default off; takes effect at the next level load.
+bool GetNativeStereoEnabled();
 // Moves the HUD rectangle off head-forward: degrees, + = right / up (HudOffsetX / HudOffsetY).
 void GetHudOffsetDeg(float* x, float* y);
 // The HUD's eye separation as a multiple of the rendering IPD (the eye offset the world is drawn with, IpdScale

@@ -75,12 +75,17 @@ void AdvanceEyeToNextFrame()
     g_rightEyeActive.store(!g_rightEyeActive.load(std::memory_order_relaxed), std::memory_order_relaxed);
 }
 
-float GetActiveEyeOffsetAlongRow0()
+float GetEyeOffsetAlongRow0(bool rightEye)
 {
     // kBaseIpdMeters (average human IPD) times the user-tunable GetIpdScale() (F7/F8, sdk/settings.h).
     constexpr float kBaseIpdMeters = 0.064f;
-    float eyeSign = IsRightEyeActive() ? 1.0f : -1.0f;
+    float eyeSign = rightEye ? 1.0f : -1.0f;
     return eyeSign * kBaseIpdMeters * GetIpdScale() * 0.5f;
+}
+
+float GetActiveEyeOffsetAlongRow0()
+{
+    return GetEyeOffsetAlongRow0(IsRightEyeActive());
 }
 
 bool ApplyEyeOffset(void* transformPtr)

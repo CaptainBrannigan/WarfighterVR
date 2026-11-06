@@ -37,6 +37,8 @@ bool ApplyEyeOffset(void* transformPtr);
 // The offset ApplyEyeOffset adds for the active eye, in meters along the camera transform's row 0 (left eye
 // negative, right eye positive; half the scaled IPD). Lets other code find the head-centre camera from an eye's.
 float GetActiveEyeOffsetAlongRow0();
+// The same for a given eye, whichever is active (hooks/native_stereo.cpp: both eyes in one frame).
+float GetEyeOffsetAlongRow0(bool rightEye);
 
 // F1-F12 are all already claimed elsewhere in this project (see this project's other hooks' hotkey constants).
 // Edge-detected toggle/step, same pattern as every other runtime hotkey in this project. Call once per Present
