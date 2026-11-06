@@ -62,6 +62,10 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   HUD is in its panel (in the driving missions too); ones outside the panel are pinned to its edge, like the game's
   own off-screen arrows.
 - Pre-rendered movies, menus and loading screens are shown as a floating screen (see [Known issues](#known-issues)).
+- **Experimental, off by default: engine two-view stereo** (View > "Engine two-view stereo"). The game renders both
+  eyes in one frame through its own two-view path, instead of one eye per frame. Turn it on, then reload the level.
+  The first-person weapon and the HUD aren't adapted to it yet. Details and what to check:
+  [docs/native_stereo_render_path.md](docs/native_stereo_render_path.md).
 
 ### Head look
 - Head yaw is **added** to the game's own turning (right stick or mouse), and head pitch is absolute; the game's own
@@ -208,7 +212,7 @@ is there, applies immediately and saves by itself. There is also a Recenter butt
 | Group | What's in it |
 |---|---|
 | Head | Head look, its sensitivity and direction, head roll, head position |
-| View | IPD, world scale, rotation smoothing, keeping the game out of exclusive fullscreen |
+| View | IPD, world scale, rotation smoothing, keeping the game out of exclusive fullscreen, engine two-view stereo (experimental) |
 | Controls | Turn speed, stick range, two-handed grab, shot spread, fire as mouse or triggers, double-tap bumpers |
 | Hands | Left-handed, holster size, hand calibration, sight dots, laser beam |
 | Holsters | The grab zone view, each zone's position, the magazine pouch |

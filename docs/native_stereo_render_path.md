@@ -159,9 +159,12 @@ The desktop window shows both halves side by side.
 ## Next steps, in order
 
 1. Live first light with the split-screen path (above).
-2. Make the viewmodel rewrite per view. Each view draws its own weapon batches, and the batch's camera (`batch+0x10`)
-   tells which eye a batch belongs to (left or right of the head centre), so the eye offset can come from it instead
-   of the parity.
+2. Make the viewmodel rewrite per view. The weapon and body batches are drawn with a camera of their own, built per
+   batch (`FUN_008B2AB0`, through `RenderView::setTransform`, the hooked `FUN_006FC2A0`) from the game's raw camera,
+   not from the view being drawn. So the eye can't be read from the batch's camera; it has to come from the view whose
+   draw job is running. The world renderer builds one job per view (`FUN_00FCD960`, per-view state at
+   `WorldRenderer+0x91D0 + i*0x1B920`). Mark the running view per thread there, then pick the eye offset in the rewrite
+   from that mark instead of the parity. Check live first that the two views' batch draws run in separate jobs.
 3. Draw the HUD per eye. Either render the game's 2D pass twice, into each half with that eye's HUD placement, or use
    the engine's own per-eye UI pass (`FUN_00CBE3D0`, gated on `DxRenderer+0x44`).
 4. If split-screen rendering has full-screen-pass bugs, the AMD quad-buffer path is the complete one. It needs:
