@@ -235,6 +235,37 @@ struct MagazineProfile
     float range, lockRange, seatRange;
 };
 MagazineProfile GetMagazineProfile();
+// MAGAZINE PLATFORMS (2026-11-14, "individual offsets dependent on the platform, shared if possible (all aks, all ars,
+// etc)"): how a magazine sits in the hand and how it leaves and enters the gun is shared by every gun of a platform.
+// A gun's platform comes from its name (MagazinePlatformChoice -1 = auto, per weapon) or is set in its weapon profile;
+// the menu's "Magazine platform" rows edit the equipped gun's platform. Stored as MagazinePlatform0..7 lines.
+constexpr int kMagazinePlatformCount = 8;
+struct MagazinePlatform
+{
+    int index;
+    const char* name;
+    // The magazine in the hand that holds it: its insertion point (the Wep_Mag point, the one that seats) moved
+    // {right, up, forward} metres in that hand's frame, and the magazine turned {pitch, yaw, roll} degrees. The
+    // insertion is judged from that point. Mirrored for a magazine in the right hand.
+    float holdPos[3], holdDeg[3];
+    // Straight (hinge false, AR): it slides along the line from its seat to the weapon profile's aim point, travel
+    // metres to clear the magwell. Hinge (AK): it rocks about the gun's right axis through hingePoint {forward, up}
+    // metres from its seat, its bottom swinging forward, hingeDeg degrees to clear (the front lug).
+    bool hinge;
+    float travel;
+    float hingePoint[2];
+    float hingeDeg;
+    // Stickiness: the hand stays on the magazine, and the controller has to get this far past it (metres along the
+    // path) before the magazine moves; it then follows that far behind, and seating takes that much push.
+    float pullForce;
+    // The magazine release (SteamVR action "Magazine release", only while a magazine is gripped) has to be pressed
+    // before the magazine can leave the gun.
+    bool needsRelease;
+};
+MagazinePlatform GetMagazinePlatform();
+const char* GetMagazinePlatformName(int index);
+// How far the controller can get from a hand stuck on a magazine before the grip lets go, metres. MagazineGripBreak.
+float GetMagazineGripBreak();
 // Secondary grip offset (per weapon, SetWeaponProfile): where the off hand holds relative to the barrel line, metres
 // in the gun's frame (+ right, + up). The two-handed aim targets the off hand's point moved by it, so a hand below the
 // bore (a vertical foregrip) doesn't tilt the gun. SecondaryGripRight / SecondaryGripUp, default 0.

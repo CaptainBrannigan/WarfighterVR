@@ -3,6 +3,7 @@
 #include "openvr_types.h"
 #include "vr_hands.h"
 #include "vr_overlay.h"
+#include "vr_reload.h"
 #include "vr_steering.h"
 #include "openvr_direct.h"
 #include "../hooks/startup_diag.h"
@@ -253,10 +254,12 @@ std::string BuildActionManifest()
         s += ",\n    { \"name\": \"" + PadActionName(a) + "\", \"type\": \"boolean\" }";
     for (const GameAction& a : kGameActions)
         s += ",\n    { \"name\": \"" + GameActionName(a) + "\", \"type\": \"boolean\" }";
-    s += R"(
+    s += R"(,
+    { "name": "/actions/magazine/in/MagRelease", "type": "boolean" }
   ],
   "action_sets": [
-    { "name": "/actions/main", "usage": "single" }
+    { "name": "/actions/main", "usage": "single" },
+    { "name": "/actions/magazine", "usage": "single" }
   ],
   "localization": [
     {
@@ -281,7 +284,9 @@ std::string BuildActionManifest()
         s += ",\n      \"" + PadActionName(a) + "\": \"Gamepad: " + a.label + "\"";
     for (const GameAction& a : kGameActions)
         s += ",\n      \"" + GameActionName(a) + "\": \"Keyboard: " + a.label + "\"";
-    s += R"(
+    s += R"(,
+      "/actions/magazine": "Magazine - only while a hand grips one",
+      "/actions/magazine/in/MagRelease": "Magazine release - the hand gripping the magazine"
     }
   ]
 }
@@ -315,6 +320,23 @@ std::string IndexPath(std::string path)
     swap("/input/y", "/input/b");
     swap("/input/joystick", "/input/thumbstick");
     return path;
+}
+
+// MAGAZINE RELEASE (2026-11-14): its own action set, active only while a hand grips a magazine and only for that hand
+// (UpdateVrInput), so it can sit on a button that does something else the rest of the time: by default the gripping
+// hand's lower face button (Touch X / A), where the layouts put pad X / A. Its sources: {path, mode, input}.
+struct MagReleaseSource
+{
+    std::string path, mode, input;
+};
+std::vector<MagReleaseSource> MagReleaseSources(const ControllerProfile& c)
+{
+    const auto path = [&c](const char* touchPath) { return c.indexPaths ? IndexPath(touchPath) : std::string(touchPath); };
+    if (c.layout == Layout::MixedReality || c.layout == Layout::ViveWand)
+        return {{"/user/hand/left/input/trackpad", "dpad", "south"}, {"/user/hand/right/input/trackpad", "dpad", "south"}};
+    if (c.layout == Layout::SteamFrame) // a split gamepad: the left half's lower button is the D-pad's
+        return {{"/user/hand/left/input/dpad_down", "button", "click"}, {"/user/hand/right/input/a", "button", "click"}};
+    return {{path("/user/hand/left/input/x"), "button", "click"}, {path("/user/hand/right/input/a"), "button", "click"}};
 }
 
 // A controller's default binding, grouped into one source per path+mode (a button can carry several inputs, e.g. A =
@@ -426,6 +448,21 @@ std::string BuildBindings(const ControllerProfile& c)
     s += sources;
     s += R"(
       ]
+    },
+    "/actions/magazine": {
+      "sources": [
+)";
+    bool firstMag = true;
+    for (const MagReleaseSource& m : MagReleaseSources(c))
+    {
+        std::string parameters = m.mode == "dpad" ? ",\n          \"parameters\": { \"sub_mode\": \"click\" }" : "";
+        s += std::string(firstMag ? "" : ",\n") + "        {\n          \"path\": \"" + m.path + "\",\n          \"mode\": \"" +
+             m.mode + "\",\n          \"inputs\": { \"" + m.input +
+             "\": { \"output\": \"/actions/magazine/in/MagRelease\" } }" + parameters + "\n        }";
+        firstMag = false;
+    }
+    s += R"(
+      ]
     }
   }
 }
@@ -477,6 +514,7 @@ static_assert(sizeof(PoseActionData) == 96, "must match vr::InputPoseActionData_
 constexpr int kSetActionManifestPathIndex = 0;
 constexpr int kGetActionSetHandleIndex = 1;
 constexpr int kGetActionHandleIndex = 2;
+constexpr int kGetInputSourceHandleIndex = 3;
 constexpr int kUpdateActionStateIndex = 4;
 constexpr int kGetDigitalActionDataIndex = 5;
 constexpr int kGetAnalogActionDataIndex = 6;
@@ -511,6 +549,11 @@ uint64_t g_gripAction[2] = {0, 0};
 uint64_t g_gripButtonAction[2] = {0, 0}; // a grip that's a button: reads as a full pull
 uint64_t g_thumbTapAction[2] = {0, 0};   // the thumbrest's touch, UpdateThumbTap
 uint64_t g_recenterAction = 0;
+// The magazine release's action set (MagReleaseSources), and each hand as an input source, to restrict it to the
+// gripping hand.
+uint64_t g_magazineSet = 0;
+uint64_t g_magReleaseAction = 0;
+uint64_t g_handSource[2] = {0, 0}; // [kLeftHand], [kRightHand]
 uint64_t g_gameActionHandles[kGameActionCount] = {};
 uint64_t g_padActionHandles[kPadActionCount] = {};
 // Lock-free virtual pad state for GetVrPadState (buttons mask, triggers 0-255).
@@ -837,6 +880,16 @@ bool InitVrInput(void* input, int trackingUniverse)
     for (int i = 0; i < kPadActionCount; ++i)
         if (!GetNamedHandle(getActionHandle, PadActionName(kPadActions[i]).c_str(), &g_padActionHandles[i]))
             g_padActionHandles[i] = 0;
+    // The magazine release (optional: without it, a gripped magazine reads the hand's pad X / A instead).
+    auto getSourceHandle = reinterpret_cast<PFN_GetHandle>(vtable[kGetInputSourceHandleIndex]);
+    if (!GetNamedHandle(getSetHandle, "/actions/magazine", &g_magazineSet))
+        g_magazineSet = 0;
+    if (!GetNamedHandle(getActionHandle, "/actions/magazine/in/MagRelease", &g_magReleaseAction))
+        g_magReleaseAction = 0;
+    if (!GetNamedHandle(getSourceHandle, "/user/hand/left", &g_handSource[kLeftHand]))
+        g_handSource[kLeftHand] = 0;
+    if (!GetNamedHandle(getSourceHandle, "/user/hand/right", &g_handSource[kRightHand]))
+        g_handSource[kRightHand] = 0;
     if (!ok)
     {
         g_updateActionState = nullptr; // UpdateVrInput no-ops
@@ -852,9 +905,20 @@ void UpdateVrInput()
     if (!g_updateActionState)
         return;
 
-    ActiveActionSet set{};
-    set.actionSet = g_mainSet;
-    int err = g_updateActionState(g_input, &set, sizeof(set), 1);
+    // The magazine set over the main one, for the hand gripping a magazine only (priority: its buttons there turn off the
+    // main set's), from the state the last update left (vr_reload.h GetMagazineGripHand).
+    const int magHand = g_drivingExe ? -1 : GetMagazineGripHand();
+    ActiveActionSet sets[2]{};
+    sets[0].actionSet = g_mainSet;
+    uint32_t setCount = 1;
+    if (magHand >= 0 && g_magazineSet && g_handSource[magHand])
+    {
+        sets[1].actionSet = g_magazineSet;
+        sets[1].restrictedToDevice = g_handSource[magHand];
+        sets[1].priority = 1;
+        setCount = 2;
+    }
+    int err = g_updateActionState(g_input, sets, sizeof(ActiveActionSet), setCount);
     static int lastUpdateErr = 0;
     if (err != lastUpdateErr)
     {
@@ -899,6 +963,48 @@ void UpdateVrInput()
         hands[h].grip = UpdateGripGesture(h, gripButtonDown ? 1.0f : gripReadOk ? gripPull.x : 0.0f, &gripBumper[h]);
         hands[h].trigger =
             g_getDigital(g_input, g_fireAction[h], &fire, sizeof(fire), 0) == 0 && fire.active && fire.state;
+    }
+
+    // The magazine release, while a hand grips a magazine: the action, restricted to that hand. A binding saved before
+    // the action existed has nothing on it (inactive): then the hand's own pad face button (X left, A right) is read
+    // instead and kept from the game while the magazine is gripped -- re-selecting "MOHW VR defaults" binds the action.
+    int magFallbackPad = -1; // kPadActions index masked from the pad this update
+    {
+        bool release = false;
+        static int lastSource = -1; // 0 none, 1 the action, 2 the pad button: logged on change
+        int source = 0;
+        if (setCount == 2)
+        {
+            DigitalActionData data{};
+            if (g_magReleaseAction &&
+                g_getDigital(g_input, g_magReleaseAction, &data, sizeof(data), g_handSource[magHand]) == 0 && data.active)
+            {
+                release = data.state;
+                source = 1;
+            }
+            else
+            {
+                const int pad = magHand == kLeftHand ? 2 : 0; // kPadActions: X, A
+                DigitalActionData padData{};
+                release = g_padActionHandles[pad] &&
+                          g_getDigital(g_input, g_padActionHandles[pad], &padData, sizeof(padData),
+                                       g_handSource[magHand]) == 0 &&
+                          padData.active && padData.state;
+                magFallbackPad = pad;
+                source = 2;
+            }
+        }
+        if (source != lastSource && source != 0)
+            MOHW_LOG(kLogFile, "magazine gripped (%s hand): the release is %s", magHand == kLeftHand ? "left" : "right",
+                     source == 1 ? "the SteamVR action \"Magazine release\""
+                                 : "not bound in the current SteamVR binding -- reading that hand's pad X / A instead "
+                                   "(re-select \"MOHW VR defaults\" to bind it)");
+        lastSource = source;
+        static bool lastRelease = false;
+        if (release != lastRelease)
+            MOHW_LOG(kLogFile, "magazine release %s", release ? "PRESSED" : "released");
+        lastRelease = release;
+        SetMagazineReleaseInput(release);
     }
 
     mohwvr::ipc::HeadPoseBlock head{};
@@ -997,7 +1103,7 @@ void UpdateVrInput()
         unsigned buttons = 0;
         for (int i = 0; i < kPadActionCount; ++i)
         {
-            if (!g_padActionHandles[i])
+            if (!g_padActionHandles[i] || i == magFallbackPad)
                 continue;
             DigitalActionData data{};
             bool down =

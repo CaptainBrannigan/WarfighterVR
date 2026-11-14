@@ -6,6 +6,7 @@
 
 #include <windows.h>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -199,6 +200,78 @@ const NamedFloat kMagazineProfileKeys[] = {
     {"MagazineAimForward", &g_magazineAimPoint[2]},     {"MagazineRange", &g_magazineRange},
     {"MagazineLockRange", &g_magazineLockRange},        {"MagazineSeatRange", &g_magazineSeatRange},
 };
+// MAGAZINE PLATFORMS (2026-11-14, settings.h MagazinePlatform): every platform's values (guarded by g_fileMutex), and
+// the equipped gun's platform's in the atomics the menu edits and the hooks read. The gun's choice is per weapon
+// (g_weaponMagPlatform in kProfileFields, -1 = from its name).
+enum PlatformField
+{
+    kPfHoldRight,
+    kPfHoldUp,
+    kPfHoldForward,
+    kPfHoldPitch,
+    kPfHoldYaw,
+    kPfHoldRoll,
+    kPfHinge,
+    kPfTravel,
+    kPfHingeForward,
+    kPfHingeUp,
+    kPfHingeDeg,
+    kPfPullForce,
+    kPfNeedsRelease,
+    kPfCount
+};
+const char* const kMagazinePlatformNames[kMagazinePlatformCount] = {
+    "AK", "AR-15 / 5.56", "AR-10 / 7.62", "SMG", "Bolt-action rifle", "LMG box", "Shotgun box", "Other"};
+constexpr int kPlatformAk = 0, kPlatformAr15 = 1, kPlatformAr10 = 2, kPlatformSmg = 3, kPlatformBolt = 4,
+              kPlatformLmg = 5, kPlatformShotgun = 6, kPlatformOther = 7;
+// hold right / up / forward, pitch / yaw / roll, hinge, travel, hinge forward / up, hinge degrees, pull, release
+constexpr float kPlatformDefaults[kMagazinePlatformCount][kPfCount] = {
+    // Pull forces are small against the paths: an AK's 22 degrees with the hand 9 cm from the lug is a 3.4 cm arc.
+    {0, 0, 0, 0, 0, 0, 1, 0.06f, 0.035f, 0.0f, 22.0f, 0.012f, 1}, // AK: rocked in on the front lug
+    {0, 0, 0, 0, 0, 0, 0, 0.06f, 0.035f, 0.0f, 20.0f, 0.015f, 1}, // AR-15: straight up the magwell
+    {0, 0, 0, 0, 0, 0, 0, 0.07f, 0.035f, 0.0f, 20.0f, 0.015f, 1}, // AR-10
+    {0, 0, 0, 0, 0, 0, 0, 0.05f, 0.035f, 0.0f, 20.0f, 0.012f, 1}, // SMG
+    {0, 0, 0, 0, 0, 0, 0, 0.04f, 0.035f, 0.0f, 20.0f, 0.012f, 1}, // bolt-action rifle
+    {0, 0, 0, 0, 0, 0, 0, 0.08f, 0.035f, 0.0f, 20.0f, 0.02f, 1},  // LMG box
+    {0, 0, 0, 0, 0, 0, 0, 0.06f, 0.035f, 0.0f, 20.0f, 0.015f, 1}, // shotgun box
+    {0, 0, 0, 0, 0, 0, 0, 0.05f, 0.035f, 0.0f, 20.0f, 0.015f, 1}, // other
+};
+float g_platformValues[kMagazinePlatformCount][kPfCount] = {}; // guarded by g_fileMutex, from LoadSettings
+std::atomic<float> g_magPlatform[kPfCount] = {};               // the equipped gun's platform's values
+std::atomic<int> g_magPlatformIndex{kPlatformAk};              // whose values those are
+bool g_magPlatformLoaded = false;                              // guarded by g_fileMutex
+std::atomic<float> g_weaponMagPlatform{-1.0f};                 // per weapon: -1 = from its name, else the index
+std::atomic<float> g_magazineGripBreak{0.25f};
+const char kPlatformGroup[] = "Magazine platform";
+char g_platformTitleBuffers[2][96] = {"Magazine platform: AK (every gun on it)", ""};
+std::atomic<const char*> g_platformTitle{g_platformTitleBuffers[0]};
+const char* const kHingeChoices[] = {"Straight (AR: slides up)", "Hinge (AK: rocks in)"};
+const char* const kYesNoChoices[] = {"No", "Yes"};
+
+// A gun's platform from its blueprint name ("MOHW/Weapons/ASSAULT/AK103/spec/AK103__AKM").
+int AutoMagazinePlatform(const std::string& key)
+{
+    std::string k = key;
+    for (char& c : k)
+        c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    const auto has = [&k](const char* s) { return k.find(s) != std::string::npos; };
+    if (has("AK103") || has("AKM") || has("AK47") || has("AK74") || has("SUCHKA") || has("RPK") || has("SVD") ||
+        has("SAIGA"))
+        return kPlatformAk;
+    if (has("OBR_762") || has("SCAR_H") || has("HK417") || has("M110") || has("MK11") || has("SR25"))
+        return kPlatformAr10;
+    if (has("/SNIPER/"))
+        return kPlatformBolt;
+    if (has("/LMG/"))
+        return kPlatformLmg;
+    if (has("/SMG/"))
+        return kPlatformSmg;
+    if (has("/SHOTGUN/"))
+        return kPlatformShotgun;
+    if (has("/ASSAULT/") || has("M4") || has("HK416") || has("MK18") || has("OBR_556") || has("M16"))
+        return kPlatformAr15;
+    return kPlatformOther;
+}
 std::atomic<float> g_rightHandIkPos[3] = {{0.0f}, {0.0f}, {0.0f}};
 std::atomic<float> g_rightHandIkRotDeg[3] = {{0.0f}, {0.0f}, {0.0f}};
 std::atomic<float> g_shoulderOffset[2][3] = {{{0.0f}, {0.0f}, {-0.23f}}, {{0.0f}, {0.0f}, {0.0f}}}; // [0] left, [1] right
@@ -386,6 +459,8 @@ std::atomic<float>* const kProfileFields[] = {
     &g_magazineGrabHalfSize[0], &g_magazineGrabHalfSize[1], &g_magazineGrabHalfSize[2],
     &g_magazineAimPoint[0], &g_magazineAimPoint[1], &g_magazineAimPoint[2],
     &g_magazineRange, &g_magazineLockRange, &g_magazineSeatRange,
+    // Appended 2026-11-14: the gun's magazine platform (-1 = from its name).
+    &g_weaponMagPlatform,
 };
 constexpr int kProfileFieldCount = static_cast<int>(sizeof(kProfileFields) / sizeof(kProfileFields[0]));
 struct WeaponProfile
@@ -472,6 +547,62 @@ bool ParseWeaponProfileLine(const std::string& line)
         bar = next;
     }
     g_weaponProfiles[key] = p;
+    return true;
+}
+
+// ---- Magazine platforms (2026-11-14) -----------------------------------------------------------------------------
+// The atomics' current values back into their platform's row.
+void CapturePlatformLocked()
+{
+    if (!g_magPlatformLoaded)
+        return;
+    const int at = g_magPlatformIndex.load(std::memory_order_relaxed);
+    for (int f = 0; f < kPfCount; ++f)
+        g_platformValues[at][f] = g_magPlatform[f].load(std::memory_order_relaxed);
+}
+
+// The equipped gun's platform (its profile's choice, or from its name) into the atomics, and the menu's title.
+void ResolvePlatformLocked()
+{
+    int want = static_cast<int>(lroundf(g_weaponMagPlatform.load(std::memory_order_relaxed)));
+    const bool automatic = want < 0 || want >= kMagazinePlatformCount;
+    if (automatic)
+        want = AutoMagazinePlatform(g_profileKey);
+    if (!g_magPlatformLoaded || want != g_magPlatformIndex.load(std::memory_order_relaxed))
+    {
+        CapturePlatformLocked();
+        for (int f = 0; f < kPfCount; ++f)
+            g_magPlatform[f].store(g_platformValues[want][f], std::memory_order_relaxed);
+        g_magPlatformIndex.store(want, std::memory_order_relaxed);
+        g_magPlatformLoaded = true;
+        MOHW_LOG(kLogFile, "magazine platform: %s (%s)", kMagazinePlatformNames[want], automatic ? "from the name" : "set");
+    }
+    const char* shown = g_platformTitle.load(std::memory_order_acquire);
+    char* buffer = shown == g_platformTitleBuffers[0] ? g_platformTitleBuffers[1] : g_platformTitleBuffers[0];
+    snprintf(buffer, sizeof(g_platformTitleBuffers[0]), "Magazine platform: %s (every gun on it)",
+             kMagazinePlatformNames[want]);
+    g_platformTitle.store(buffer, std::memory_order_release);
+}
+
+// "MagazinePlatform<i>=v0,v1,..." (kPfCount values; missing ones keep the default).
+bool ParsePlatformLine(const std::string& line)
+{
+    if (line.compare(0, 16, "MagazinePlatform") != 0 || line.size() < 18 || !isdigit(static_cast<unsigned char>(line[16])) ||
+        line[17] != '=')
+        return false;
+    const int i = line[16] - '0';
+    if (i < 0 || i >= kMagazinePlatformCount)
+        return true;
+    const char* p = line.c_str() + 18;
+    for (int f = 0; f < kPfCount && *p; ++f)
+    {
+        char* end = nullptr;
+        const float v = strtof(p, &end);
+        if (end == p)
+            break;
+        g_platformValues[i][f] = v;
+        p = *end == ',' ? end + 1 : end;
+    }
     return true;
 }
 
@@ -580,6 +711,19 @@ void WriteSettingsFileLocked()
         fprintf(f, "%s=%.4f\n", n.key, n.value->load(std::memory_order_relaxed));
     for (const NamedFloat& n : kMagazineProfileKeys)
         fprintf(f, "%s=%.4f\n", n.key, DefaultProfileValue(n.value));
+    fprintf(f, "MagazinePlatformChoice=%.0f\n", DefaultProfileValue(&g_weaponMagPlatform));
+    fprintf(f, "MagazineGripBreak=%.4f\n", g_magazineGripBreak.load(std::memory_order_relaxed));
+    CapturePlatformLocked();
+    fprintf(f, "; MagazinePlatform<n>: in-hand right,up,forward (m), pitch,yaw,roll (deg), hinge (0 straight / 1 hinge),\n"
+               "; travel (m), hinge forward,up (m), hinge angle (deg), pull force (m), needs release (0/1). n:");
+    for (int i = 0; i < kMagazinePlatformCount; ++i)
+        fprintf(f, " %d %s%s", i, kMagazinePlatformNames[i], i + 1 < kMagazinePlatformCount ? "," : "\n");
+    for (int i = 0; i < kMagazinePlatformCount; ++i)
+    {
+        fprintf(f, "MagazinePlatform%d=", i);
+        for (int k = 0; k < kPfCount; ++k)
+            fprintf(f, "%.4f%s", g_platformValues[i][k], k + 1 < kPfCount ? "," : "\n");
+    }
     fprintf(f, "HolsterHoldToKeep=%d\n", g_holsterHoldToKeep.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HolsterRadius=%.4f\n", g_holsterRadius.load(std::memory_order_relaxed));
     fprintf(f, "HolsterDrop=%.4f\n", g_holsterDrop.load(std::memory_order_relaxed));
@@ -701,6 +845,7 @@ void LoadSettings()
 {
     std::lock_guard<std::mutex> lock(g_fileMutex);
     std::string path = SettingsFilePath();
+    memcpy(g_platformValues, kPlatformDefaults, sizeof(g_platformValues)); // the ini's MagazinePlatform lines override
 
     FILE* f = nullptr;
     if (fopen_s(&f, path.c_str(), "r") != 0 || !f)
@@ -1003,6 +1148,13 @@ void LoadSettings()
                  }())
         {
         }
+        else if (ParseFloatSetting(line, "MagazinePlatformChoice", &value))
+            g_weaponMagPlatform.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "MagazineGripBreak", &value))
+            g_magazineGripBreak.store(value, std::memory_order_relaxed);
+        else if (ParsePlatformLine(line))
+        {
+        }
         else if (ParseFloatSetting(line, "SecondaryGripRight", &value))
             g_secondaryGripRight.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SecondaryGripUp", &value))
@@ -1048,6 +1200,8 @@ void LoadSettings()
     }
     if (builtInAdded > 0)
         MOHW_LOG(kLogFile, "LoadSettings: %d built-in weapon profile(s) added", builtInAdded);
+    g_magPlatformLoaded = false;
+    ResolvePlatformLocked(); // no weapon yet: the default profile's choice
 
     MOHW_LOG(kLogFile,
               "LoadSettings: loaded from %s -- FovScale=%.2f IpdScale=%.2f HeadAimEnabled=%d HeadAimSensitivity=%.2f "
@@ -1617,6 +1771,41 @@ MagazineProfile GetMagazineProfile()
     return p;
 }
 
+MagazinePlatform GetMagazinePlatform()
+{
+    MagazinePlatform p{};
+    int at = g_magPlatformIndex.load(std::memory_order_relaxed);
+    p.index = at >= 0 && at < kMagazinePlatformCount ? at : kPlatformOther;
+    p.name = kMagazinePlatformNames[p.index];
+    float v[kPfCount];
+    for (int f = 0; f < kPfCount; ++f)
+        v[f] = g_magPlatform[f].load(std::memory_order_relaxed);
+    for (int k = 0; k < 3; ++k)
+    {
+        p.holdPos[k] = v[kPfHoldRight + k];
+        p.holdDeg[k] = v[kPfHoldPitch + k];
+    }
+    p.hinge = v[kPfHinge] >= 0.5f;
+    p.travel = v[kPfTravel] < 0.005f ? 0.005f : v[kPfTravel];
+    p.hingePoint[0] = v[kPfHingeForward];
+    p.hingePoint[1] = v[kPfHingeUp];
+    p.hingeDeg = v[kPfHingeDeg] < 2.0f ? 2.0f : v[kPfHingeDeg];
+    p.pullForce = v[kPfPullForce] < 0.0f ? 0.0f : v[kPfPullForce];
+    p.needsRelease = v[kPfNeedsRelease] >= 0.5f;
+    return p;
+}
+
+const char* GetMagazinePlatformName(int index)
+{
+    return index >= 0 && index < kMagazinePlatformCount ? kMagazinePlatformNames[index] : "?";
+}
+
+float GetMagazineGripBreak()
+{
+    const float v = g_magazineGripBreak.load(std::memory_order_relaxed);
+    return v < 0.05f ? 0.05f : v;
+}
+
 void GetBodyOffset(float out[3])
 {
     for (int i = 0; i < 3; ++i)
@@ -1821,6 +2010,10 @@ struct MenuEntry
     const char* offText = nullptr;
     const char* onText = nullptr;
     int mode = kRowBothModes; // which render mode's menu shows the row
+    // A number shown as a choice (2026-11-14): choiceTexts[value], steps cycle 0..choiceCount-1.
+    const char* const* choiceTexts = nullptr;
+    int choiceCount = 0;
+    bool platformChoice = false; // the gun's magazine platform: -1 = auto, then each platform by name
 };
 
 // Game actions a holster can be set to: every keyboard-bound action in the game's own profile, filled in by
@@ -1983,6 +2176,7 @@ const MenuEntry kMenu[] = {
     {"Body", "Keep body and gun steady on head turns", &g_stabilizeRig, nullptr, 0, 0, 0, 0, ""},
     {"Weapon", "Gun + shots follow controller (Numpad .)", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Weapon", "Manual reload", &g_manualReloadEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Weapon", "Magazine grip lets go beyond", nullptr, &g_magazineGripBreak, 0.05f, 1.0f, 0.01f, 2, "m"},
     // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon.
     {kProfileGroup, "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {kProfileGroup, "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
@@ -2009,6 +2203,27 @@ const MenuEntry kMenu[] = {
     {kProfileGroup, "Laser start (forward of the hand)", nullptr, &g_laserStartMeters, 0.0f, 1.5f, 0.01f, 2, "m"},
     {kProfileGroup, "Beam start right (visual)", nullptr, &g_laserBeamStartRight, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Beam start up (visual)", nullptr, &g_laserBeamStartUp, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine platform", nullptr, &g_weaponMagPlatform, -1.0f, kMagazinePlatformCount - 1.0f, 1.0f, 0, "",
+     -1, nullptr, nullptr, kRowBothModes, nullptr, 0, true},
+    // The equipped gun's magazine platform (2026-11-14): shared by every gun on it; the title names it.
+    {kPlatformGroup, "Magazine in hand right", nullptr, &g_magPlatform[kPfHoldRight], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Magazine in hand up", nullptr, &g_magPlatform[kPfHoldUp], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Magazine in hand forward", nullptr, &g_magPlatform[kPfHoldForward], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Magazine in hand pitch", nullptr, &g_magPlatform[kPfHoldPitch], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kPlatformGroup, "Magazine in hand yaw", nullptr, &g_magPlatform[kPfHoldYaw], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kPlatformGroup, "Magazine in hand roll", nullptr, &g_magPlatform[kPfHoldRoll], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kPlatformGroup, "In and out of the gun", nullptr, &g_magPlatform[kPfHinge], 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr,
+     nullptr, kRowBothModes, kHingeChoices, 2},
+    {kPlatformGroup, "Straight: travel to clear the magwell", nullptr, &g_magPlatform[kPfTravel], 0.005f, 0.25f, 0.005f, 3,
+     "m"},
+    {kPlatformGroup, "Hinge: point forward of the seat", nullptr, &g_magPlatform[kPfHingeForward], -0.2f, 0.2f, 0.005f, 3,
+     "m"},
+    {kPlatformGroup, "Hinge: point up from the seat", nullptr, &g_magPlatform[kPfHingeUp], -0.2f, 0.2f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Hinge: angle to clear", nullptr, &g_magPlatform[kPfHingeDeg], 2.0f, 60.0f, 1.0f, 0, "deg"},
+    {kPlatformGroup, "Pull force (stretch before it moves)", nullptr, &g_magPlatform[kPfPullForce], 0.0f, 0.1f, 0.005f, 3,
+     "m"},
+    {kPlatformGroup, "Needs the magazine release button", nullptr, &g_magPlatform[kPfNeedsRelease], 0.0f, 1.0f, 1.0f, 0,
+     "", -1, nullptr, nullptr, kRowBothModes, kYesNoChoices, 2},
     {"Driving", "Head look", &g_drivingHeadLookAuto, nullptr, 0, 0, 0, 0, ""},
     {"Driving", "Invert head look", &g_drivingHeadLookInvert, nullptr, 0, 0, 0, 0, ""},
     {"Driving", "Stereo (full view)", &g_drivingStereo, nullptr, 0, 0, 0, 0, ""},
@@ -2151,10 +2366,13 @@ bool GetMenuSettingInfo(int index, MenuSettingInfo* out)
         out->text[0] = '\0';
         return true;
     }
-    out->group = e.group == kProfileGroup ? g_profileTitle.load(std::memory_order_acquire) : e.group;
+    out->group = e.group == kProfileGroup    ? g_profileTitle.load(std::memory_order_acquire)
+                 : e.group == kPlatformGroup ? g_platformTitle.load(std::memory_order_acquire)
+                                             : e.group;
     out->label = e.label;
     out->isToggle = e.toggle != nullptr && !e.onText;
-    out->isChoice = e.holsterZone >= 0 || (e.toggle != nullptr && e.onText != nullptr);
+    out->isChoice = e.holsterZone >= 0 || (e.toggle != nullptr && e.onText != nullptr) || e.choiceTexts != nullptr ||
+                    e.platformChoice;
     out->isNote = false;
     out->value = e.toggle ? (e.toggle->load(std::memory_order_relaxed) ? 1.0f : 0.0f)
                           : (e.number ? e.number->load(std::memory_order_relaxed) : 0.0f);
@@ -2165,6 +2383,23 @@ bool GetMenuSettingInfo(int index, MenuSettingInfo* out)
     if (e.toggle && e.onText)
     {
         snprintf(out->text, sizeof(out->text), "%s", out->value != 0.0f ? e.onText : (e.offText ? e.offText : ""));
+        return true;
+    }
+    if (e.choiceTexts)
+    {
+        int i = static_cast<int>(lroundf(out->value));
+        i = i < 0 ? 0 : i >= e.choiceCount ? e.choiceCount - 1 : i;
+        snprintf(out->text, sizeof(out->text), "%s", e.choiceTexts[i]);
+        return true;
+    }
+    if (e.platformChoice)
+    {
+        const int i = static_cast<int>(lroundf(out->value));
+        if (i < 0 || i >= kMagazinePlatformCount)
+            snprintf(out->text, sizeof(out->text), "Auto: %s",
+                     GetMagazinePlatformName(g_magPlatformIndex.load(std::memory_order_relaxed)));
+        else
+            snprintf(out->text, sizeof(out->text), "%s", kMagazinePlatformNames[i]);
         return true;
     }
     if (out->isChoice)
@@ -2202,6 +2437,7 @@ void SetWeaponProfile(const char* key, const char* display)
     g_profileTitle.store(buffer, std::memory_order_release);
     MOHW_LOG(kLogFile, "weapon profile: %s -> %s", next.empty() ? "default" : next.c_str(),
               own ? "its own values" : "the default values");
+    ResolvePlatformLocked(); // the new gun's magazine platform
 }
 
 void SetHolsterActionChoices(const std::vector<std::string>& actions)
@@ -2244,6 +2480,22 @@ void AdjustMenuSetting(int index, int steps)
     else if (e.toggle)
     {
         e.toggle->store(!e.toggle->load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+    else if (e.choiceTexts || e.platformChoice)
+    {
+        // Cycle, wrapping: the platform choice runs auto (-1), then each platform.
+        const int lo = e.platformChoice ? -1 : 0;
+        const int hi = e.platformChoice ? kMagazinePlatformCount - 1 : e.choiceCount - 1;
+        int v = static_cast<int>(lroundf(e.number->load(std::memory_order_relaxed))) + (steps > 0 ? 1 : -1);
+        v = v > hi ? lo : v < lo ? hi : v;
+        e.number->store(static_cast<float>(v), std::memory_order_relaxed);
+        if (e.platformChoice)
+        {
+            std::lock_guard<std::mutex> lock(g_fileMutex);
+            ResolvePlatformLocked();
+            WriteSettingsFileLocked();
+            return;
+        }
     }
     else
     {

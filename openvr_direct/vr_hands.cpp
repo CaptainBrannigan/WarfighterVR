@@ -474,8 +474,10 @@ void PublishGrabZones(const HandInput hands[2], bool haveHead, const float headP
                          VecScale(mag.axes[axis], sign), mag.boxHalf[a] * 2.0f, mag.boxHalf[b] * 2.0f, mag.inBox);
             }
         }
-        SetPoint(shapes[kDebugTurnRange], mag.seat, mag.range * 2.0f, mag.handDistance <= mag.range);
-        SetPoint(shapes[kDebugLockRange], mag.seat, mag.lockRange * 2.0f, mag.handDistance <= mag.lockRange);
+        // A held magazine engages at the path's far end (vr_reload.h): the ranges are around that, lit by its
+        // insertion point (the in-hand Wep_Mag point).
+        SetPoint(shapes[kDebugTurnRange], mag.entry, mag.range * 2.0f, mag.handDistance <= mag.range);
+        SetPoint(shapes[kDebugLockRange], mag.entry, mag.lockRange * 2.0f, mag.handDistance <= mag.lockRange);
         SetPoint(shapes[kDebugSeat], mag.seat, 0.02f, false);
         SetPoint(shapes[kDebugAimPoint], mag.aim, 0.02f, false);
     }

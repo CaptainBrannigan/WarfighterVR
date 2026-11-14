@@ -19,6 +19,7 @@
 #include "../openvr_direct/vr_hands.h"
 #include "../openvr_direct/vr_overlay.h"
 #include "../openvr_direct/vr_reload.h"
+#include "../openvr_direct/vr_magazine_path.h"
 
 #include <windows.h>
 #include <intrin.h>
@@ -434,27 +435,44 @@ bool PouchFrame(const float m[16], const openvr_direct::MagazineView& view, Rigi
     return FrameInView(m, axes, position, out);
 }
 
-float BlendStep(float from, float to, float x)
-{
-    float t = (x - from) / (to - from);
-    t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
-    return t * t * (3.0f - 2.0f * t);
-}
-
 float Length3(const float v[3])
 {
     return sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
 }
 
+// The gun's frame at the magazine's seat (gun-local, openvr_direct/vr_magazine_path.h) in the view, through the weapon
+// controller frame c: the seat and the gun's axes as the latest magazine draw published them.
+bool GunAtSeatInView(const Rigid& c, Rigid* out)
+{
+    openvr_direct::MagazineGeometry g{};
+    if (!openvr_direct::GetMagazineGeometry(&g))
+        return false;
+    Rigid gunToController{};
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int k = 0; k < 3; ++k)
+            gunToController.R[i][k] = g.axes[i][k];
+        gunToController.t[i] = g.seat[i];
+    }
+    *out = Compose(gunToController, c);
+    return true;
+}
+
+float BlendProgress(const openvr_direct::MagazineView& view)
+{
+    const unsigned long long elapsed = GetTickCount64() - view.blendStartMs;
+    return openvr_direct::SmoothStep01(static_cast<float>(elapsed) / static_cast<float>(openvr_direct::kMagazineBlendMs));
+}
+
 // MANUAL RELOAD (2026-10-31, openvr_direct/vr_reload.h): a magazine part's batch, drawn where the magazine is now. Any
-// part drawn with M' = M * W^-1 shows at P * W, so W is "the move this part takes". Rest = the gun's move, as the weapon
-// drive. Held = the bone's point on the off hand's controller, turned with it as the gun turns with its own.
-// In range of the seat (the weapon's MagazineProfile, 2026-11-01), the magazine stays where the hand has it and only
-// turns: its top, the line from the seat to the aim point at rest, turns to point at the aim point from wherever it is,
-// by alpha, 0 at the range's edge and 1 at the lock range. There the point is on that line and the turn is the rest
-// pose. At alpha 1 the horizontal locks: it can only move along the line, and not past the seat. kLockEaseMetres eases
-// the last stretch in, so reaching the lock doesn't jump. False = draw it with the gun.
-constexpr float kLockEaseMetres = 0.03f;
+// part drawn with M' = M * W^-1 shows at P * W, so W is "the move this part takes". The magazine's own frame
+// (mag-local) is the gun's at its seat, so W = (batch -> mag-local) * (mag-local -> view), the second being:
+//   on the path (2026-11-14): PathDisplacement(s) * the gun at the seat -- s = 0 is the gun's own move;
+//   held: the platform's in-hand place (MagazineHold) on the off hand's controller, turned onto the path's far end
+//     (the entry) as its insertion point closes in on it, by alpha 0 at the weapon profile's range and 1 at its lock
+//     range, where the state machine engages it; and just off the path, gliding from where the path left it;
+//   out: the pouch.
+// False = draw it with the gun.
 bool DriveMagazine(float m[16], const Rigid& rigCamera)
 {
     if (!GetManualReloadEnabled() || !GetWeaponDriveEnabled())
@@ -465,8 +483,6 @@ bool DriveMagazine(float m[16], const Rigid& rigCamera)
         return false;
     const Rigid cam = FromMatrix(m);
     const Rigid camInverse = Inverse(rigCamera);
-    const Rigid toController = Compose(camInverse, Inverse(GripInCamera()));
-    const Rigid rest = Compose(toController, c);
     const MagazineProfile profile = GetMagazineProfile();
     const float aimOffset[3] = {profile.aimPoint[0], profile.aimPoint[1], -profile.aimPoint[2]}; // right, up, back
     float inCamera[3], aimInCamera[3];
@@ -485,69 +501,76 @@ bool DriveMagazine(float m[16], const Rigid& rigCamera)
     const openvr_direct::MagazineView view = openvr_direct::GetMagazineView();
     if (view.state == openvr_direct::MagazineState::InGun)
         return false;
-    Rigid holder{};
-    const bool held = view.state == openvr_direct::MagazineState::Held;
-    if (!(held ? ControllerFrame(m, true, &holder) : PouchFrame(m, view, &holder)))
-        return false;
-    Rigid grip = RigidIdentity();
+    // batch -> mag-local: the rest camera, then the seated bone point to the origin.
+    Rigid toMagLocal = camInverse;
     for (int k = 0; k < 3; ++k)
-        grip.t[k] = inCamera[k];
-    Rigid w = Compose(Compose(camInverse, Inverse(grip)), holder);
-    if (held)
+        toMagLocal.t[k] -= inCamera[k];
+    Rigid gunToController{};
+    for (int i = 0; i < 3; ++i)
     {
-        float atRest[3], atHand[3], aimPoint[3], fromSeat[3], axis[3];
-        PointTimes(bone, rest, atRest);
-        PointTimes(bone, w, atHand);
-        PointTimes(aimInCamera, Compose(gripInverse, c), aimPoint);
         for (int k = 0; k < 3; ++k)
-        {
-            fromSeat[k] = atHand[k] - atRest[k];
-            axis[k] = aimPoint[k] - atRest[k];
-        }
-        const float axisLength = Length3(axis);
-        const float d = Length3(fromSeat);
+            gunToController.R[i][k] = geometry.axes[i][k];
+        gunToController.t[i] = geometry.seat[i];
+    }
+    const Rigid gunInView = Compose(gunToController, c);
+    const openvr_direct::MagazinePath path = openvr_direct::CurrentMagazinePath();
+    Rigid frame{}; // mag-local -> view
+    if (view.state == openvr_direct::MagazineState::OnPath)
+    {
+        frame = Compose(openvr_direct::PathDisplacement(path, view.s), gunInView);
+    }
+    else if (view.state == openvr_direct::MagazineState::Held)
+    {
+        Rigid off{};
+        if (!ControllerFrame(m, true, &off))
+            return false;
+        frame = Compose(openvr_direct::MagazineHold(GetMagazinePlatform(), openvr_direct::IsWeaponHandLeft()), off);
+        const Rigid entry = Compose(openvr_direct::PathDisplacement(path, 1.0f), gunInView);
+        const float d[3] = {frame.t[0] - entry.t[0], frame.t[1] - entry.t[1], frame.t[2] - entry.t[2]};
         const float span = profile.range - profile.lockRange;
-        float alpha = span > 1e-4f ? (profile.range - d) / span : (d <= profile.range ? 1.0f : 0.0f);
-        alpha = alpha < 0.0f ? 0.0f : alpha > 1.0f ? 1.0f : alpha;
-        if (alpha > 0.0f && axisLength > 1e-3f)
+        const float alpha =
+            span > 1e-4f ? openvr_direct::SmoothStep01((profile.range - Length3(d)) / span) : (Length3(d) <= profile.range ? 1.0f : 0.0f);
+        if (alpha > 0.0f)
+            frame = openvr_direct::BlendRigid(frame, entry, alpha);
+        if (view.blendMag)
         {
-            float along = 0.0f;
-            for (int k = 0; k < 3; ++k)
-            {
-                axis[k] /= axisLength;
-                along += fromSeat[k] * axis[k];
-            }
-            along = along > 0.0f ? 0.0f : along;
-            const float lock = BlendStep(profile.lockRange + kLockEaseMetres, profile.lockRange, d);
-            float position[3], toAim[3], turn[3][3];
-            for (int k = 0; k < 3; ++k)
-            {
-                position[k] = atHand[k] + (atRest[k] + axis[k] * along - atHand[k]) * lock;
-                toAim[k] = aimPoint[k] - position[k];
-            }
-            const float toAimLength = Length3(toAim);
-            Rigid pointed = rest;
-            if (toAimLength > 1e-3f)
-            {
-                for (int k = 0; k < 3; ++k)
-                    toAim[k] /= toAimLength;
-                if (RotationBetween(axis, toAim, turn))
-                    for (int i = 0; i < 3; ++i)
-                        for (int j = 0; j < 3; ++j)
-                            pointed.R[i][j] =
-                                rest.R[i][0] * turn[0][j] + rest.R[i][1] * turn[1][j] + rest.R[i][2] * turn[2][j];
-            }
-            Rigid blended{};
-            BlendRotation(w.R, pointed.R, alpha, blended.R);
-            float turned[3];
-            PointTimes(bone, blended, turned);
-            for (int k = 0; k < 3; ++k)
-                blended.t[k] = position[k] - turned[k];
-            w = blended;
+            const float u = BlendProgress(view);
+            if (u < 1.0f)
+                frame = openvr_direct::BlendRigid(Compose(view.blendMagFromGun, gunInView), frame, u);
         }
     }
-    ToMatrix(Compose(cam, Inverse(w)), m);
+    else if (!PouchFrame(m, view, &frame))
+    {
+        return false;
+    }
+    ToMatrix(Compose(cam, Inverse(Compose(toMagLocal, frame))), m);
     return true;
+}
+
+// THE HAND ON THE MAGAZINE (2026-11-14, "the ik should stick to where it grabbed until the magazine releases"): while
+// the magazine is gripped on the gun, the off hand's controller frame the arm IK reaches for is the one stuck to it
+// (MagazineView::handInMag, moved along the path with it); when it leaves the path or seats, or the grip lets go, the
+// hand glides back to the controller.
+void StickOffHandToMagazine(const Rigid& c, Rigid* off)
+{
+    if (!GetManualReloadEnabled())
+        return;
+    const openvr_direct::MagazineView view = openvr_direct::GetMagazineView();
+    const bool stuck = view.state == openvr_direct::MagazineState::OnPath;
+    if (!stuck && !view.blendHand)
+        return;
+    Rigid gunInView{};
+    if (!GunAtSeatInView(c, &gunInView))
+        return;
+    if (stuck)
+    {
+        *off = Compose(Compose(view.handInMag, openvr_direct::PathDisplacement(openvr_direct::CurrentMagazinePath(), view.s)),
+                       gunInView);
+        return;
+    }
+    const float u = BlendProgress(view);
+    if (u < 1.0f)
+        *off = openvr_direct::BlendRigid(Compose(view.blendHandFromGun, gunInView), *off, u);
 }
 
 // ARMS (2026-10-31): the body batch's arms onto the controllers, hooks/first_person_rig.h. Each hand on its own
@@ -563,6 +586,8 @@ void DriveArms(const unsigned char* batch, const float original[16], const float
     if (!ControllerFrame(original, false, &c))
         return;
     const bool haveOff = ControllerFrame(original, true, &off);
+    if (haveOff)
+        StickOffHandToMagazine(c, &off);
     const Rigid gun = Compose(Compose(Inverse(rigCamera), Inverse(GripInCamera())), c);
     ApplyArmIk(batch, FromMatrix(original), rigCamera, FromMatrix(drawn), gun, c, off, haveOff,
                openvr_direct::IsWeaponTwoHanded(), openvr_direct::IsWeaponHandLeft());
