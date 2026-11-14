@@ -907,11 +907,14 @@ void UpdateVrInput()
 
     // The magazine set over the main one, for the hand gripping a magazine only (priority: its buttons there turn off the
     // main set's), from the state the last update left (vr_reload.h GetMagazineGripHand).
+    // If SteamVR ever refuses the pair, the magazine set is dropped for good (the pad fallback below still releases) rather
+    // than leaving every action unread while a magazine is held.
+    static bool magazineSetRefused = false;
     const int magHand = g_drivingExe ? -1 : GetMagazineGripHand();
     ActiveActionSet sets[2]{};
     sets[0].actionSet = g_mainSet;
     uint32_t setCount = 1;
-    if (magHand >= 0 && g_magazineSet && g_handSource[magHand])
+    if (magHand >= 0 && g_magazineSet && g_handSource[magHand] && !magazineSetRefused)
     {
         sets[1].actionSet = g_magazineSet;
         sets[1].restrictedToDevice = g_handSource[magHand];
@@ -919,6 +922,13 @@ void UpdateVrInput()
         setCount = 2;
     }
     int err = g_updateActionState(g_input, sets, sizeof(ActiveActionSet), setCount);
+    if (err != 0 && setCount == 2)
+    {
+        MOHW_LOG(kLogFile, "UpdateActionState with the magazine set err=%d: the magazine set is off, the pad X / A releases", err);
+        magazineSetRefused = true;
+        setCount = 1;
+        err = g_updateActionState(g_input, sets, sizeof(ActiveActionSet), setCount);
+    }
     static int lastUpdateErr = 0;
     if (err != lastUpdateErr)
     {
@@ -973,10 +983,10 @@ void UpdateVrInput()
         bool release = false;
         static int lastSource = -1; // 0 none, 1 the action, 2 the pad button: logged on change
         int source = 0;
-        if (setCount == 2)
+        if (magHand >= 0)
         {
             DigitalActionData data{};
-            if (g_magReleaseAction &&
+            if (setCount == 2 && g_magReleaseAction &&
                 g_getDigital(g_input, g_magReleaseAction, &data, sizeof(data), g_handSource[magHand]) == 0 && data.active)
             {
                 release = data.state;

@@ -194,3 +194,35 @@ weapon sub-skeleton `Animations/Skeletons/Weapon/WeaponSke01` mapped onto bones 
   - RPG7 and SMAW (the rocket);
   - MG4 (a belt: check its parts for a box);
   - grenades and melee.
+
+## Sticky magazines and platforms (2026-11-14, untested in the headset)
+
+Code: `openvr_direct/vr_reload.cpp` (the state machine, submit thread, tracking space), `openvr_direct/vr_magazine_path.h`
+(the path math, shared), `hooks/camera_matrix_test_hook.cpp` (`DriveMagazine`, `StickOffHandToMagazine`), the settings
+in `sdk/settings.cpp` (`MagazinePlatform`, the `MagazinePlatform0..7` ini lines).
+
+- **Frames.** Everything is in *gun-local*: the gun's rest-view axes at the seated Wep_Mag point. The magazine's own
+  frame (*mag-local*) is gun-local while it's seated, so a magazine at path position s is `PathDisplacement(s)` in
+  gun-local, and its batch is drawn with `W = (batch -> mag-local) * frame`, where frame is
+  `PathDisplacement(s) * gunInView` on the path, `MagazineHold(platform) * offController` in the hand, and the pouch
+  otherwise. s = 0 is exactly the gun's own move.
+- **Paths.** Straight: along the seat -> weapon profile aim point line, `travel` metres. Hinge: about the gun's right
+  axis through a point `{forward, up}` from the seat, the bottom swinging forward (+angle about +x turns up toward
+  back), `hingeDeg` to clear.
+- **Stickiness.** The controller's position is projected onto the path (`ProjectOnPath`: along the axis, or the angle
+  about the hinge), and s follows it with a dead band of `pullForce / PathLength` on either side: the magazine moves
+  only once the pull passes the pull force, and lags that far behind. Seating takes the same push past the seat (less
+  the weapon profile's "seats within", capped at a quarter of the path).
+- **The hand.** `handInMag` (the off controller's frame in mag-local) is recorded at the grab (going in, at the
+  engagement), and the arm IK reaches for `handInMag * PathDisplacement(s) * gunInView` instead of the controller.
+  Leaving the path, seating and the grip letting go (`MagazineGripBreak`) start a 160 ms glide of the hand (and, when it
+  comes off the path, the magazine) back to the controller.
+- **The release.** SteamVR action set `/actions/magazine` with `/actions/magazine/in/MagRelease`, activated each update
+  over the main set (priority 1) with `restrictedToDevice` = the gripping hand's input source, so only that hand's button
+  is taken. Default: the lower face button (Touch X / A, Index A, WMR / Vive trackpad south, Steam Frame left D-pad down
+  / right A). Unbound (a binding saved before it existed): the hand's pad X / A is read instead and masked from the
+  virtual pad. If SteamVR ever refuses the restricted pair, the set is dropped and the pad fallback stays.
+- **Insertion point.** The held magazine's Wep_Mag point is `MagazineHold(platform).t` in the hand's frame, so the
+  platform's in-hand offset moves the point that engages at the path's far end (`entry = PathDisplacement(1)`).
+- **For later:** a charging handle or a bolt release is the same pattern: a grab box on the gun, a path, a pull force,
+  an optional release action, and a completion callback.
