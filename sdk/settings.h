@@ -266,6 +266,20 @@ MagazinePlatform GetMagazinePlatform();
 const char* GetMagazinePlatformName(int index);
 // How far the controller can get from a hand stuck on a magazine before the grip lets go, metres. MagazineGripBreak.
 float GetMagazineGripBreak();
+// SCOPED EYE (2026-11-14, prototype, hooks/scope_view.h): in engine two-view, an eye brought behind the gun's sight
+// line (the weapon profile's optic zero: height / windage above the hand) sees through a magnified scope instead of its
+// own view. enabled: ScopeEyeEnabled (default on). eyeBox: how close to the sight line the eye has to be, m; relief: how
+// far behind the hand along it, m; apparentFovDeg: the eyepiece's size in view; minZoom: the game's own ADS zoom (its FOV
+// against the hip FOV) that counts as a scope; reticle: a drawn crosshair until the game's own reticle is found;
+// magnification: the weapon's own (per weapon, ScopeMagnification; 0 = the game's ADS zoom, so only while ADS is held).
+struct ScopeSettings
+{
+    bool enabled;
+    float eyeBox, relief, apparentFovDeg, minZoom;
+    bool reticle;
+    float magnification;
+};
+ScopeSettings GetScopeSettings();
 // Secondary grip offset (per weapon, SetWeaponProfile): where the off hand holds relative to the barrel line, metres
 // in the gun's frame (+ right, + up). The two-handed aim targets the off hand's point moved by it, so a hand below the
 // bore (a vertical foregrip) doesn't tilt the gun. SecondaryGripRight / SecondaryGripUp, default 0.

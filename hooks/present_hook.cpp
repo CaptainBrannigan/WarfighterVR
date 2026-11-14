@@ -13,7 +13,9 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include "render_pose_stamp.h"
+#include "scope_view.h"
 #include "draw_trace_diag.h"
 #include "driving_camera_hook.h"
 #include "projection_aspect_hook.h"
@@ -169,7 +171,8 @@ bool EnsureNativeHalfTextures(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& 
         desc.Format = sourceDesc.Format;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        // A render target too (2026-11-14): the scoped eye's half is masked to its eyepiece (MaskScopedHalf).
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         HRESULT hr = device->CreateTexture2D(&desc, nullptr, &half);
         if (FAILED(hr))
         {
@@ -182,6 +185,93 @@ bool EnsureNativeHalfTextures(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& 
                   static_cast<int>(desc.Format));
     }
     return true;
+}
+
+// SCOPED EYE (2026-11-14, hooks/scope_view.h): the scoped eye's half was drawn through the scope, so everything outside
+// its eyepiece goes black (the inside of the scope), and a crosshair goes over it while ScopeReticle is on. Done with
+// ID3D11DeviceContext1::ClearView on rectangles -- the eyepiece's edge as kScopeBands strips -- so no shader is needed.
+// Game thread.
+constexpr int kScopeBands = 64;
+ID3D11RenderTargetView* g_nativeHalfRtv[2] = {nullptr, nullptr};
+ID3D11Texture2D* g_nativeHalfRtvFor[2] = {nullptr, nullptr};
+
+void MaskScopedHalf(ID3D11Device* device, ID3D11DeviceContext* context)
+{
+    int eye = -1;
+    float cx = 0.0f, cy = 0.0f, rx = 0.0f, ry = 0.0f;
+    bool reticle = false;
+    if (!GetScopeMask(&eye, &cx, &cy, &rx, &ry, &reticle) || eye < 0 || eye > 1 || !g_nativeHalves[eye])
+        return;
+    ID3D11Texture2D* texture = g_nativeHalves[eye];
+    if (g_nativeHalfRtvFor[eye] != texture)
+    {
+        if (g_nativeHalfRtv[eye])
+            g_nativeHalfRtv[eye]->Release();
+        g_nativeHalfRtv[eye] = nullptr;
+        g_nativeHalfRtvFor[eye] = texture;
+        HRESULT hr = device->CreateRenderTargetView(texture, nullptr, &g_nativeHalfRtv[eye]);
+        MOHW_LOG(kLogFile, "scoped eye: render target view on the %s half %s (0x%08lX)", eye ? "right" : "left",
+                 SUCCEEDED(hr) ? "made" : "FAILED", hr);
+    }
+    if (!g_nativeHalfRtv[eye])
+        return;
+    ID3D11DeviceContext1* context1 = nullptr;
+    if (FAILED(context->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&context1))) || !context1)
+    {
+        static bool logged = false;
+        if (!logged)
+            MOHW_LOG(kLogFile, "scoped eye: no ID3D11DeviceContext1 -- the eyepiece isn't masked");
+        logged = true;
+        return;
+    }
+    D3D11_TEXTURE2D_DESC desc{};
+    texture->GetDesc(&desc);
+    const float w = static_cast<float>(desc.Width), h = static_cast<float>(desc.Height);
+    const float pcx = cx * w, pcy = cy * h, prx = rx * w, pry = ry * h;
+    D3D11_RECT rects[2 + 2 * kScopeBands];
+    int n = 0;
+    const auto add = [&](float l, float t, float r, float b) {
+        l = l < 0.0f ? 0.0f : l;
+        t = t < 0.0f ? 0.0f : t;
+        r = r > w ? w : r;
+        b = b > h ? h : b;
+        const LONG L = static_cast<LONG>(floorf(l)), T = static_cast<LONG>(floorf(t));
+        const LONG R = static_cast<LONG>(ceilf(r)), B = static_cast<LONG>(ceilf(b));
+        if (R > L && B > T && n < 2 + 2 * kScopeBands)
+            rects[n++] = D3D11_RECT{L, T, R, B};
+    };
+    const float top = pcy - pry;
+    add(0.0f, 0.0f, w, top);
+    add(0.0f, pcy + pry, w, h);
+    for (int i = 0; i < kScopeBands; ++i)
+    {
+        // Whole pixel rows per band, so neighbouring bands neither gap nor overlap.
+        const float t = floorf(top + 2.0f * pry * i / kScopeBands);
+        const float b = floorf(top + 2.0f * pry * (i + 1) / kScopeBands);
+        if (b <= t)
+            continue;
+        const float dy = ((t + b) * 0.5f - pcy) / (pry > 1.0f ? pry : 1.0f);
+        const float half = prx * sqrtf(dy * dy < 1.0f ? 1.0f - dy * dy : 0.0f);
+        add(0.0f, t, pcx - half, b);
+        add(pcx + half, t, w, b);
+    }
+    const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    context1->ClearView(g_nativeHalfRtv[eye], black, rects, static_cast<UINT>(n));
+    if (reticle)
+    {
+        // A duplex crosshair: fine lines through the centre, heavy posts from the edge to 40% in.
+        const float fine = pry * 0.004f > 1.0f ? pry * 0.004f : 1.0f;
+        const float heavy = pry * 0.02f > 2.0f ? pry * 0.02f : 2.0f;
+        n = 0;
+        add(pcx - prx, pcy - fine, pcx + prx, pcy + fine);
+        add(pcx - fine, pcy - pry, pcx + fine, pcy + pry);
+        add(pcx - prx, pcy - heavy, pcx - prx * 0.4f, pcy + heavy);
+        add(pcx + prx * 0.4f, pcy - heavy, pcx + prx, pcy + heavy);
+        add(pcx - heavy, pcy + pry * 0.4f, pcx + heavy, pcy + pry);
+        add(pcx - heavy, pcy - pry, pcx + heavy, pcy - pry * 0.4f);
+        context1->ClearView(g_nativeHalfRtv[eye], black, rects, static_cast<UINT>(n));
+    }
+    context1->Release();
 }
 
 // NATIVE TWO-VIEW DIAGNOSTIC (2026-11-08): the frame the headset is handed (both eyes side by side), saved at half size
@@ -604,6 +694,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
                     D3D11_BOX right{half, 0, 0, half * 2, backbufferDesc.Height, 1};
                     immediateContext->CopySubresourceRegion(g_nativeHalves[0], 0, 0, 0, 0, leftEye, 0, &left);
                     immediateContext->CopySubresourceRegion(g_nativeHalves[1], 0, 0, 0, 0, leftEye, 0, &right);
+                    MaskScopedHalf(device, immediateContext);
                     mohw::openvr_direct::UpdateOpenVrDirectPair(device, g_nativeHalves[0], g_nativeHalves[1], stamp);
                     MaybeDumpNativeFrame(device, immediateContext, leftEye);
                 }

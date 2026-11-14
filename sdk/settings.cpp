@@ -242,6 +242,14 @@ std::atomic<int> g_magPlatformIndex{kPlatformAk};              // whose values t
 bool g_magPlatformLoaded = false;                              // guarded by g_fileMutex
 std::atomic<float> g_weaponMagPlatform{-1.0f};                 // per weapon: -1 = from its name, else the index
 std::atomic<float> g_magazineGripBreak{0.25f};
+// Scoped eye (2026-11-14, prototype, hooks/scope_view.h).
+std::atomic<bool> g_scopeEyeEnabled{true};
+std::atomic<float> g_scopeEyeBox{0.035f};       // m from the sight line
+std::atomic<float> g_scopeEyeRelief{0.45f};     // m behind the hand along it
+std::atomic<float> g_scopeApparentFov{24.0f};   // deg, the eyepiece's size in view
+std::atomic<float> g_scopeMinZoom{1.3f};        // the game's ADS zoom that counts as a scope
+std::atomic<bool> g_scopeReticle{true};
+std::atomic<float> g_scopeMagnification{0.0f};  // per weapon: 0 = the game's ADS zoom
 const char kPlatformGroup[] = "Magazine platform";
 char g_platformTitleBuffers[2][96] = {"Magazine platform: AK (every gun on it)", ""};
 std::atomic<const char*> g_platformTitle{g_platformTitleBuffers[0]};
@@ -459,8 +467,8 @@ std::atomic<float>* const kProfileFields[] = {
     &g_magazineGrabHalfSize[0], &g_magazineGrabHalfSize[1], &g_magazineGrabHalfSize[2],
     &g_magazineAimPoint[0], &g_magazineAimPoint[1], &g_magazineAimPoint[2],
     &g_magazineRange, &g_magazineLockRange, &g_magazineSeatRange,
-    // Appended 2026-11-14: the gun's magazine platform (-1 = from its name).
-    &g_weaponMagPlatform,
+    // Appended 2026-11-14: the gun's magazine platform (-1 = from its name), its scope's magnification (0 = the game's).
+    &g_weaponMagPlatform, &g_scopeMagnification,
 };
 constexpr int kProfileFieldCount = static_cast<int>(sizeof(kProfileFields) / sizeof(kProfileFields[0]));
 struct WeaponProfile
@@ -713,6 +721,13 @@ void WriteSettingsFileLocked()
         fprintf(f, "%s=%.4f\n", n.key, DefaultProfileValue(n.value));
     fprintf(f, "MagazinePlatformChoice=%.0f\n", DefaultProfileValue(&g_weaponMagPlatform));
     fprintf(f, "MagazineGripBreak=%.4f\n", g_magazineGripBreak.load(std::memory_order_relaxed));
+    fprintf(f, "ScopeEyeEnabled=%d\n", g_scopeEyeEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ScopeEyeBox=%.4f\n", g_scopeEyeBox.load(std::memory_order_relaxed));
+    fprintf(f, "ScopeEyeRelief=%.4f\n", g_scopeEyeRelief.load(std::memory_order_relaxed));
+    fprintf(f, "ScopeApparentFov=%.2f\n", g_scopeApparentFov.load(std::memory_order_relaxed));
+    fprintf(f, "ScopeMinZoom=%.2f\n", g_scopeMinZoom.load(std::memory_order_relaxed));
+    fprintf(f, "ScopeReticle=%d\n", g_scopeReticle.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ScopeMagnification=%.2f\n", DefaultProfileValue(&g_scopeMagnification));
     CapturePlatformLocked();
     fprintf(f, "; MagazinePlatform<n>: in-hand right,up,forward (m), pitch,yaw,roll (deg), hinge (0 straight / 1 hinge),\n"
                "; travel (m), hinge forward,up (m), hinge angle (deg), pull force (m), needs release (0/1). n:");
@@ -1152,6 +1167,20 @@ void LoadSettings()
             g_weaponMagPlatform.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "MagazineGripBreak", &value))
             g_magazineGripBreak.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ScopeEyeEnabled", &boolValue))
+            g_scopeEyeEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeEyeBox", &value))
+            g_scopeEyeBox.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeEyeRelief", &value))
+            g_scopeEyeRelief.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeApparentFov", &value))
+            g_scopeApparentFov.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeMinZoom", &value))
+            g_scopeMinZoom.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ScopeReticle", &boolValue))
+            g_scopeReticle.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeMagnification", &value))
+            g_scopeMagnification.store(value, std::memory_order_relaxed);
         else if (ParsePlatformLine(line))
         {
         }
@@ -1806,6 +1835,19 @@ float GetMagazineGripBreak()
     return v < 0.05f ? 0.05f : v;
 }
 
+ScopeSettings GetScopeSettings()
+{
+    ScopeSettings s{};
+    s.enabled = g_scopeEyeEnabled.load(std::memory_order_relaxed);
+    s.eyeBox = g_scopeEyeBox.load(std::memory_order_relaxed);
+    s.relief = g_scopeEyeRelief.load(std::memory_order_relaxed);
+    s.apparentFovDeg = g_scopeApparentFov.load(std::memory_order_relaxed);
+    s.minZoom = g_scopeMinZoom.load(std::memory_order_relaxed);
+    s.reticle = g_scopeReticle.load(std::memory_order_relaxed);
+    s.magnification = g_scopeMagnification.load(std::memory_order_relaxed);
+    return s;
+}
+
 void GetBodyOffset(float out[3])
 {
     for (int i = 0; i < 3; ++i)
@@ -2177,6 +2219,19 @@ const MenuEntry kMenu[] = {
     {"Weapon", "Gun + shots follow controller (Numpad .)", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Weapon", "Manual reload", &g_manualReloadEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Weapon", "Magazine grip lets go beyond", nullptr, &g_magazineGripBreak, 0.05f, 1.0f, 0.01f, 2, "m"},
+    // SCOPED EYE (2026-11-14, prototype): engine two-view only.
+    {"Scope (prototype, engine two-view)", "Scoped eye: look through the scope", &g_scopeEyeEnabled, nullptr, 0, 0, 0, 0, "",
+     -1, nullptr, nullptr, kRowTwoView},
+    {"Scope (prototype, engine two-view)", "Eye box (how close to the sight line)", nullptr, &g_scopeEyeBox, 0.01f, 0.1f,
+     0.005f, 3, "m", -1, nullptr, nullptr, kRowTwoView},
+    {"Scope (prototype, engine two-view)", "Eye relief (how far behind the hand)", nullptr, &g_scopeEyeRelief, 0.1f, 1.0f,
+     0.01f, 2, "m", -1, nullptr, nullptr, kRowTwoView},
+    {"Scope (prototype, engine two-view)", "Eyepiece size in view", nullptr, &g_scopeApparentFov, 8.0f, 60.0f, 1.0f, 0,
+     "deg", -1, nullptr, nullptr, kRowTwoView},
+    {"Scope (prototype, engine two-view)", "Game ADS zoom that counts as a scope", nullptr, &g_scopeMinZoom, 1.0f, 4.0f,
+     0.05f, 2, "x", -1, nullptr, nullptr, kRowTwoView},
+    {"Scope (prototype, engine two-view)", "Drawn crosshair (until the game's reticle)", &g_scopeReticle, nullptr, 0, 0, 0,
+     0, "", -1, nullptr, nullptr, kRowTwoView},
     // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon.
     {kProfileGroup, "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {kProfileGroup, "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
@@ -2205,6 +2260,8 @@ const MenuEntry kMenu[] = {
     {kProfileGroup, "Beam start up (visual)", nullptr, &g_laserBeamStartUp, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Magazine platform", nullptr, &g_weaponMagPlatform, -1.0f, kMagazinePlatformCount - 1.0f, 1.0f, 0, "",
      -1, nullptr, nullptr, kRowBothModes, nullptr, 0, true},
+    {kProfileGroup, "Scope magnification (0 = the game's ADS zoom)", nullptr, &g_scopeMagnification, 0.0f, 30.0f, 0.25f, 2,
+     "x"},
     // The equipped gun's magazine platform (2026-11-14): shared by every gun on it; the title names it.
     {kPlatformGroup, "Magazine in hand right", nullptr, &g_magPlatform[kPfHoldRight], -0.3f, 0.3f, 0.005f, 3, "m"},
     {kPlatformGroup, "Magazine in hand up", nullptr, &g_magPlatform[kPfHoldUp], -0.3f, 0.3f, 0.005f, 3, "m"},

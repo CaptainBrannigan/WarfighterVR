@@ -3,6 +3,7 @@
 #include "alternating_eye.h"
 #include "companion_bridge.h"
 #include "draw_trace_diag.h"
+#include "scope_view.h"
 #include "../openvr_direct/openvr_direct.h"
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/logging.h"
@@ -217,6 +218,10 @@ void MakeEyes(unsigned char* views)
     mohwvr::ipc::HmdViewBlock hmd{};
     EyeProjection eyes[2];
     bool haveFrustum = GetHmdView(&hmd) && EyeFrustum(hmd, 0, &eyes[0]) && EyeFrustum(hmd, 1, &eyes[1]);
+    // The game's own vertical FOV for this frame, before the eyes' are written over it (its ADS zoom narrows it): the
+    // scoped eye's magnification (hooks/scope_view.h).
+    float gameFovY = 0.0f;
+    ReadBytes(views + VIEWDESC_RENDERVIEW + RENDERVIEW_FOVY, &gameFovY, sizeof(gameFovY));
 
     for (int eye = 0; eye < 2; ++eye)
     {
@@ -235,6 +240,32 @@ void MakeEyes(unsigned char* views)
                 m[12 + i] += m[i] * offset;
             if (WriteBytes(view + VIEWDESC_VIEWMODEL_CAMERA, m, sizeof(m)))
                 memcpy(rawEye[eye], m + 12, sizeof(rawEye[eye]));
+        }
+    }
+    // SCOPED EYE (2026-11-14, hooks/scope_view.h): an eye behind the gun's scope sees through it -- its world view (not
+    // its raw camera: the first-person batches still find their eye by it, and aren't drawn in this one) becomes the
+    // scope's camera and magnified frustum.
+    if (haveFrustum)
+    {
+        float k = GetFrustumScale();
+        if (!(k > 0.2f && k < 4.0f))
+            k = 1.0f;
+        float tangents[2][4];
+        for (int eye = 0; eye < 2; ++eye)
+        {
+            tangents[eye][0] = tanf(hmd.angleLeft[eye]) * k;
+            tangents[eye][1] = tanf(hmd.angleRight[eye]) * k;
+            tangents[eye][2] = tanf(hmd.angleUp[eye]) * k;
+            tangents[eye][3] = tanf(hmd.angleDown[eye]) * k;
+        }
+        ScopeEyeView scope{};
+        if (ComputeScopedEye(centre, tangents, gameFovY, &scope) && scope.eye >= 0 && scope.eye < 2)
+        {
+            unsigned char* view = views + scope.eye * VIEWDESC_SIZE;
+            const EyeProjection projection{scope.fovY, scope.aspect, scope.offX, scope.offY};
+            MakeEye(view + VIEWDESC_RENDERVIEW, scope.camera, 0.0f, &projection);
+            MakeEye(view + VIEWDESC_RENDERVIEW_COPY, scope.camera, 0.0f, &projection);
+            MakeEye(view + VIEWDESC_RENDERVIEW_PREV, scope.camera, 0.0f, &projection); // no motion blur through it
         }
     }
     {

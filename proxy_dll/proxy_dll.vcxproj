@@ -120,6 +120,7 @@
     <ClCompile Include="..\hooks\camera_matrix_test_hook.cpp" />
     <ClCompile Include="..\hooks\first_person_rig.cpp" />
     <ClCompile Include="..\hooks\native_stereo.cpp" />
+    <ClCompile Include="..\hooks\scope_view.cpp" />
     <ClCompile Include="..\hooks\player_control.cpp" />
     <ClCompile Include="..\hooks\input_restriction.cpp" />
     <ClCompile Include="..\hooks\ui_pass.cpp" />

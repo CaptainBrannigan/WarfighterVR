@@ -14,6 +14,7 @@
 #include "first_person_rig.h"
 #include "render_pose_stamp.h"
 #include "native_stereo.h"
+#include "scope_view.h"
 #include "weapon_identity.h"
 #include "../sdk/rigid.h"
 #include "../openvr_direct/vr_hands.h"
@@ -1054,6 +1055,13 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
         MoveBody(m, matrix, rigCamera.t);
         DriveArms(b, matrix, m, rigCamera);
     }
+
+    // SCOPED EYE (2026-11-14, hooks/scope_view.h): this eye's view is the scope's, its camera inside the gun's optic, so
+    // the first-person batches (gun, magazine, arms) go 50 m behind the eye instead: moving the batch camera forward by d
+    // moves what it draws back by d.
+    if (eye >= 0 && eye == GetScopeHiddenEye())
+        for (int k = 0; k < 3; ++k)
+            m[12 + k] -= m[8 + k] * 50.0f;
 
     ++g_patched;
     int lastLogged = g_lastLoggedSelected.load();
