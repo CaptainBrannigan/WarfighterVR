@@ -272,12 +272,17 @@ float GetMagazineGripBreak();
 // far behind the hand along it, m; apparentFovDeg: the eyepiece's size in view; minZoom: the game's own ADS zoom (its FOV
 // against the hip FOV) that counts as a scope; reticle: a drawn crosshair until the game's own reticle is found;
 // magnification: the weapon's own (per weapon, ScopeMagnification; 0 = the game's ADS zoom, so only while ADS is held).
+// lensPicture (ScopeLensPicture, default on): the screen-space prototype -- each eye not looking through the scope sees
+// a magnified picture in the scope's lens, a disc of lensRadius (ScopeLensRadius, m) on the sight line lensForward
+// (ScopeLensForward, m) ahead of the hand, filled from the other eye's view of the sight line's far field.
 struct ScopeSettings
 {
     bool enabled;
     float eyeBox, relief, apparentFovDeg, minZoom;
     bool reticle;
     float magnification;
+    bool lensPicture;
+    float lensForward, lensRadius;
 };
 ScopeSettings GetScopeSettings();
 // Secondary grip offset (per weapon, SetWeaponProfile): where the off hand holds relative to the barrel line, metres

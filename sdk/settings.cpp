@@ -252,6 +252,9 @@ std::atomic<float> g_scopeApparentFov{24.0f};   // deg, the eyepiece's size in v
 std::atomic<float> g_scopeMinZoom{2.5f};
 std::atomic<bool> g_scopeReticle{true};
 std::atomic<float> g_scopeMagnification{0.0f};  // per weapon: 0 = the game's ADS zoom
+std::atomic<bool> g_scopeLensPicture{true};     // the screen-space lens picture
+std::atomic<float> g_scopeLensForward{0.06f};   // m ahead of the hand on the sight line
+std::atomic<float> g_scopeLensRadius{0.018f};   // m
 const char kPlatformGroup[] = "Magazine platform";
 char g_platformTitleBuffers[2][96] = {"Magazine platform: AK (every gun on it)", ""};
 std::atomic<const char*> g_platformTitle{g_platformTitleBuffers[0]};
@@ -730,6 +733,9 @@ void WriteSettingsFileLocked()
     fprintf(f, "ScopeMinZoom=%.2f\n", g_scopeMinZoom.load(std::memory_order_relaxed));
     fprintf(f, "ScopeReticle=%d\n", g_scopeReticle.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "ScopeMagnification=%.2f\n", DefaultProfileValue(&g_scopeMagnification));
+    fprintf(f, "ScopeLensPicture=%d\n", g_scopeLensPicture.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ScopeLensForward=%.4f\n", g_scopeLensForward.load(std::memory_order_relaxed));
+    fprintf(f, "ScopeLensRadius=%.4f\n", g_scopeLensRadius.load(std::memory_order_relaxed));
     CapturePlatformLocked();
     fprintf(f, "; MagazinePlatform<n>: in-hand right,up,forward (m), pitch,yaw,roll (deg), hinge (0 straight / 1 hinge),\n"
                "; travel (m), hinge forward,up (m), hinge angle (deg), pull force (m), needs release (0/1). n:");
@@ -1183,6 +1189,12 @@ void LoadSettings()
             g_scopeReticle.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "ScopeMagnification", &value))
             g_scopeMagnification.store(value, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ScopeLensPicture", &boolValue))
+            g_scopeLensPicture.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeLensForward", &value))
+            g_scopeLensForward.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeLensRadius", &value))
+            g_scopeLensRadius.store(value, std::memory_order_relaxed);
         else if (ParsePlatformLine(line))
         {
         }
@@ -1847,6 +1859,9 @@ ScopeSettings GetScopeSettings()
     s.minZoom = g_scopeMinZoom.load(std::memory_order_relaxed);
     s.reticle = g_scopeReticle.load(std::memory_order_relaxed);
     s.magnification = g_scopeMagnification.load(std::memory_order_relaxed);
+    s.lensPicture = g_scopeLensPicture.load(std::memory_order_relaxed);
+    s.lensForward = g_scopeLensForward.load(std::memory_order_relaxed);
+    s.lensRadius = g_scopeLensRadius.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -2234,6 +2249,12 @@ const MenuEntry kMenu[] = {
      0.05f, 2, "x", -1, nullptr, nullptr, kRowTwoView},
     {"Scope (prototype, engine two-view)", "Drawn crosshair (until the game's reticle)", &g_scopeReticle, nullptr, 0, 0, 0,
      0, "", -1, nullptr, nullptr, kRowTwoView},
+    {"Scope (prototype, engine two-view)", "Lens picture (screen space, both eyes)", &g_scopeLensPicture, nullptr, 0, 0, 0,
+     0, "", -1, nullptr, nullptr, kRowTwoView},
+    {"Scope (prototype, engine two-view)", "Lens distance ahead of the hand", nullptr, &g_scopeLensForward, -0.2f, 0.5f,
+     0.005f, 3, "m", -1, nullptr, nullptr, kRowTwoView},
+    {"Scope (prototype, engine two-view)", "Lens radius", nullptr, &g_scopeLensRadius, 0.005f, 0.05f, 0.001f, 3, "m", -1,
+     nullptr, nullptr, kRowTwoView},
     // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon.
     {kProfileGroup, "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {kProfileGroup, "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},

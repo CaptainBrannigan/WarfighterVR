@@ -67,14 +67,21 @@ new findings are.
      `CastPlanarReflection` / `MeshPlanarReflectionEnable`): find the category test in its culling and open it to all.
   4. Composite the target onto the lens (a shader pass at Present, or the reticle mesh's own material).
 
-## Screen space (not built)
+## Screen space: the lens picture (prototype, built 2026-11-14, untested)
 
 - Magnifying the eye's own image needs the world without the gun in front of the sight line, and the gun is drawn in
   the same deferred frame; a capture point between the world and the first-person pass hasn't been found.
-- A trick that avoids it in two-view: the **other eye's** image has the sight line's far field unblocked (the eyes are
+- The trick that avoids it in two-view: the **other eye's** image has the sight line's far field unblocked (the eyes are
   6.3 cm apart, the scope about 4 cm wide at 20-40 cm, so the line passes about 10 degrees off the scope in the other
-  eye), so one eye's lens can be filled from the other eye's image around the line's vanishing point, scaled by the
-  magnification.
-- Needs a pixel shader at Present (compiled offline with fxc and embedded: no d3dcompiler import) and saving and
-  restoring the immediate context's state. In two-view the scoped eye covers the high-power case at full quality for
-  free; screen space would add the lens picture for both eyes when the scope isn't at the eye.
+  eye), so each eye's lens is filled from the other eye's half around the line's vanishing point, angles divided by
+  the magnification.
+- `hooks/scope_view.cpp UpdateLensPictures` works out, per eye, the lens disc (ScopeLensRadius, ScopeLensForward ahead of
+  the hand on the sight line) in its view and the affine map from its half's uv to the side-by-side frame's uv;
+  `hooks/present_hook.cpp DrawLensPictures` draws it with `hooks/shaders/scope_lens.hlsl` (compiled offline by
+  `build_scope_lens.cmd` into the committed `scope_lens_vs.h` / `scope_lens_ps.h`: no d3dcompiler import), from the
+  unchanged capture into each half before the scoped eye's mask, saving and giving back the immediate context's state.
+- Off while an eye is scoped (that half is the scope's magnified view, no source for the other eye). Drawn over
+  everything: it ignores depth, so a hand in front of the lens doesn't cover it.
+- **To check:** the picture's alignment (its centre on the laser dot at range), the lens's place on the actual scope
+  (distance and radius are global for now; per weapon would be next), and whether the other eye's view really is clear
+  of the gun at the line's far field on every gun.

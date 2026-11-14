@@ -41,4 +41,19 @@ int GetScopeHiddenEye();
 // crosshair stands aside while it does.
 void NoteScopeGameReticle();
 
+// SCREEN-SPACE LENS PICTURE (2026-11-14, prototype, ScopeLensPicture): each eye that isn't looking through the scope sees
+// a magnified picture in the scope's lens (a disc of ScopeLensRadius on the sight line, ScopeLensForward ahead of the
+// hand), filled from the other eye's half of the frame around the sight line's vanishing point -- the other eye, 6 cm to
+// the side, sees that far field past the scope instead of through it. Present draws it (hooks/present_hook.cpp,
+// shaders/scope_lens.hlsl): map = this half's uv -> the side-by-side frame's uv (xy scale, zw offset); circle = the
+// lens's centre (uv), radius (in uv x) and its height-to-width ratio in uv.
+struct ScopeLensPicture
+{
+    bool on = false;
+    float map[4] = {};
+    float circle[4] = {};
+};
+// Present (game thread): both eyes' pictures (on = false for an eye with none). False when there are none at all.
+bool GetScopeLensPictures(ScopeLensPicture out[2]);
+
 } // namespace mohw

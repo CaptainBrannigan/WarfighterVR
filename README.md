@@ -177,6 +177,10 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   (its reticle) stays in the scoped view; a drawn crosshair stands in when there's none. Only zooms of at least "Game
   ADS zoom that counts as a scope" (2.5x) count, so red dots and iron sights aren't magnified. Settings: the **Scope**
   group (shown in the engine two-view mode).
+- **Lens picture (prototype, screen space, engine two-view):** with a scope in use and neither eye behind it, both eyes
+  see a magnified picture inside the scope's lens (a disc of "Lens radius", "Lens distance ahead of the hand" along the
+  sight line), taken from the other eye's view of the sight line's far field (it sees past the scope rather than
+  through it). Drawn over the frame, so it ignores anything in front of the lens.
 - **Body holsters:** press grip with a hand at a body position to trigger an action. That hand also takes the weapon
   if the action is a weapon.
 
@@ -299,7 +303,7 @@ is there, applies immediately and saves by itself. There is also a Recenter butt
 | Arm IK | Arms on or off, hand offsets, each shoulder's position, elbow behaviour |
 | Body | Body position, keeping it upright, steadying it on head turns |
 | Weapon | Gun follows the controller, manual reload, the magazine grip's break distance, which body parts are hidden |
-| Scope (engine two-view) | The scoped eye: on / off, eye box, eye relief, eyepiece size, the zoom that counts as a scope, the drawn crosshair |
+| Scope (engine two-view) | The scoped eye: on / off, eye box, eye relief, eyepiece size, the zoom that counts as a scope, the drawn crosshair; the lens picture, its distance and radius |
 | Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand, including its magazine platform and scope magnification |
 | Magazine platform: *platform* | The magazine in the hand, straight or hinged, travel, hinge point and angle, pull force, the release |
 | HUD | The HUD panel on or off, its size, depth, IPD and offset, Hud Element Scale, the menu and movie screen size and distance, hiding the reticle (the numbers are kept per render mode) |
@@ -359,7 +363,9 @@ The rough edges known so far:
   magazine, the platforms and the release action (2026-11-14) haven't been tested in the headset yet, and every
   platform's in-hand offset starts at zero (the magazine's top at the controller's tip, as before).
 - **The scoped eye is a prototype** (2026-11-14, untested in the headset): engine two-view only; the HUD shows inside
-  the eyepiece; the eyepiece's edge is hard. The switch between the eye's view and the scope can be a frame off.
+  the eyepiece; the eyepiece's edge is hard. The switch between the eye's view and the scope can be a frame off. The
+  lens picture is drawn over everything (a hand in front of the lens doesn't hide it), and the lens's distance and
+  radius are one setting for all guns.
 - **Manual reload needs a magazine that's a separate part of the gun,** so it doesn't apply to pistols yet. They reload
   as the game does. Taking the magazine out of a gun and switching weapons refills it, and the HUD's count can change
   before you've seated a new magazine.

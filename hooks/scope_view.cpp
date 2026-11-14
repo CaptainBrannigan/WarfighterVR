@@ -106,7 +106,80 @@ void ClearScope()
     g_mask.eye = -1;
 }
 
+// The screen-space lens pictures (ScopeLensPicture), guarded by g_maskMutex.
+ScopeLensPicture g_lens[2];
+unsigned long long g_lensMs = 0;
+
+void ClearLens()
+{
+    std::lock_guard<std::mutex> lock(g_maskMutex);
+    g_lens[0].on = g_lens[1].on = false;
+}
+
+// Each eye but the scoped one: the lens disc (ScopeLensRadius, ScopeLensForward ahead of the hand on the sight line) in
+// its view, filled from the other eye's half around the sight line's vanishing point (x0, y0), angles divided by the
+// magnification. Both eyes share the head's axes, so (x0, y0) is the same tangent in both.
+//   this half: tangent x = tL + u (tR - tL), y = tU - v (tU - tD); source tangent = (x0, y0) + (x - lx, y - ly) / m
+//   source frame uv: u = ((xs - tLs) / (tRs - tLs) + src) / 2, v = (tUs - ys) / (tUs - tDs)
+void UpdateLensPictures(const ScopeSettings& s, const Quat& headQ, const Vec3& headP, float scale, const Vec3& origin,
+                        const Vec3& forward, float m, const float eyeTan[2][4], int scopedEye)
+{
+    ScopeLensPicture pictures[2];
+    const Quat inv = QuatConjugate(headQ);
+    const Vec3 dirInEye = QuatRotateVector(inv, forward);
+    // Not while an eye looks through the scope: its half is the scope's magnified view then, not a source for the other.
+    if (s.lensPicture && scopedEye < 0 && dirInEye.z < -0.2f && m >= 1.0f)
+    {
+        const float x0 = dirInEye.x / -dirInEye.z, y0 = dirInEye.y / -dirInEye.z;
+        const Vec3 lensPos = VecAdd(origin, VecScale(forward, s.lensForward));
+        for (int e = 0; e < 2; ++e)
+        {
+            const int src = 1 - e;
+            const Vec3 eyePos = VecAdd(headP, QuatRotateVector(headQ, V(GetEyeOffsetAlongRow0(e == 1) / scale, 0.0f, 0.0f)));
+            const Vec3 p = QuatRotateVector(inv, VecSub(lensPos, eyePos));
+            const float dist = Length(p);
+            if (p.z > -0.05f || dist < 0.05f)
+                continue;
+            const float lx = p.x / -p.z, ly = p.y / -p.z, lr = s.lensRadius / dist;
+            const float tLd = eyeTan[e][0], tRd = eyeTan[e][1], tUd = eyeTan[e][2], tDd = eyeTan[e][3];
+            const float tLs = eyeTan[src][0], tRs = eyeTan[src][1], tUs = eyeTan[src][2], tDs = eyeTan[src][3];
+            if (!(tRd - tLd > 0.05f && tUd - tDd > 0.05f && tRs - tLs > 0.05f && tUs - tDs > 0.05f))
+                continue;
+            ScopeLensPicture& pic = pictures[e];
+            pic.map[0] = 0.5f * (tRd - tLd) / (m * (tRs - tLs));
+            pic.map[2] = 0.5f * ((x0 + (tLd - lx) / m - tLs) / (tRs - tLs) + static_cast<float>(src));
+            pic.map[1] = (tUd - tDd) / (m * (tUs - tDs));
+            pic.map[3] = (tUs - y0 - (tUd - ly) / m) / (tUs - tDs);
+            pic.circle[0] = (lx - tLd) / (tRd - tLd);
+            pic.circle[1] = (tUd - ly) / (tUd - tDd);
+            pic.circle[2] = lr / (tRd - tLd);
+            pic.circle[3] = (tRd - tLd) / (tUd - tDd);
+            pic.on = true;
+        }
+    }
+    static bool lastOn = false;
+    const bool on = pictures[0].on || pictures[1].on;
+    if (on != lastOn)
+        MOHW_LOG(kLogFile, "lens picture %s (%.2fx, lens %.1f cm ahead of the hand, radius %.1f cm)", on ? "ON" : "off", m,
+                 s.lensForward * 100.0f, s.lensRadius * 100.0f);
+    lastOn = on;
+    std::lock_guard<std::mutex> lock(g_maskMutex);
+    g_lens[0] = pictures[0];
+    g_lens[1] = pictures[1];
+    g_lensMs = GetTickCount64();
+}
+
 } // namespace
+
+bool GetScopeLensPictures(ScopeLensPicture out[2])
+{
+    std::lock_guard<std::mutex> lock(g_maskMutex);
+    if (GetTickCount64() - g_lensMs > kRecentMs || !(g_lens[0].on || g_lens[1].on))
+        return false;
+    out[0] = g_lens[0];
+    out[1] = g_lens[1];
+    return true;
+}
 
 bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float gameFovY, ScopeEyeView* out)
 {
@@ -137,15 +210,18 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
         return true;
     };
 
-    if (!s.enabled || magnification < 1.0f || !GetWeaponDriveEnabled() || !IsPlayerAimActive() ||
+    if ((!s.enabled && !s.lensPicture) || magnification < 1.0f || !GetWeaponDriveEnabled() || !IsPlayerAimActive() ||
         GetPlayerAimDriveWeight() < 1.0f)
     {
         if (lastEye != -1)
-            MOHW_LOG(kLogFile, "scoped eye off (%s; game FOV %.1f deg, hip %.1f deg, zoom %.2fx, ADS %d)",
-                     !s.enabled ? "setting off" : magnification < 1.0f ? "no scope magnification" : "gun not on the controller",
+            MOHW_LOG(kLogFile, "scope off (%s; game FOV %.1f deg, hip %.1f deg, zoom %.2fx, ADS %d)",
+                     (!s.enabled && !s.lensPicture) ? "settings off"
+                     : magnification < 1.0f        ? "no scope magnification"
+                                                   : "gun not on the controller",
                      gameFovY * 57.29578f, g_hipFovY * 57.29578f, gameZoom, ads ? 1 : 0);
         lastEye = -1;
         ClearScope();
+        ClearLens();
         return false;
     }
 
@@ -155,6 +231,7 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
     if (!ShownHead(&headQ, &headP) || !GetRightControllerPose(&hand))
     {
         ClearScope();
+        ClearLens();
         return false;
     }
     float scale = GetHeadPositionScale();
@@ -176,7 +253,7 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
         const Vec3 v = VecSub(eyePos, origin);
         const float along = VecDot(v, forward);
         const float perp = Length(VecSub(v, VecScale(forward, along)));
-        if (along <= 0.05f && along >= -s.relief && perp <= s.eyeBox && perp < bestPerp)
+        if (s.enabled && along <= 0.05f && along >= -s.relief && perp <= s.eyeBox && perp < bestPerp)
         {
             eye = e;
             bestPerp = perp;
@@ -193,6 +270,7 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
             MOHW_LOG(kLogFile, "scoped eye: no eye behind the scope (%.2fx ready)", magnification);
         lastEye = eye;
     }
+    UpdateLensPictures(s, headQ, headP, scale, origin, forward, magnification, eyeTan, eye);
     if (eye < 0)
     {
         ClearScope();

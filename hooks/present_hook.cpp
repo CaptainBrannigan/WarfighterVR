@@ -16,6 +16,8 @@
 #include <d3d11_1.h>
 #include "render_pose_stamp.h"
 #include "scope_view.h"
+#include "shaders/scope_lens_vs.h" // g_scopeLensVs (fxc /Fh, see shaders/build_scope_lens.cmd)
+#include "shaders/scope_lens_ps.h" // g_scopeLensPs
 #include "draw_trace_diag.h"
 #include "driving_camera_hook.h"
 #include "projection_aspect_hook.h"
@@ -187,13 +189,212 @@ bool EnsureNativeHalfTextures(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& 
     return true;
 }
 
+// The half textures' render target views (for the scope's mask and lens picture), made once per texture.
+ID3D11RenderTargetView* g_nativeHalfRtv[2] = {nullptr, nullptr};
+ID3D11Texture2D* g_nativeHalfRtvFor[2] = {nullptr, nullptr};
+
+ID3D11RenderTargetView* NativeHalfRtv(ID3D11Device* device, int eye)
+{
+    ID3D11Texture2D* texture = g_nativeHalves[eye];
+    if (!texture)
+        return nullptr;
+    if (g_nativeHalfRtvFor[eye] != texture)
+    {
+        if (g_nativeHalfRtv[eye])
+            g_nativeHalfRtv[eye]->Release();
+        g_nativeHalfRtv[eye] = nullptr;
+        g_nativeHalfRtvFor[eye] = texture;
+        HRESULT hr = device->CreateRenderTargetView(texture, nullptr, &g_nativeHalfRtv[eye]);
+        MOHW_LOG(kLogFile, "scope: render target view on the %s half %s (0x%08lX)", eye ? "right" : "left",
+                 SUCCEEDED(hr) ? "made" : "FAILED", hr);
+    }
+    return g_nativeHalfRtv[eye];
+}
+
+// SCREEN-SPACE LENS PICTURE (2026-11-14, prototype, hooks/scope_view.h GetScopeLensPictures): each eye's half not looking
+// through the scope gets the magnified picture inside the scope's lens, sampled from the side-by-side frame (the
+// unchanged capture) by hooks/shaders/scope_lens.hlsl. Its own pipeline state, saved and given back around the two draws.
+// Game thread.
+struct LensResources
+{
+    ID3D11Device* device = nullptr;
+    ID3D11VertexShader* vs = nullptr;
+    ID3D11PixelShader* ps = nullptr;
+    ID3D11Buffer* constants = nullptr;
+    ID3D11SamplerState* sampler = nullptr;
+    ID3D11ShaderResourceView* source = nullptr;
+    ID3D11Texture2D* sourceFor = nullptr;
+    bool failed = false;
+};
+LensResources g_lens;
+
+void ReleaseLensResources()
+{
+    if (g_lens.vs)
+        g_lens.vs->Release();
+    if (g_lens.ps)
+        g_lens.ps->Release();
+    if (g_lens.constants)
+        g_lens.constants->Release();
+    if (g_lens.sampler)
+        g_lens.sampler->Release();
+    if (g_lens.source)
+        g_lens.source->Release();
+    g_lens = LensResources{};
+}
+
+bool EnsureLensResources(ID3D11Device* device, ID3D11Texture2D* frame)
+{
+    if (g_lens.device != device)
+    {
+        ReleaseLensResources();
+        g_lens.device = device;
+        D3D11_BUFFER_DESC cb{};
+        cb.ByteWidth = 32;
+        cb.Usage = D3D11_USAGE_DEFAULT;
+        cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        D3D11_SAMPLER_DESC sd{};
+        sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.MaxLOD = D3D11_FLOAT32_MAX;
+        const bool ok =
+            SUCCEEDED(device->CreateVertexShader(g_scopeLensVs, sizeof(g_scopeLensVs), nullptr, &g_lens.vs)) &&
+            SUCCEEDED(device->CreatePixelShader(g_scopeLensPs, sizeof(g_scopeLensPs), nullptr, &g_lens.ps)) &&
+            SUCCEEDED(device->CreateBuffer(&cb, nullptr, &g_lens.constants)) &&
+            SUCCEEDED(device->CreateSamplerState(&sd, &g_lens.sampler));
+        g_lens.failed = !ok;
+        MOHW_LOG(kLogFile, "scope lens picture: shaders and states %s", ok ? "made" : "FAILED -- no lens picture");
+    }
+    if (g_lens.failed)
+        return false;
+    if (g_lens.sourceFor != frame)
+    {
+        if (g_lens.source)
+            g_lens.source->Release();
+        g_lens.source = nullptr;
+        g_lens.sourceFor = frame;
+        if (FAILED(device->CreateShaderResourceView(frame, nullptr, &g_lens.source)))
+            MOHW_LOG(kLogFile, "scope lens picture: no shader view on the frame -- no lens picture");
+    }
+    return g_lens.source != nullptr;
+}
+
+// The immediate context's state the lens draws touch, taken and given back.
+struct SavedPipeline
+{
+    D3D11_PRIMITIVE_TOPOLOGY topology = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
+    ID3D11InputLayout* layout = nullptr;
+    ID3D11VertexShader* vs = nullptr;
+    ID3D11GeometryShader* gs = nullptr;
+    ID3D11HullShader* hs = nullptr;
+    ID3D11DomainShader* ds = nullptr;
+    ID3D11PixelShader* ps = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    ID3D11SamplerState* sampler = nullptr;
+    ID3D11Buffer* cb = nullptr;
+    ID3D11RasterizerState* rs = nullptr;
+    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE] = {};
+    UINT viewportCount = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
+    ID3D11RenderTargetView* rtvs[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT] = {};
+    ID3D11DepthStencilView* dsv = nullptr;
+    ID3D11BlendState* blend = nullptr;
+    float blendFactor[4] = {};
+    UINT sampleMask = 0;
+    ID3D11DepthStencilState* depth = nullptr;
+    UINT stencilRef = 0;
+
+    void Take(ID3D11DeviceContext* c)
+    {
+        c->IAGetPrimitiveTopology(&topology);
+        c->IAGetInputLayout(&layout);
+        c->VSGetShader(&vs, nullptr, nullptr);
+        c->GSGetShader(&gs, nullptr, nullptr);
+        c->HSGetShader(&hs, nullptr, nullptr);
+        c->DSGetShader(&ds, nullptr, nullptr);
+        c->PSGetShader(&ps, nullptr, nullptr);
+        c->PSGetShaderResources(0, 1, &srv);
+        c->PSGetSamplers(0, 1, &sampler);
+        c->PSGetConstantBuffers(0, 1, &cb);
+        c->RSGetState(&rs);
+        c->RSGetViewports(&viewportCount, viewports);
+        c->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, &dsv);
+        c->OMGetBlendState(&blend, blendFactor, &sampleMask);
+        c->OMGetDepthStencilState(&depth, &stencilRef);
+    }
+
+    void GiveBack(ID3D11DeviceContext* c)
+    {
+        c->IASetPrimitiveTopology(topology);
+        c->IASetInputLayout(layout);
+        c->VSSetShader(vs, nullptr, 0);
+        c->GSSetShader(gs, nullptr, 0);
+        c->HSSetShader(hs, nullptr, 0);
+        c->DSSetShader(ds, nullptr, 0);
+        c->PSSetShader(ps, nullptr, 0);
+        c->PSSetShaderResources(0, 1, &srv);
+        c->PSSetSamplers(0, 1, &sampler);
+        c->PSSetConstantBuffers(0, 1, &cb);
+        c->RSSetState(rs);
+        c->RSSetViewports(viewportCount, viewports);
+        c->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, rtvs, dsv);
+        c->OMSetBlendState(blend, blendFactor, sampleMask);
+        c->OMSetDepthStencilState(depth, stencilRef);
+        IUnknown* refs[] = {layout, vs, gs, hs, ds, ps, srv, sampler, cb, rs, dsv, blend, depth};
+        for (IUnknown* r : refs)
+            if (r)
+                r->Release();
+        for (ID3D11RenderTargetView* r : rtvs)
+            if (r)
+                r->Release();
+    }
+};
+
+void DrawLensPictures(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* frame)
+{
+    ScopeLensPicture pictures[2];
+    if (!GetScopeLensPictures(pictures) || !EnsureLensResources(device, frame))
+        return;
+    SavedPipeline saved;
+    saved.Take(context);
+    context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context->IASetInputLayout(nullptr);
+    context->VSSetShader(g_lens.vs, nullptr, 0);
+    context->GSSetShader(nullptr, nullptr, 0);
+    context->HSSetShader(nullptr, nullptr, 0);
+    context->DSSetShader(nullptr, nullptr, 0);
+    context->PSSetShader(g_lens.ps, nullptr, 0);
+    context->PSSetSamplers(0, 1, &g_lens.sampler);
+    context->PSSetConstantBuffers(0, 1, &g_lens.constants);
+    context->RSSetState(nullptr);
+    context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    context->OMSetDepthStencilState(nullptr, 0);
+    for (int eye = 0; eye < 2; ++eye)
+    {
+        ID3D11RenderTargetView* rtv = pictures[eye].on ? NativeHalfRtv(device, eye) : nullptr;
+        if (!rtv)
+            continue;
+        D3D11_TEXTURE2D_DESC desc{};
+        g_nativeHalves[eye]->GetDesc(&desc);
+        D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(desc.Width), static_cast<float>(desc.Height), 0.0f, 1.0f};
+        float constants[8];
+        memcpy(constants, pictures[eye].map, sizeof(pictures[eye].map));
+        memcpy(constants + 4, pictures[eye].circle, sizeof(pictures[eye].circle));
+        context->UpdateSubresource(g_lens.constants, 0, nullptr, constants, 0, 0);
+        context->OMSetRenderTargets(1, &rtv, nullptr);
+        context->RSSetViewports(1, &viewport);
+        context->PSSetShaderResources(0, 1, &g_lens.source);
+        context->Draw(3, 0);
+    }
+    ID3D11ShaderResourceView* none = nullptr;
+    context->PSSetShaderResources(0, 1, &none);
+    saved.GiveBack(context);
+}
+
 // SCOPED EYE (2026-11-14, hooks/scope_view.h): the scoped eye's half was drawn through the scope, so everything outside
 // its eyepiece goes black (the inside of the scope), and a crosshair goes over it while ScopeReticle is on. Done with
 // ID3D11DeviceContext1::ClearView on rectangles -- the eyepiece's edge as kScopeBands strips -- so no shader is needed.
 // Game thread.
 constexpr int kScopeBands = 64;
-ID3D11RenderTargetView* g_nativeHalfRtv[2] = {nullptr, nullptr};
-ID3D11Texture2D* g_nativeHalfRtvFor[2] = {nullptr, nullptr};
 
 void MaskScopedHalf(ID3D11Device* device, ID3D11DeviceContext* context)
 {
@@ -203,17 +404,7 @@ void MaskScopedHalf(ID3D11Device* device, ID3D11DeviceContext* context)
     if (!GetScopeMask(&eye, &cx, &cy, &rx, &ry, &reticle) || eye < 0 || eye > 1 || !g_nativeHalves[eye])
         return;
     ID3D11Texture2D* texture = g_nativeHalves[eye];
-    if (g_nativeHalfRtvFor[eye] != texture)
-    {
-        if (g_nativeHalfRtv[eye])
-            g_nativeHalfRtv[eye]->Release();
-        g_nativeHalfRtv[eye] = nullptr;
-        g_nativeHalfRtvFor[eye] = texture;
-        HRESULT hr = device->CreateRenderTargetView(texture, nullptr, &g_nativeHalfRtv[eye]);
-        MOHW_LOG(kLogFile, "scoped eye: render target view on the %s half %s (0x%08lX)", eye ? "right" : "left",
-                 SUCCEEDED(hr) ? "made" : "FAILED", hr);
-    }
-    if (!g_nativeHalfRtv[eye])
+    if (!NativeHalfRtv(device, eye))
         return;
     ID3D11DeviceContext1* context1 = nullptr;
     if (FAILED(context->QueryInterface(__uuidof(ID3D11DeviceContext1), reinterpret_cast<void**>(&context1))) || !context1)
@@ -694,6 +885,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
                     D3D11_BOX right{half, 0, 0, half * 2, backbufferDesc.Height, 1};
                     immediateContext->CopySubresourceRegion(g_nativeHalves[0], 0, 0, 0, 0, leftEye, 0, &left);
                     immediateContext->CopySubresourceRegion(g_nativeHalves[1], 0, 0, 0, 0, leftEye, 0, &right);
+                    DrawLensPictures(device, immediateContext, leftEye); // from the unchanged side-by-side capture
                     MaskScopedHalf(device, immediateContext);
                     mohw::openvr_direct::UpdateOpenVrDirectPair(device, g_nativeHalves[0], g_nativeHalves[1], stamp);
                     MaybeDumpNativeFrame(device, immediateContext, leftEye);
