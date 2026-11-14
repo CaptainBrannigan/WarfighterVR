@@ -145,15 +145,38 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   gun and arms go back to the game's own animation, the shots and laser go back to the game's aim, and the reticle
   returns. They glide back onto your hands a quarter second after you have control again.
 - **Manual reload:** there's no reload animation; you change the magazine yourself.
-  1. Grip with your other hand on the magazine and pull it out. The gun can't fire while it's out.
-  2. Let go away from the gun, and the magazine moves to a pouch on your chest.
-  3. Grip at the pouch to take it, and bring it to the magwell.
-  4. Inside its range it stays in your hand and turns so its top points at the aim point, more the closer it gets. At
-     the lock distance it's upright and can only move up and down: push it up to seat it.
+  1. Grip the magazine in the gun with your other hand. Your hand stays where it grabbed, on the magazine.
+  2. Press the **magazine release** (the gripping hand's X / A by default, the SteamVR action "Magazine release") and
+     pull it out the way the gun's platform takes it: straight down an AR's magwell, rocked forward on an AK's front
+     lug. It only starts moving once you've pulled past the platform's pull force, and follows that far behind; at the
+     end of its travel it comes free and your hand returns to the controller. The gun can't fire once it's moving.
+  3. Let go away from the gun, and the magazine moves to a pouch on your chest.
+  4. Grip at the pouch to take it, and bring it to the magwell: its insertion point (the in-hand magazine's top) is
+     what counts. In range it turns onto the way in; at the lock distance it engages and your hand sticks to it.
+  5. Push it home (an AK: rock it back) past the pull force to seat it.
 
   Pulling a magazine and pushing the same one back in costs nothing. The Reload button drops the magazine, as does the
-  game's auto-reload when empty. The ammo count stays the game's own. The grab box, aim point and ranges are per weapon
-  (see **Weapon profiles**).
+  game's auto-reload when empty. The ammo count stays the game's own. If your hand gets further than "Magazine grip lets
+  go beyond" from the magazine, the grip lets go. The grab box, aim point and ranges are per weapon (see **Weapon
+  profiles**); the rest is per platform (see **Magazine platforms**).
+- **Magazine platforms:** every gun's magazine belongs to a platform (AK, AR-15 / 5.56, AR-10 / 7.62, SMG, bolt-action
+  rifle, LMG box, shotgun box, other), picked from its name, or set with "Magazine platform" in its weapon profile.
+  Everything in a platform is shared by every gun on it: where the magazine sits in your hand ("Magazine in hand"
+  right / up / forward / pitch / yaw / roll), straight or hinged ("In and out of the gun"), the travel or the hinge
+  point and angle, the pull force, and whether it needs the magazine release. The **Magazine platform:** *name* group
+  in the settings edits the platform of the gun in your hand.
+- **Magazine release action:** its own SteamVR action set, "Magazine", active only while a hand grips a magazine and
+  only for that hand, so the button can do something else the rest of the time. A SteamVR binding saved before it
+  existed has nothing on it: then the gripping hand's X / A (left / right) works as the release and stays away from
+  the game while you hold the magazine. Re-select "MOHW VR defaults" in SteamVR's bindings to get it bound properly.
+- **Scoped eye (prototype, engine two-view):** bring one eye behind a scope's sight line (the weapon profile's optic
+  zero: within "Eye box" of it, up to "Eye relief" behind your hand) while aiming down sights, and that eye sees
+  through the scope: the world magnified by the game's own zoom for that gun (or the profile's "Scope magnification"),
+  inside an eyepiece that narrows as your eye leaves the line, black around it. The other eye keeps its own view, the
+  gun included. It costs nothing extra: the scoped view replaces that eye's normal one. The game's own zoom-optic mesh
+  (its reticle) stays in the scoped view; a drawn crosshair stands in when there's none. Only zooms of at least "Game
+  ADS zoom that counts as a scope" (2.5x) count, so red dots and iron sights aren't magnified. Settings: the **Scope**
+  group (shown in the engine two-view mode).
 - **Body holsters:** press grip with a hand at a body position to trigger an action. That hand also takes the weapon
   if the action is a weapon.
 
@@ -233,7 +256,8 @@ vehicles, the Apache, menus). Default layout:
 | Other-hand trigger | LT | Aim down sights (brake in vehicles) |
 | Double-press X / Y / B / A | D-pad left / up / right / down | Items and gadgets |
 | Long-press Y | Start | Pause menu |
-| Grips | - | Holsters, two-handed grip; the steering wheel in driving missions |
+| Grips | - | Holsters, two-handed grip, the magazine; the steering wheel in driving missions |
+| X / A of the hand gripping a magazine | - | Magazine release (SteamVR action set "Magazine", that hand only) |
 | Double-tap left / right thumbrest | LB / RB | Keep the second touch down to hold. LB stays on while your thumb moves to the left stick, for peek and lean |
 
 On Index controllers the layout is the same, with the left hand's A / B in place of X / Y (left A = Touch X, left B =
@@ -274,8 +298,10 @@ is there, applies immediately and saves by itself. There is also a Recenter butt
 | Holster actions | What each zone does |
 | Arm IK | Arms on or off, hand offsets, each shoulder's position, elbow behaviour |
 | Body | Body position, keeping it upright, steadying it on head turns |
-| Weapon | Gun follows the controller, manual reload, which body parts are hidden |
-| Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand |
+| Weapon | Gun follows the controller, manual reload, the magazine grip's break distance, which body parts are hidden |
+| Scope (engine two-view) | The scoped eye: on / off, eye box, eye relief, eyepiece size, the zoom that counts as a scope, the drawn crosshair |
+| Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand, including its magazine platform and scope magnification |
+| Magazine platform: *platform* | The magazine in the hand, straight or hinged, travel, hinge point and angle, pull force, the release |
 | HUD | The HUD panel on or off, its size, depth, IPD and offset, Hud Element Scale, the menu and movie screen size and distance, hiding the reticle (the numbers are kept per render mode) |
 | Driving | Head look, stereo and the steering wheel in the driving missions |
 
@@ -287,7 +313,7 @@ the headset at its real position, so you can adjust it with the view on. Anythin
 | Blue labelled rings | The holster zones (they're spheres, and a ring is a sphere's outline from any side) |
 | Orange ring | The magazine pouch |
 | Yellow box | The magazine's grab box |
-| Purple / pink rings | The magazine's turn range and lock distance |
+| Purple / pink rings | The magazine's turn range and lock distance, around where it engages (the end of its path) |
 | White / red dots | The magazine's seat and its aim point |
 | Green band | The two-handed grab along the barrel |
 
@@ -329,7 +355,11 @@ The rough edges known so far:
   Virtual Desktop. The hand calibration and weapon profiles were tuned on Touch, so other controllers may need
   "Hand offset" / "Hand rotation" and the grip offsets adjusted. Controllers whose grip is bound as a button have no
   analog grip, and on HP, Cosmos and WMR two-handed aiming uses the controller's tip instead of the palm.
-- **Manual reload works but is unrefined,** and has only been tested on a single rifle in a single level.
+- **Manual reload works but is unrefined,** and has only been tested on a single rifle in a single level. The sticky
+  magazine, the platforms and the release action (2026-11-14) haven't been tested in the headset yet, and every
+  platform's in-hand offset starts at zero (the magazine's top at the controller's tip, as before).
+- **The scoped eye is a prototype** (2026-11-14, untested in the headset): engine two-view only; the HUD shows inside
+  the eyepiece; the eyepiece's edge is hard. The switch between the eye's view and the scope can be a frame off.
 - **Manual reload needs a magazine that's a separate part of the gun,** so it doesn't apply to pistols yet. They reload
   as the game does. Taking the magazine out of a gun and switching weapons refills it, and the HUD's count can change
   before you've seated a new magazine.

@@ -247,7 +247,9 @@ std::atomic<bool> g_scopeEyeEnabled{true};
 std::atomic<float> g_scopeEyeBox{0.035f};       // m from the sight line
 std::atomic<float> g_scopeEyeRelief{0.45f};     // m behind the hand along it
 std::atomic<float> g_scopeApparentFov{24.0f};   // deg, the eyepiece's size in view
-std::atomic<float> g_scopeMinZoom{1.3f};        // the game's ADS zoom that counts as a scope
+// The game's ADS zoom that counts as a scope: its zoom levels run 1.1-1.9x for iron sights and red dots (open sights,
+// which VR shouldn't magnify) and 3x / 4x / 6x / 24x for scopes (mohwvr_weaponsway.log, 2026-11-12).
+std::atomic<float> g_scopeMinZoom{2.5f};
 std::atomic<bool> g_scopeReticle{true};
 std::atomic<float> g_scopeMagnification{0.0f};  // per weapon: 0 = the game's ADS zoom
 const char kPlatformGroup[] = "Magazine platform";

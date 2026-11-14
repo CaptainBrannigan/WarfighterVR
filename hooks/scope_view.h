@@ -37,5 +37,8 @@ bool GetScopeMask(int* eye, float* cx, float* cy, float* radiusX, float* radiusY
 // Render threads (hooks/camera_matrix_test_hook.cpp): the eye whose first-person batches aren't drawn (the scoped one),
 // or -1.
 int GetScopeHiddenEye();
+// Render threads: the scoped eye is drawing the game's own zoom optic (the "1pzoom" mesh, its reticle): the drawn
+// crosshair stands aside while it does.
+void NoteScopeGameReticle();
 
 } // namespace mohw

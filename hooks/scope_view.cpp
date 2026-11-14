@@ -36,6 +36,7 @@ struct Mask
 Mask g_mask; // guarded by g_maskMutex
 std::atomic<int> g_hiddenEye{-1};
 std::atomic<unsigned long long> g_hiddenEyeMs{0};
+std::atomic<unsigned long long> g_gameReticleMs{0}; // NoteScopeGameReticle
 
 Vec3 V(float x, float y, float z)
 {
@@ -274,7 +275,8 @@ bool GetScopeMask(int* eye, float* cx, float* cy, float* radiusX, float* radiusY
     *cy = g_mask.cy;
     *radiusX = g_mask.rx;
     *radiusY = g_mask.ry;
-    *reticle = g_mask.reticle;
+    // The game's own reticle in the view (its zoom optic): no drawn one over it.
+    *reticle = g_mask.reticle && GetTickCount64() - g_gameReticleMs.load(std::memory_order_relaxed) > kRecentMs;
     return true;
 }
 
@@ -283,6 +285,13 @@ int GetScopeHiddenEye()
     if (GetTickCount64() - g_hiddenEyeMs.load(std::memory_order_relaxed) > kRecentMs)
         return -1;
     return g_hiddenEye.load(std::memory_order_relaxed);
+}
+
+void NoteScopeGameReticle()
+{
+    const unsigned long long now = GetTickCount64();
+    if (now - g_gameReticleMs.exchange(now, std::memory_order_relaxed) > 2000)
+        MOHW_LOG(kLogFile, "the game's zoom optic (its reticle) is drawn in the scoped eye: the crosshair stands aside");
 }
 
 } // namespace mohw

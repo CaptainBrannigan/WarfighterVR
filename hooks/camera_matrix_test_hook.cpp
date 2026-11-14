@@ -840,6 +840,84 @@ void ProbeNames(uintptr_t obj, int depth, char* out, size_t outSize, int* found)
     }
 }
 
+// A first-person mesh's asset name, SEH-safe: as the batch log found them, a pointer among the mesh object's first dwords
+// leads to an object whose +0x58 is the name ("mohw/weapons/attachments/optics/opt_aimpoint_cs/opt_aimpoint_cs_1pzoom_1p_Mesh").
+bool ContainsNoCase(const char* s, const char* what)
+{
+    for (; *s; ++s)
+    {
+        const char* a = s;
+        const char* b = what;
+        while (*a && *b && (*a | 0x20) == (*b | 0x20))
+            ++a, ++b;
+        if (!*b)
+            return true;
+    }
+    return false;
+}
+
+bool MeshAssetName(uintptr_t mesh, char* out, int size)
+{
+    if (mesh < 0x10000 || mesh > 0xFFFF0000u)
+        return false;
+    for (int i = 0; i < 32; ++i)
+    {
+        uintptr_t string = 0;
+        __try
+        {
+            const uintptr_t v = reinterpret_cast<const uintptr_t*>(mesh)[i];
+            if (v >= 0x10000 && v < 0xFFFF0000u)
+                string = *reinterpret_cast<const uintptr_t*>(v + 0x58);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            continue;
+        }
+        if (ReadPrintableString(string, out, size) && ContainsNoCase(out, "_1p_Mesh"))
+            return true;
+    }
+    return false;
+}
+
+// THE GAME'S OWN RETICLE (2026-11-14): every optic ships as two meshes, opt_<name>_1p_mesh and opt_<name>_1pzoom_1p_mesh
+// (Weapons.sb), and the game draws the "1pzoom" one, which carries the reticle (the mohw_weapons_reticle shaders), only
+// while zoomed. A batch with such a mesh stays in the scoped eye's view (hooks/scope_view.h): its reticle on the sight
+// line. Per mesh, cached for the equipped weapon.
+std::mutex g_zoomMeshMutex;
+uintptr_t g_zoomMeshSeen[64] = {}; // guarded by g_zoomMeshMutex
+bool g_zoomMeshIs[64] = {};
+int g_zoomMeshCount = 0;
+unsigned g_zoomMeshGeneration = ~0u;
+
+bool IsZoomOpticMesh(uintptr_t mesh)
+{
+    const unsigned generation = GetEquippedWeaponGeneration();
+    {
+        std::lock_guard<std::mutex> lock(g_zoomMeshMutex);
+        if (generation != g_zoomMeshGeneration)
+        {
+            g_zoomMeshGeneration = generation;
+            g_zoomMeshCount = 0;
+        }
+        for (int i = 0; i < g_zoomMeshCount; ++i)
+            if (g_zoomMeshSeen[i] == mesh)
+                return g_zoomMeshIs[i];
+    }
+    char name[128] = "";
+    const bool zoom = MeshAssetName(mesh, name, sizeof(name)) && ContainsNoCase(name, "1pzoom");
+    std::lock_guard<std::mutex> lock(g_zoomMeshMutex);
+    if (g_zoomMeshCount < 64)
+    {
+        g_zoomMeshSeen[g_zoomMeshCount] = mesh;
+        g_zoomMeshIs[g_zoomMeshCount] = zoom;
+        ++g_zoomMeshCount;
+        if (zoom)
+            MOHW_LOG(kLogFile, "zoom optic mesh %p: %s (kept in the scoped eye: the game's reticle)",
+                     reinterpret_cast<void*>(mesh), name);
+    }
+    return zoom;
+}
+
 // SEH-safe: the mesh pair of instance i (mesh ptr, second ptr) and the mesh object's first dword (vtable).
 bool ReadInstance(const unsigned char* b, uint32_t i, uintptr_t* mesh, uintptr_t* second, uintptr_t* vtable)
 {
@@ -1058,10 +1136,21 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
 
     // SCOPED EYE (2026-11-14, hooks/scope_view.h): this eye's view is the scope's, its camera inside the gun's optic, so
     // the first-person batches (gun, magazine, arms) go 50 m behind the eye instead: moving the batch camera forward by d
-    // moves what it draws back by d.
+    // moves what it draws back by d. Except the game's zoom optic (its reticle, IsZoomOpticMesh), drawn while zoomed.
     if (eye >= 0 && eye == GetScopeHiddenEye())
-        for (int k = 0; k < 3; ++k)
-            m[12 + k] -= m[8 + k] * 50.0f;
+    {
+        bool zoomOptic = false;
+        for (uint32_t i = 0; !isBody && i < count && i < 16 && !zoomOptic; ++i)
+        {
+            uintptr_t mesh = 0, second = 0, vt = 0;
+            zoomOptic = ReadInstance(b, i, &mesh, &second, &vt) && mesh && IsZoomOpticMesh(mesh);
+        }
+        if (!zoomOptic)
+            for (int k = 0; k < 3; ++k)
+                m[12 + k] -= m[8 + k] * 50.0f;
+        else
+            NoteScopeGameReticle(); // the drawn crosshair stands aside for it
+    }
 
     ++g_patched;
     int lastLogged = g_lastLoggedSelected.load();
