@@ -6,7 +6,7 @@ from inside the game: stereo rendering at the headset's real field of view, head
 controllers for aiming, a gun held in your hand, arms that follow your hands, manual magazine reloads, body holsters,
 and an in-headset settings menu.
 
-**Status: v1.2, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
+**Status: v1.3, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
 hasn't been played all the way through yet; see [Known issues](#known-issues).
 
 ## Requirements
