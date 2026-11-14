@@ -35,6 +35,32 @@
 #define OFFSET_GAMECONTEXT 0x2AC5FE4u
 #define OFFSET_CLIENTGAMECONTEXT 0x2AC5FE4u // generator dump gives the same address for both -- unconfirmed whether that's intentional or a generator quirk
 #define OFFSET_DXRENDERER 0x2AC1E20u
+// DxRenderer's screen state (2026-11-12, Ghidra: FUN_007392a0 create, FUN_00739680 apply mode, FUN_00737dd0 resize,
+// FUN_00739b00 the per-frame display update that presents). The swap chain is ResizeBuffers(+0x28, +0x2C)
+// ("renderer->m_screenInfo.windowWidth / windowHeight", from the game's own assert text), after which +0x20/+0x24 take
+// those values and the backbuffer views are rebuilt. FUN_00739b00 runs the full reset (FUN_007380f0) whenever
+// +0x20/+0x24 differ from +0x28/+0x2C, and, while +0x18 (fullscreen as the game believes it) is set, re-applies the mode
+// whenever the settings' size (+0x84 -> +0xC/+0x10, 0 = the desktop's) differs from +0x28/+0x2C.
+#define DXRENDERER_FULLSCREEN 0x18u          // byte
+#define DXRENDERER_SCREEN_WIDTH 0x20u        // Int32, the backbuffer as it is
+#define DXRENDERER_SCREEN_HEIGHT 0x24u
+#define DXRENDERER_TARGET_WIDTH 0x28u        // Int32, what the next resize makes it
+#define DXRENDERER_TARGET_HEIGHT 0x2Cu
+#define DXRENDERER_SETTINGS 0x84u            // DxRenderSettings*
+#define DXRENDERSETTINGS_MODE_WIDTH 0x0Cu    // Int32, the fullscreen mode asked for
+#define DXRENDERSETTINGS_MODE_HEIGHT 0x10u
+// Input restrictions (2026-11-12, Ghidra): ServerInputRestrictionEntity (data InputRestrictionEntityData, record
+// 02B73808: per-input Booleans, false = take it away) applies itself to the server player through FUN_00b245b0 ->
+// FUN_00b2ac60(input, allowed), which keeps one bit per input on the player, set = allowed: inputs 0..11 at +0xC0,
+// 12..73 in the 64-bit word at +0xC8 (bit input - 12). FUN_00b2ac00 reads it back. Yaw = 4, Pitch = 5, Fire = 9.
+// The players: [[OFFSET_SERVERGAMECONTEXT] + 0x30] + 0x78 .. +0x7C (FUN_00b264b0); the human ones have +0x354 == 0.
+#define OFFSET_SERVERGAMECONTEXT 0x2AEAF8Cu
+#define SERVERGAMECONTEXT_PLAYERMANAGER 0x30u
+#define SERVERPLAYERMANAGER_PLAYERS_BEGIN 0x78u
+#define SERVERPLAYERMANAGER_PLAYERS_END 0x7Cu
+#define SERVERPLAYER_IS_AI 0x354u             // byte
+#define PLAYER_INPUT_ALLOWED_LOW 0xC0u        // UInt32, inputs 0..11
+#define PLAYER_INPUT_ALLOWED_HIGH 0xC8u       // UInt64, inputs 12..73
 #define OFFSET_GAMERENDERER 0x2AC8FD0u
 #define OFFSET_BORDERINPUTNODE 0x2AC9888u
 // Per-frame render-submit function (2026-09-23, found via Ghidra decompile of the joinUpdateJob call site already
@@ -119,6 +145,24 @@
 // both views half the width, half the aspect. Read at a level's world-module creation too (FUN_00A6B510).
 #define GAMERENDERER_SETTINGS 0x3Cu
 #define GAMERENDERSETTINGS_SPLITSCREENTESTVIEWCOUNT 0x44u
+// The post-process settings (2026-11-11, Ghidra): GameRenderer+0xEDC holds three render module pointers (FUN_008B4A30
+// walks them); slot 1 is the client world module (vtable 027AC1B4), its +0x18 the world renderer (vtable 02831CC8,
+// called through vtable +0x08 = FUN_0101CFA0 from FUN_00A70EF0). The world renderer's +0x34 is its post-process module
+// (0x4F0 bytes, FUN_00794660, built by FUN_01010C30 / FUN_0101CFA0), whose +0x14 is the GlobalPostProcessSettings
+// registered as "PostProcess" and +0x10 a second one (each 0x1E0 bytes, vtable 0277BF7C, constructor FUN_0256BF80).
+// GlobalPostProcessSettings (type record 02B616A4) fields: ForceDofEnable +0xE8 (Int32, -1 = the game's, set so by the
+// constructor), DiffusionDofEnable +0x1BD, ADSDoFEnable +0x1A9 (Boolean).
+#define GAMERENDERER_MODULES 0xEDCu
+#define OFFSET_CLIENTWORLDMODULE_VTABLE 0x27AC1B4u
+#define CLIENTWORLDMODULE_WORLDRENDERER 0x18u
+#define OFFSET_WORLDRENDERER_VTABLE 0x2831CC8u
+#define WORLDRENDERER_POSTPROCESS 0x34u
+#define POSTPROCESS_SETTINGS 0x14u
+#define POSTPROCESS_SETTINGS2 0x10u
+#define OFFSET_GLOBALPOSTPROCESSSETTINGS_VTABLE 0x277BF7Cu
+#define GLOBALPOSTPROCESS_FORCEDOFENABLE 0xE8u
+#define GLOBALPOSTPROCESS_DIFFUSIONDOFENABLE 0x1BDu
+#define GLOBALPOSTPROCESS_ADSDOFENABLE 0x1A9u
 // One view of the list: 0xE80 bytes. +0x04 name (char*: "Root", "SecondaryRoot", "RootLeft", "RootRight"), +0x10/+0x14
 // target width/height, +0x20 viewport x/y/w/h (uint16 each), +0x30 stereo eye (1 = right, 2 = left, NVAPI's values),
 // +0x40 the view's RenderView (0x490 bytes), +0x4D0 a second copy of it, +0x960 the previous frame's RenderView.
@@ -127,6 +171,10 @@
 #define VIEWDESC_RENDERVIEW 0x40u
 #define VIEWDESC_RENDERVIEW_COPY 0x4D0u
 #define VIEWDESC_RENDERVIEW_PREV 0x960u
+// +0xE00: the view's raw camera, 16 floats (rows right / up / back / position), copied from the view params +0xDC0. The
+// first-person batches are drawn from it, not from the RenderView: FUN_008B2AB0 puts [view+4]+0xE00 on its batch camera
+// (MOV EDX,[ESI+4]; ADD EDX,0xE00 at 0x8B2CA2, then FUN_006FC2A0, RETURN 0x8B2CB8).
+#define VIEWDESC_VIEWMODEL_CAMERA 0xE00u
 // RenderView: the RenderViewDesc first (transform 16 floats at +0, fovY +0x48, near/far +0x50/+0x54, aspect +0x58,
 // stereo separation/convergence +0x64/+0x68, viewport offset +0x6C, viewport scale +0x74 -- all inputs of the
 // projection builder FUN_00704C70, called from UpdateMatrices), then dirty flags at +0x90 (FUN_00701340 sets 0xD,
@@ -139,6 +187,52 @@
 // __thiscall (ECX = the UI's movie manager), 1 stack arg: {renderer, ?, movie manager, list (0 = before the world,
 // 1 = the HUD over the frame), screen renderer, target of list 0, flag}, RET 4. Called from FUN_008F42F0.
 #define OFFSET_UI_PASS 0xCBE3D0u
+// FUN_00CBB4E0: replays one recorded command list. __thiscall (ECX = the Scaleform renderer state, the movie manager's
+// +0x44), 1 stack arg (the list, 0 or 1), RET 4. FUN_00CBE3D0 calls it once, or with the engine's stereo on once per eye
+// (a stencil clear, then this, per eye).
+#define OFFSET_UI_LIST_REPLAY 0xCBB4E0u
+// The UI's screen rectangle (2026-11-12): __thiscall(Scaleform state, int out[4] = x1 y1 x2 y2), RET 4. DxRenderer
+// +0x1A0 (u16 x y w h, the screen) inside the safe area (state +0x2344/+0x2348, the ScreenSafeAreaWidth/Height options).
+// Every UI movie's viewport comes from it (FUN_008fcfd0 -> FUN_008f4c70, FUN_00a75220). hooks/ui_pass.cpp.
+#define OFFSET_UI_LAYOUT_RECT 0xCB7480u
+// The client world module's constructor (2026-11-12): run once per level load (from FUN_0086ce00), it builds the
+// level's world renderer and its targets. __thiscall, 4 stack args, RET 0x10; prologue PUSH EBP / MOV EBP,ESP /
+// AND ESP,-16. hooks/native_stereo.cpp records the render mode each level was built with.
+#define OFFSET_CLIENT_WORLD_MODULE_CTOR 0xA6B510u
+// THE OCEAN WATER (2026-11-08; hooks/ocean_water_guard.h). The water module (vtable 027F881C, FUN_00CF9080) kicks its
+// jobs once per view from FUN_00CF2070 (vtable +0x1C), all on its one set of buffers. Job entries, __cdecl(job data,
+// argument): the cull (-> FUN_00CF6B90, a third of the patch grid's LODs and counts), the pre-draw (-> FUN_00CF0DA0:
+// zeroes and refills the LOD ranges at module +0x830 and the patch transforms) and the draw (-> FUN_00CF7BC0, the
+// view's water draw lists from those ranges).
+#define OFFSET_OCEAN_CULL_JOB 0xCF7BA0u
+#define OFFSET_OCEAN_PREDRAW_JOB 0xCF2370u
+#define OFFSET_OCEAN_DRAW_JOB 0xCF8730u
+// FUN_00CEFBA0, one LOD's draw: __thiscall(module, context, draw list builder, LOD, first transform, count), RET 0x14.
+// count = end - start of the LOD's range; FUN_00743F70 then copies count * 64 bytes. The module's transform buffer
+// (64000 bytes, 1000 patches) is at module +0x828.
+#define OFFSET_OCEAN_LOD_DRAW 0xCEFBA0u
+#define OCEANWATER_TRANSFORMS 0x828u
+// THE SKY (2026-11-08; hooks/sky_rays_fix.h): FUN_00FD9020 draws the sky as a full-screen quad with a view ray per corner.
+// 0x00FD9DC9 (MOVQ XMM0,[ESP+0xE0], 9 bytes) is where its two branches (3D Vision on / off) join after writing the four
+// rays, before vertices 4 and 5 are copied from 0 and 2.
+#define OFFSET_SKY_RAYS_JOIN 0xFD9DC9u
+// THE EMITTER SYSTEM (2026-11-09, reference only: a test forcing QuadHalfResEnable off with two views didn't change the
+// one-eye dust and was removed). Its manager's global (DAT_02B44420, set by its constructor at 0x01C041FD); the
+// manager's +0x0C is the EmitterSystemSettings (0x68 bytes; FUN_01C041B0 returns it). Field offsets from the reflected
+// field records at 0x02BF8058.. (12 bytes: name, offset in the high half, type): +0x4F QuadEnableRendering, +0x50
+// EnableJobs, +0x51 EnableRendering, +0x63 QuadHalfResEnable (bool: particle quads drawn into the half-res target and
+// composited, "emitterQuadHalf", instead of each view's main pass), +0x65 Enable.
+// THE SCREEN EFFECTS (2026-11-09; hooks/screen_effect_diag.h): FUN_00FD2FA0 draws a view's screen effect, __thiscall
+// (renderer = the world renderer's +0x8C80; the view's ViewDesc copy, its viewport, its visual-environment state),
+// RET 0xC; called per view from FUN_010130C0.
+#define OFFSET_SCREEN_EFFECT_RENDER 0xFD2FA0u
+#define OFFSET_EMITTER_MANAGER 0x2B44420u
+#define EMITTERMANAGER_SETTINGS 0x0Cu
+#define EMITTERSETTINGS_QUADHALFRESENABLE 0x63u
+// The UI's render interface, a global pointer (DAT_02AC16F4). Its vtable: +0x00 set target, +0x04 get target, +0x08
+// clear(flags, const float color[4]*, 0) (__thiscall, RET 0xC), +0x0C viewport. FUN_00CBE3D0 clears with flags 0x200
+// before each eye's HUD replay.
+#define OFFSET_UI_RENDER_INTERFACE 0x2AC16F4u
 // Camera-class matrix setter (2026-09-19, found via Cheat Engine "what writes"
 // on the camera object): FUN_006FC2A0, __thiscall(this=camera, float* 4x4),
 // RET 4; copies 16 dwords to this+0 and ORs 9 into this+0x90 (dirty flags).
@@ -155,6 +249,10 @@
 // batches with a non-zero origin -- the 12-batch first-person group. Its
 // derived view/projection end up in that batch's "shaderState/view" block.
 #define OFFSET_CAMERAMATRIX_CALLER_VIEWMODEL 0x8B2D98u
+// The first FUN_006FC2A0 call in FUN_008B2AB0 (CALL 0x8B2CB3, RETURN 0x8B2CB8): the view's raw camera, absolute
+// (VIEWDESC_VIEWMODEL_CAMERA), set right before the batch-relative copy above on the same thread. Its position says which
+// view (eye) the batch is being built for (hooks/native_stereo.h).
+#define OFFSET_CAMERAMATRIX_CALLER_VIEWSTATE 0x8B2CB8u
 // FUN_006FC090 (camera FOV setter) call inside FUN_008B2AB0: CALL 0x8B2C9D,
 // RETURN 0x8B2CA2. Argument is batch+0xC4 (degrees, 55.0) converted to radians.
 #define OFFSET_FOVSET_CALLER_VIEWMODEL 0x8B2CA2u

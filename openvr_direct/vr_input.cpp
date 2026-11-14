@@ -936,9 +936,10 @@ void UpdateVrInput()
                            poses[weaponHand].pose.deviceToAbsoluteTracking[2][3]};
         bool gripOk = !GetDotsOnlyWithGrip() || result.weaponGripped;
         // No dots with the weapon attachment off: shots follow the game's aim then, not the controller.
-        // Nor while the soldier's aim isn't running (the robot-control section, menus): there's no gun to aim then.
+        // Nor while the soldier's aim isn't running (the robot-control section, menus): there's no gun to aim then. Nor
+        // while the gun is back in the game's animation (GetPlayerAimDriveWeight: a scripted scene).
         UpdateSightDot(hands[weaponHand].tracked && haveHead && gripOk && GetWeaponDriveEnabled() && !g_drivingExe &&
-                           IsPlayerAimActive(),
+                           IsPlayerAimActive() && GetPlayerAimDriveWeight() >= 0.5f,
                        origin, aimQ, headPos);
     }
 

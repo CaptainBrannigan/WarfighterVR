@@ -13,8 +13,11 @@
 #include "aiming_controller_hook.h"
 #include "first_person_rig.h"
 #include "render_pose_stamp.h"
+#include "native_stereo.h"
+#include "weapon_identity.h"
 #include "../sdk/rigid.h"
 #include "../openvr_direct/vr_hands.h"
+#include "../openvr_direct/vr_overlay.h"
 #include "../openvr_direct/vr_reload.h"
 
 #include <windows.h>
@@ -57,6 +60,31 @@ thread_local uint32_t t_lastCount = 0;
 thread_local const void* t_pendingViewmodelCamera = nullptr;
 thread_local uint32_t t_pendingViewmodelFovBits = 0;
 
+// NATIVE TWO-VIEW (hooks/native_stereo.h): FUN_008B2AB0 first sets the view's raw camera on its batch camera
+// (OFFSET_CAMERAMATRIX_CALLER_VIEWSTATE, absolute), then the batch-relative copy this hook rewrites. With both eyes in one
+// frame, that first camera's position says which eye's view the batch is for. The eye then picks the rig's eye offset
+// (SetThreadEyeOverride) and the gun's frustum (projection_aspect_hook.cpp, through LastViewmodelEye).
+thread_local float t_viewStatePos[3] = {};
+thread_local bool t_viewStateValid = false;
+thread_local int t_viewmodelEye = -1;
+// Native two-view: this job thread's last body batch's frame-bone rotations, and which built frame it was.
+thread_local float t_viewRows[3][3][3] = {};
+thread_local unsigned t_viewRowsFrame = 0;
+std::atomic<long> g_nativeEyeBatches[3] = {{0}, {0}, {0}}; // left, right, not matched
+
+void LogNativeEyesIfDue()
+{
+    static std::atomic<unsigned long long> nextLogMs{0};
+    const unsigned long long now = GetTickCount64();
+    unsigned long long due = nextLogMs.load(std::memory_order_relaxed);
+    if (now < due || !nextLogMs.compare_exchange_strong(due, now + 5000, std::memory_order_relaxed))
+        return;
+    MOHW_LOG(kLogFile,
+             "native two-view, last 5 s: first-person batch cameras for the left eye %ld, the right eye %ld, not matched "
+             "%ld (those keep the frame's eye, the left)",
+             g_nativeEyeBatches[0].exchange(0), g_nativeEyeBatches[1].exchange(0), g_nativeEyeBatches[2].exchange(0));
+}
+
 // 0 = use the index selector; 1 = weapon batches only (IsBodyBatch false);
 // 2 = body batch only. (Was count != 3 / == 3, confirmed 2026-09-19 for the
 // first rifle and pistol; other levels broke it, see IsBodyBatch.)
@@ -68,8 +96,9 @@ void* g_submitAddress = nullptr;
 
 // ---- Controller weapon drive (v3, 2026-09-26) ---------------------------------------------------------------
 // Draws the weapon batches (count != 3) as if the first-person rig were rigidly held by the right controller.
-// Numpad . toggles it; the gun snaps straight onto the controller at a fixed grip point (WeaponGripRight/Up/Back in
-// the ini), wherever the hand happens to be when the key is pressed.
+// Numpad . toggles it; the gun snaps straight onto the controller at its grip J (GripInCamera: since 2026-11-09 the
+// gun's own hand socket where the arm IK holds the hand; a per-weapon grip point before), wherever the hand happens to
+// be when the key is pressed.
 //
 // M (the matrix this hook sees) is the local CAMERA the batch is drawn from, not the gun (the translation test showed
 // moving it by d moves the gun by -d). The gun itself is camera-attached, G = L * M. Drawn with camera M' and seen
@@ -144,15 +173,15 @@ bool FrameInView(const float m[16], const Vec3 axes[3], const Vec3& position, Ri
     return true;
 }
 
-// The weapon hand's controller (the "right" slot), or the off hand's.
-bool ControllerFrame(const float m[16], bool offHand, Rigid* out)
+// The weapon hand's controller (the "right" slot), or the off hand's, in tracking space: its axes (right, up, back)
+// and position.
+bool ControllerInTracking(bool offHand, Vec3 axes[3], Vec3* position)
 {
     mohwvr::ipc::ControllerPoseBlock controller{};
     if (!(offHand ? GetLeftControllerPose(&controller) : GetRightControllerPose(&controller)))
         return false;
 
     Quat q{controller.orientationX, controller.orientationY, controller.orientationZ, controller.orientationW};
-    Vec3 axes[3];
     for (int i = 0; i < 3; ++i)
     {
         Vec3 e{};
@@ -161,11 +190,93 @@ bool ControllerFrame(const float m[16], bool offHand, Rigid* out)
         e.z = i == 2 ? 1.0f : 0.0f;
         axes[i] = QuatRotateVector(q, e);
     }
-    Vec3 position;
-    position.x = controller.positionX;
-    position.y = controller.positionY;
-    position.z = controller.positionZ;
-    return FrameInView(m, axes, position, out);
+    position->x = controller.positionX;
+    position->y = controller.positionY;
+    position->z = controller.positionZ;
+    return true;
+}
+
+// The same controller as a frame like M (FrameInView).
+bool ControllerFrame(const float m[16], bool offHand, Rigid* out)
+{
+    Vec3 axes[3], position{};
+    return ControllerInTracking(offHand, axes, &position) && FrameInView(m, axes, position, out);
+}
+
+// THE GUN AT ITS HAND SOCKET (2026-11-08): where the equipped gun's IK_Joint_RightHand is in the rig's camera frame,
+// read from the body batch's first pass of each frame, before the arm IK moves it (first_person_rig.h
+// ReadGunSocketInCamera), and used by the weapon batches: the latest one. (It used to prefer this thread's own
+// reading, which could be a later pass's, taken after the IK; and both views read the same values now, one pose
+// against the head centre.) Before the first reading (the skeleton not settled yet at a level's start), the OBR's.
+// [0] the socket, [1] the right hand's centre, same pose.
+constexpr float kFallbackSocket[2][3] = {{0.135f, -0.177f, -0.129f}, {0.104f, -0.178f, -0.193f}};
+std::mutex g_socketMutex;
+float g_socket[2][3] = {};          // guarded by g_socketMutex
+unsigned long long g_socketMs = 0;  // likewise
+
+void NoteGunSocket(const float s[3], const float hand[3])
+{
+    const unsigned long long now = GetTickCount64();
+    std::lock_guard<std::mutex> lock(g_socketMutex);
+    memcpy(g_socket[0], s, sizeof(g_socket[0]));
+    memcpy(g_socket[1], hand, sizeof(g_socket[1]));
+    g_socketMs = now;
+}
+
+// Once per equipped weapon: the socket, the game's hand centre it's measured from (the game's own pose: the same in
+// every frame of a steady hold, whatever the head and controller do), and the grip it gives.
+void LogSocketGripIfNew(const float s[3], const float h[3], const float grip[3])
+{
+    // 1.5 s after the weapon changes, as the socket log (first_person_rig.cpp LogWeaponSockets): the draw animation over.
+    static std::mutex mutex;
+    static unsigned seen = ~0u, logged = ~0u;
+    static unsigned long long changedAt = 0;
+    const unsigned generation = GetEquippedWeaponGeneration();
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (generation == logged)
+            return;
+        const unsigned long long now = GetTickCount64();
+        if (generation != seen)
+        {
+            seen = generation;
+            changedAt = now;
+            return;
+        }
+        if (now - changedAt < 1500)
+            return;
+        logged = generation;
+    }
+    char key[160] = "", display[64] = "";
+    GetEquippedWeapon(key, sizeof(key), display, sizeof(display));
+    MOHW_LOG(kLogFile,
+             "GUN AT SOCKET: %s: IK_Joint_RightHand in the camera (%.3f, %.3f, %.3f), the game's right hand centre (%.3f, "
+             "%.3f, %.3f) -> grip (%.3f, %.3f, %.3f)",
+             display[0] ? display : "(unknown weapon)", s[0], s[1], s[2], h[0], h[1], h[2], grip[0], grip[1], grip[2]);
+}
+
+// The latest reading; false (the OBR's) before the first.
+bool CurrentGunSocket(float s[3], float hand[3])
+{
+    std::lock_guard<std::mutex> lock(g_socketMutex);
+    const bool read = g_socketMs != 0;
+    memcpy(s, read ? g_socket[0] : kFallbackSocket[0], sizeof(g_socket[0]));
+    memcpy(hand, read ? g_socket[1] : kFallbackSocket[1], sizeof(g_socket[1]));
+    return read;
+}
+
+// Rotation = roll (about back), then pitch (about right), then yaw (about up), as the grips and the hands' calibrations
+// (first_person_rig.cpp AnglesRotation).
+Rigid RotationFromDeg(const float deg[3])
+{
+    const float kRad = 3.14159265f / 180.0f;
+    float cp = cosf(deg[0] * kRad), sp = sinf(deg[0] * kRad);
+    float cy = cosf(deg[1] * kRad), sy = sinf(deg[1] * kRad);
+    float cr = cosf(deg[2] * kRad), sr = sinf(deg[2] * kRad);
+    Rigid roll{{{cr, sr, 0}, {-sr, cr, 0}, {0, 0, 1}}, {0, 0, 0}};
+    Rigid pitch{{{1, 0, 0}, {0, cp, sp}, {0, -sp, cp}}, {0, 0, 0}};
+    Rigid yaw{{{cy, 0, -sy}, {0, 1, 0}, {sy, 0, cy}}, {0, 0, 0}};
+    return Compose(Compose(roll, pitch), yaw);
 }
 
 Rigid GripInCamera()
@@ -189,9 +300,41 @@ Rigid GripInCamera()
     Rigid pitch{{{1, 0, 0}, {0, cp, sp}, {0, -sp, cp}}, {0, 0, 0}};
     Rigid yaw{{{cy, 0, -sy}, {0, 1, 0}, {sy, 0, cy}}, {0, 0, 0}};
     Rigid j = Compose(Compose(roll, pitch), yaw);
-    GetWeaponGripOffset(j.t);
+    // THE GUN AT ITS HAND SOCKET: the gun follows the arm IK's hand (2026-11-09: one calibration, the hand's on its
+    // controller; the only way since the same day, when the profiles' grip positions went).
+    // J is the controller's pose against the camera with the gun as it is now, so a gun point p shows at
+    // (p - J.t) * J.R^T in the controller's frame; the socket s at the point o of that frame takes J.t = s - o * J.R.
+    // The arm IK puts the hand's centre h at `off` of that frame (RightHandIk right / up / forward), turned by its
+    // calibration R_h (RightHandIk pitch / yaw / roll; first_person_rig.cpp WeaponHandGrip), carrying the hand's pose:
+    // so the socket, where the game holds the hand on the gun, rides the hand to off + (s - h) * R_h^T. Plus the gun's
+    // own fine offset in the hand (GunInHandOffset*, default 0). The profile's grip rotation still turns the gun about
+    // the socket. Read from the bones every frame, so the grip stays in the hand whatever the animation does with the
+    // gun. With the gun in the left hand the offsets and the socket's side of the hand are mirrored.
+    float s[3], h[3];
+    const bool read = CurrentGunSocket(s, h);
+    const ArmIkSettings arm = GetArmIkSettings();
+    float handDeg[3] = {arm.rightHandDeg[0], arm.rightHandDeg[1], arm.rightHandDeg[2]};
+    float off[3] = {arm.rightHandPos[0], arm.rightHandPos[1], -arm.rightHandPos[2]};
+    float fine[3];
+    GetGunSocketOffset(fine);
+    fine[2] = -fine[2];
+    float d[3] = {s[0] - h[0], s[1] - h[1], s[2] - h[2]};
     if (mirrored)
-        j.t[0] = -j.t[0];
+    {
+        handDeg[1] = -handDeg[1];
+        handDeg[2] = -handDeg[2];
+        off[0] = -off[0];
+        fine[0] = -fine[0];
+        d[0] = -d[0];
+    }
+    const Rigid handR = RotationFromDeg(handDeg);
+    float o[3];
+    for (int k = 0; k < 3; ++k)
+        o[k] = off[k] + fine[k] + d[0] * handR.R[k][0] + d[1] * handR.R[k][1] + d[2] * handR.R[k][2];
+    for (int k = 0; k < 3; ++k)
+        j.t[k] = s[k] - (o[0] * j.R[0][k] + o[1] * j.R[1][k] + o[2] * j.R[2][k]);
+    if (read)
+        LogSocketGripIfNew(s, h, j.t);
     return j;
 }
 
@@ -226,6 +369,18 @@ void AnchorRigToHead(float m[16], const Rigid& rigCamera, bool addRoll)
     }
     shiftAndRoll.t[0] = GetActiveEyeOffsetAlongRow0(); // T(e) then Rq: the shift is along the unrolled right
     ToMatrix(Compose(shiftAndRoll, rigCamera), m);
+}
+
+// From the game's pose (a) to the driven one (b) by u, 0..1: the rotation blended the short way, the position lerped.
+// For scripted stretches (GetPlayerAimDriveWeight), so the gun glides between the controller and the game's animation.
+void BlendCameras(const float a[16], const float b[16], float u, float out[16])
+{
+    const Rigid ra = FromMatrix(a), rb = FromMatrix(b);
+    Rigid r = rb;
+    BlendRotation(ra.R, rb.R, u, r.R);
+    for (int i = 0; i < 3; ++i)
+        r.t[i] = ra.t[i] + (rb.t[i] - ra.t[i]) * u;
+    ToMatrix(r, out);
 }
 
 // Rewrites m (a weapon batch's local camera matrix) so the gun follows the controller. Returns false, leaving m
@@ -395,30 +550,166 @@ bool DriveMagazine(float m[16], const Rigid& rigCamera)
     return true;
 }
 
-// ARMS (2026-10-31): the body batch's arms onto the controllers, hooks/first_person_rig.h. The weapon hand goes with the
-// gun, so it needs no calibration of its own: wherever the gun's grip offset puts the gun, the game's hand is on it.
+// ARMS (2026-10-31): the body batch's arms onto the controllers, hooks/first_person_rig.h. Each hand on its own
+// controller (2026-11-09: the weapon hand used to go with the gun, wherever its grip put it); the gun follows the hand
+// with "Gun held at its hand socket".
 void DriveArms(const unsigned char* batch, const float original[16], const float drawn[16], const Rigid& rigCamera)
 {
-    if (!GetArmIkEnabled() || !GetWeaponDriveEnabled() || !IsPlayerAimActive())
+    // Not in a scripted stretch, nor while the rig is gliding back from one (GetPlayerAimDriveWeight): the arms are the
+    // game's then, with the gun.
+    if (!GetArmIkEnabled() || !GetWeaponDriveEnabled() || GetPlayerAimDriveWeight() < 1.0f)
         return;
     Rigid c{}, off{};
     if (!ControllerFrame(original, false, &c))
         return;
     const bool haveOff = ControllerFrame(original, true, &off);
     const Rigid gun = Compose(Compose(Inverse(rigCamera), Inverse(GripInCamera())), c);
-    ApplyArmIk(batch, FromMatrix(original), rigCamera, FromMatrix(drawn), gun, off, haveOff,
+    ApplyArmIk(batch, FromMatrix(original), rigCamera, FromMatrix(drawn), gun, c, off, haveOff,
                openvr_direct::IsWeaponTwoHanded(), openvr_direct::IsWeaponHandLeft());
+}
+
+// THE WEAPON SOCKET VIEW (2026-11-09, ShowWeaponSockets; "create a debug listing the weapon sockets and showing a line
+// from their start to finish"): every weapon bone of this body batch's own pose (first_person_rig.h
+// ReadWeaponSocketBones), as a line from its parent's joint to its own with its name, drawn by SteamVR over the frame
+// (openvr_direct/vr_overlay.h) where the game draws that bone. A gun bone goes with the gun: on the weapon hand's
+// controller through the grip J while the drive has the gun, else where the game's own pose has it against the head. A
+// hand bone goes with its hand: on its controller through the hand's calibration while the arm IK has the arms (the off
+// hand rides the gun when two-handed, as in ApplyArmIk), else as the game poses it. FrameInView backwards: a point q in
+// a controller's frame (game units) is at position + axes * q / scale, a point p against the head centre at
+// head + headQ * p / scale. The full list, with each bone's offset from its parent in the gun's own frame, goes to
+// mohwvr_weaponsockets.log once per weapon. Once per frame: the left view's batch in two-view mode.
+std::atomic<bool> g_socketViewShown{false};
+
+void SocketColour(const char* name, int hand, float rgb[3])
+{
+    static const struct
+    {
+        const char* prefix;
+        float r, g, b;
+    } kColours[] = {{"IK_Joint_RightHand", 0.2f, 1.0f, 0.3f}, {"IK_Joint_LeftHand", 0.2f, 0.85f, 1.0f},
+                    {"Wep_Aim", 1.0f, 0.25f, 0.25f},           {"Wep_Mag", 1.0f, 0.85f, 0.2f},
+                    {"Wep_Trigger", 1.0f, 0.55f, 0.1f},        {"Wep_Slide", 1.0f, 0.35f, 1.0f},
+                    {"Wep_Root", 1.0f, 1.0f, 1.0f}};
+    rgb[0] = hand ? 1.0f : 0.6f;
+    rgb[1] = hand ? 1.0f : 0.7f;
+    rgb[2] = 1.0f;
+    if (hand)
+        return;
+    for (const auto& c : kColours)
+        if (strncmp(name, c.prefix, strlen(c.prefix)) == 0)
+        {
+            rgb[0] = c.r;
+            rgb[1] = c.g;
+            rgb[2] = c.b;
+            return;
+        }
+}
+
+void PublishWeaponSockets(const unsigned char* batch, const Rigid& rigCamera)
+{
+    using openvr_direct::kSocketDebugSlots;
+    using openvr_direct::SocketDebugLine;
+    if (!GetShowWeaponSockets())
+    {
+        if (g_socketViewShown.exchange(false))
+        {
+            SocketDebugLine none[kSocketDebugSlots];
+            const float zero[3] = {};
+            openvr_direct::UpdateSocketDebug(none, zero);
+        }
+        return;
+    }
+    const bool gunInLeftHand = openvr_direct::IsWeaponHandLeft();
+    WeaponSocketBones bones;
+    if (!ReadWeaponSocketBones(batch, rigCamera, gunInLeftHand, &bones))
+        return; // a later pass of this frame (the IK has the hands), or no skeleton yet
+    Quat headQ{};
+    float headP[3];
+    if (!ShownHeadPose(&headQ, headP))
+        return;
+    float scale = GetHeadPositionScale();
+    if (!(scale > 0.01f))
+        scale = 1.0f;
+    Vec3 weaponAxes[3], offAxes[3], weaponPos{}, offPos{};
+    const bool haveWeapon = ControllerInTracking(false, weaponAxes, &weaponPos);
+    const bool haveOff = ControllerInTracking(true, offAxes, &offPos);
+    const float drive = GetPlayerAimDriveWeight();
+    const bool gunDriven = GetWeaponDriveEnabled() && drive >= 0.5f && haveWeapon;
+    const bool armsDriven = GetArmIkEnabled() && GetWeaponDriveEnabled() && drive >= 1.0f && haveWeapon;
+    const bool twoHanded = openvr_direct::IsWeaponTwoHanded();
+    const Rigid gripInverse = Inverse(GripInCamera());
+    auto onController = [scale](const Vec3 axes[3], const Vec3& position, const float q[3], float out[3]) {
+        out[0] = position.x + (axes[0].x * q[0] + axes[1].x * q[1] + axes[2].x * q[2]) / scale;
+        out[1] = position.y + (axes[0].y * q[0] + axes[1].y * q[1] + axes[2].y * q[2]) / scale;
+        out[2] = position.z + (axes[0].z * q[0] + axes[1].z * q[1] + axes[2].z * q[2]) / scale;
+    };
+    auto onHead = [&](const float p[3], float out[3]) {
+        Vec3 local{};
+        local.x = p[0] / scale;
+        local.y = p[1] / scale;
+        local.z = p[2] / scale;
+        const Vec3 w = QuatRotateVector(headQ, local);
+        out[0] = headP[0] + w.x;
+        out[1] = headP[1] + w.y;
+        out[2] = headP[2] + w.z;
+    };
+    float where[kMaxSocketBones][3];
+    for (int k = 0; k < bones.count; ++k)
+    {
+        const int hand = bones.hand[k];
+        if (hand == 1 && armsDriven)
+            onController(weaponAxes, weaponPos, bones.handGrip[k], where[k]);
+        else if (hand == 2 && armsDriven && !twoHanded && haveOff)
+            onController(offAxes, offPos, bones.handGrip[k], where[k]);
+        else if (gunDriven && (hand == 0 || (hand == 2 && armsDriven)))
+        {
+            float q[3];
+            PointTimes(bones.joint[k], gripInverse, q);
+            onController(weaponAxes, weaponPos, q, where[k]);
+        }
+        else
+            onHead(bones.joint[k], where[k]);
+    }
+    SocketDebugLine lines[kSocketDebugSlots];
+    for (int k = 0; k < bones.count && k < kSocketDebugSlots; ++k)
+    {
+        SocketDebugLine& s = lines[k];
+        const int p = bones.parent[k];
+        memcpy(s.end, where[k], sizeof(s.end));
+        memcpy(s.start, p >= 0 ? where[p] : where[k], sizeof(s.start));
+        s.line = p >= 0;
+        if (s.line)
+        {
+            const float dx = s.end[0] - s.start[0], dy = s.end[1] - s.start[1], dz = s.end[2] - s.start[2];
+            if (dx * dx + dy * dy + dz * dz < 0.003f * 0.003f)
+                continue; // on its parent's joint: a part this gun doesn't have
+        }
+        s.visible = true;
+        SocketColour(bones.names[k], bones.hand[k], s.rgb);
+        snprintf(s.label, sizeof(s.label), bones.hand[k] ? "%s (hand)" : "%s", bones.names[k]);
+    }
+    openvr_direct::UpdateSocketDebug(lines, headP);
+    g_socketViewShown.store(true);
 }
 
 // THE BODY (2026-11-01): moves the body batch (legs, torso, arms) as a whole. Shown from M' it appears at P * M'^-1 * M;
 // to take a further move B there it's drawn from M * B^-1 * M^-1 * M'. B: the BodyOffset settings along the level body
 // frame, and with BodyUpright the camera's tilt taken out, about the camera. The arms' IK works through the camera drawn
-// here, so the hands stay on the controllers and only the shoulders move.
-void MoveBody(float drawn[16], const float original[16])
+// here, so the hands stay on the controllers and only the shoulders move. pivot = the point the upright turn is about:
+// the camera the rig was posed against (the head centre in two-view mode, so both eyes turn the body the same).
+void MoveBody(float drawn[16], const float original[16], const float pivot[3])
 {
     float offset[3];
     GetBodyOffset(offset);
-    const bool upright = GetBodyUpright();
+    bool upright = GetBodyUpright();
+    // SCRIPTED SCENES (2026-11-12, the user: "both my head movement and the game's camera adjustment move the body
+    // around in ingame cutscenes"): the offset is along the camera's facing, which in a scene is the game's animated
+    // camera, so the body swung with it. The game's own placement then, faded with the rig (GetPlayerAimDriveWeight).
+    const float weight = GetPlayerAimDriveWeight();
+    for (float& o : offset)
+        o *= weight;
+    if (weight < 0.5f)
+        upright = false;
     if (offset[0] == 0.0f && offset[1] == 0.0f && offset[2] == 0.0f && !upright)
         return;
     const Rigid cam = FromMatrix(original);
@@ -433,9 +724,9 @@ void MoveBody(float drawn[16], const float original[16])
         RotationBetween(cam.R[1], up, b.R);
     }
     float turned[3];
-    PointTimes(cam.t, b, turned);
+    PointTimes(pivot, b, turned);
     for (int k = 0; k < 3; ++k)
-        b.t[k] = cam.t[k] - turned[k] + right[k] / rightLength * offset[0] + (k == 1 ? offset[1] : 0.0f) +
+        b.t[k] = pivot[k] - turned[k] + right[k] / rightLength * offset[0] + (k == 1 ? offset[1] : 0.0f) +
                  forward[k] / forwardLength * offset[2];
     ToMatrix(Compose(Compose(Compose(cam, Inverse(b)), Inverse(cam)), FromMatrix(drawn)), drawn);
 }
@@ -582,12 +873,31 @@ void LogBatchIfNew(const unsigned char* b, uint32_t count, bool classifiedBody)
 
 void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr_t ret)
 {
+    if (matrix != nullptr && ret == reinterpret_cast<uintptr_t>(Offset<void*>(OFFSET_CAMERAMATRIX_CALLER_VIEWSTATE)))
+    {
+        memcpy(t_viewStatePos, matrix + 12, sizeof(t_viewStatePos));
+        t_viewStateValid = true;
+        g_original(thisPtr, matrix);
+        return;
+    }
     uintptr_t expectedRet = reinterpret_cast<uintptr_t>(Offset<void*>(OFFSET_CAMERAMATRIX_CALLER_VIEWMODEL));
     if (ret != expectedRet || matrix == nullptr || batch == nullptr)
     {
         g_original(thisPtr, matrix);
         return;
     }
+
+    int eye = -1;
+    unsigned frame = 0;
+    if (t_viewStateValid && IsNativeStereoActive())
+    {
+        eye = NativeStereoEyeForCamera(t_viewStatePos, &frame);
+        g_nativeEyeBatches[eye >= 0 ? eye : 2].fetch_add(1, std::memory_order_relaxed);
+        LogNativeEyesIfDue();
+    }
+    t_viewStateValid = false;
+    t_viewmodelEye = eye;
+    SetThreadEyeOverride(eye);
 
     g_lastViewmodelMatrixTick.store(GetTickCount(), std::memory_order_relaxed);
     PollHotkeys();
@@ -653,25 +963,70 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     // anchored to the head centre: the body+hands batch without the head's roll, the weapon with the drive off with
     // it (it's the view's gun then, and should roll with the view).
     Rigid rigCamera = FromMatrix(m);
-    AlignRigToBones(&rigCamera);
+    // NATIVE TWO-VIEW (2026-11-08, "the gun still looked tiny, reducing the IPD to 0.5 helped"): M is this eye's camera in
+    // both modes, but the rig isn't posed against the same camera in both. One eye per frame, the game's own camera is
+    // the eye (CommitViewTransform adds the offset), so the rig comes posed against M and the anchor below moves it back
+    // to the head centre. In two-view mode the game's camera is the head centre and only the views are moved to the eyes,
+    // so the rig comes posed against the head centre already: taking it as posed against M moved it a further eye offset
+    // off, the wrong way in each eye, which doubled its parallax (half as far, so half the size). So here the camera it
+    // was posed against is M moved back along its right by this eye's offset; the anchor, the weapon drive, the
+    // magazine and the arms all work from that, and the anchor comes out as M itself (without head roll).
+    // And each eye is aligned to its own view's body bones (both eyes' given one pose, SyncTwoViewBodyPose), not to
+    // whatever the game returned last, which could be the other view's copy a tick newer: that turned one eye's body
+    // a few degrees for a frame (the "ghost like frame"). Weapon batches use their view's body rows (same job thread).
+    const float(*rows)[3][3] = nullptr;
+    if (eye >= 0)
+    {
+        const float e = GetActiveEyeOffsetAlongRow0();
+        for (int k = 0; k < 3; ++k)
+            rigCamera.t[k] -= rigCamera.R[0][k] * e;
+        if (isBody)
+        {
+            SyncTwoViewBodyPose(b, frame);
+            if (ReadBatchFrameRows(b, t_viewRows))
+                t_viewRowsFrame = frame;
+        }
+        if (frame != 0 && t_viewRowsFrame == frame)
+            rows = t_viewRows;
+    }
+    AlignRigToBones(&rigCamera, rows);
+    // The gun's hand socket in this pose, for the weapon batches' grip (GripInCamera), before the arm IK below.
+    if (isBody)
+    {
+        float socket[3], hand[3];
+        if (ReadGunSocketInCamera(b, rigCamera, socket, hand))
+            NoteGunSocket(socket, hand);
+    }
+    // The weapon socket view, from the same pose (and the grip just noted), before the arm IK too.
+    if (isBody && eye <= 0)
+        PublishWeaponSockets(b, rigCamera);
+    // SCRIPTED STRETCHES (2026-11-08): while the soldier's aim isn't running (a breach's kick, a cutscene, a locked
+    // camera), the gun is the game's again, as with the drive off, blended to and from it (GetPlayerAimDriveWeight).
+    const float drive = GetPlayerAimDriveWeight();
     bool driven = false;
     if (patchThis)
     {
         uintptr_t mesh0 = 0, second0 = 0, vtable0 = 0;
-        if (!isBody && ReadInstance(b, 0, &mesh0, &second0, &vtable0))
-        {
+        const bool haveMesh = !isBody && ReadInstance(b, 0, &mesh0, &second0, &vtable0);
+        if (haveMesh)
             NoteWeaponMesh(mesh0);
-            if (IsMagazineMesh(mesh0))
+        if (drive > 0.0f)
+        {
+            float game[16];
+            AnchorRigToHead(game, rigCamera, isBody); // the game's pose for this batch, the blend's other end
+            if (haveMesh && IsMagazineMesh(mesh0))
                 driven = DriveMagazine(m, rigCamera);
+            driven = driven || DriveWeaponFromController(m, rigCamera);
+            if (driven && drive < 1.0f)
+                BlendCameras(game, m, drive, m);
         }
-        driven = driven || DriveWeaponFromController(m, rigCamera);
     }
     if (!driven)
         AnchorRigToHead(m, rigCamera, isBody);
     if (isBody)
     {
         NoteBodyBatch(b);
-        MoveBody(m, matrix);
+        MoveBody(m, matrix, rigCamera.t);
         DriveArms(b, matrix, m, rigCamera);
     }
 
@@ -682,6 +1037,7 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
                    t_seq, batch, count, transl[0], transl[1], transl[2], thisPtr);
 
     g_original(thisPtr, m);
+    SetThreadEyeOverride(-1);
 }
 
 // SEH-safe (no C++ objects in this frame): resolves which instance of a first-person body batch (IsBodyBatch) this draw
@@ -720,7 +1076,8 @@ void __cdecl HookedSubmit(void* item, void* drawState)
     // With the gun on the controller, the game's arms and hands are left reaching for where the gun used to be: the
     // parts picked in the settings (HideBodyPart1..4) are skipped, except the arms while the IK has them on the
     // controllers (DriveArms).
-    if (GetWeaponDriveEnabled() &&
+    // Not in a scripted stretch (GetPlayerAimDriveWeight): the gun is in the game's hands then, so they're drawn.
+    if (GetWeaponDriveEnabled() && GetPlayerAimDriveWeight() >= 1.0f &&
         reinterpret_cast<uintptr_t>(_ReturnAddress()) ==
             reinterpret_cast<uintptr_t>(Offset<void*>(OFFSET_DRAWITEMSUBMIT_CALLER_INSTANCELOOP)))
     {
@@ -836,11 +1193,8 @@ void CheckWeaponDriveHotkey()
         SetWeaponDriveEnabled(on); // saved, so it's how the next character load starts too
         if (on)
         {
-            float grip[3];
-            GetWeaponGripOffset(grip);
             g_weaponGripLogRequested = true;
-            MOHW_LOG(kLogFile, "Numpad . -- weapon drive ON, gun snapped to the controller at grip (%.3f, %.3f, %.3f)",
-                     grip[0], grip[1], grip[2]);
+            MOHW_LOG(kLogFile, "Numpad . -- weapon drive ON, gun held at its hand socket on the controller");
         }
         else
         {
@@ -858,6 +1212,11 @@ bool ConsumeViewmodelCamera(const void* camera)
     uint32_t fovBits;
     memcpy(&fovBits, static_cast<const unsigned char*>(camera) + 0x48, sizeof(fovBits));
     return fovBits == t_pendingViewmodelFovBits;
+}
+
+int LastViewmodelEye()
+{
+    return t_viewmodelEye;
 }
 
 bool IsPlayerSkeletonLoaded()

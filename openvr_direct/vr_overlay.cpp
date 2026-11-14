@@ -126,6 +126,7 @@ PFN_SetOverlayTransformAbsolute g_setTransform = nullptr;
 PFN_ShowHideOverlay g_show = nullptr;
 PFN_ShowHideOverlay g_hide = nullptr;
 PFN_SetOverlayColor g_setColor = nullptr;
+PFN_CreateOverlay g_createOverlay = nullptr; // the socket view makes its overlays as it needs them
 int g_trackingUniverse = 1;
 // The sight dots are ready (handles created, thread started); g_dotHandles below are written before it is set.
 std::atomic<bool> g_sightReady{false};
@@ -161,11 +162,12 @@ void ScrollBy(int px)
 int ColumnForGroup(const char* group)
 {
     auto is = [group](const char* name) { return strncmp(group, name, strlen(name)) == 0; };
-    if (is("Head") || is("View") || is("Legacy"))
+    // HUD under View (2026-11-12, the user).
+    if (is("Head") || is("View") || is("HUD") || is("Legacy"))
         return 0;
     if (is("Weapon") || is("Holster") || is("Driving"))
         return 2;
-    return 1; // Controls, Hands, HUD
+    return 1; // Controls, Hands
 }
 
 class Canvas
@@ -325,6 +327,15 @@ void DrawMenu(Canvas& c)
         bool odd = (rowParity[col]++ & 1) != 0;
         if (!onCanvas(row.top, row.bottom))
             continue;
+        if (info.isNote)
+        {
+            // A note under the setting before it (the render mode's reload note): text only, in the row above's colour.
+            rowParity[col]--;
+            c.Fill(row, odd ? kRowA : kRowB);
+            RECT note{x + 24, row.top, x + kColumnWidth - 8, row.bottom};
+            c.Text(info.label, note, rowFont, kAccent, DT_LEFT | DT_END_ELLIPSIS);
+            continue;
+        }
         c.Fill(row, odd ? kRowB : kRowA);
         RECT label{x + 12, row.top, x + 420, row.bottom};
         c.Text(info.label, label, rowFont, kTextColor, DT_LEFT | DT_END_ELLIPSIS);
@@ -818,6 +829,269 @@ void UpdateDebugOverlays(bool shown[kGrabDebugSlotCount], bool uploaded[kGrabDeb
     }
 }
 
+// ---- The weapon socket view (ShowWeaponSockets) ----
+// A line: a white strip (kSocketLineTexW x kSocketLineTexH) tinted, its thickness set by the texel aspect, as the laser
+// beam. A name: white text on a dark box, left-aligned in a kSocketLabelTexW x kSocketLabelTexH texture, tinted.
+constexpr uint32_t kSocketLineTexW = 64;
+constexpr uint32_t kSocketLineTexH = 4;
+constexpr float kSocketLineThickness = 0.0025f; // m
+constexpr int kSocketLabelTexW = 640;
+constexpr int kSocketLabelTexH = 64;
+constexpr float kSocketLabelWidth = 0.10f; // m (so 1 cm tall)
+constexpr unsigned long long kSocketStaleMs = 500;
+SocketDebugLine g_socketLines[kSocketDebugSlots]; // guarded by g_sightMutex
+float g_socketHead[3] = {};                       // likewise
+bool g_socketDirty = false;                       // likewise
+unsigned long long g_socketUpdateMs = 0;          // likewise
+// Sight thread only.
+struct SocketSlotState
+{
+    uint64_t line = 0, label = 0; // 0 = not made yet
+    bool lineShown = false, labelShown = false, lineUploaded = false, labelSized = false;
+    char labelText[40] = "";
+    float rgb[3] = {-1.0f, -1.0f, -1.0f};
+    float lineLength = -1.0f; // the length last given to the line overlay (its width and texel aspect)
+};
+SocketSlotState g_socketSlots[kSocketDebugSlots];
+bool g_socketCreateFailed = false;
+
+void UploadSocketLineTexture(uint64_t handle)
+{
+    std::vector<uint8_t> rgba(kSocketLineTexW * kSocketLineTexH * 4, 255);
+    const uint8_t rowAlpha[kSocketLineTexH] = {150, 255, 255, 150};
+    for (uint32_t y = 0; y < kSocketLineTexH; ++y)
+        for (uint32_t x = 0; x < kSocketLineTexW; ++x)
+            rgba[(y * kSocketLineTexW + x) * 4 + 3] = rowAlpha[y];
+    std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+    g_setRaw(g_overlay, handle, rgba.data(), kSocketLineTexW, kSocketLineTexH, 4);
+}
+
+void UploadSocketLabelTexture(uint64_t handle, const char* text)
+{
+    std::vector<uint8_t> rgba(kSocketLabelTexW * kSocketLabelTexH * 4, 0);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = kSocketLabelTexW;
+    bi.bmiHeader.biHeight = -kSocketLabelTexH;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    HDC dc = CreateCompatibleDC(nullptr);
+    uint8_t* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, reinterpret_cast<void**>(&bits), nullptr, 0);
+    if (dc && bitmap && bits)
+    {
+        HGDIOBJ oldBitmap = SelectObject(dc, bitmap);
+        HFONT font = CreateFontA(46, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                 CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, "Segoe UI");
+        HGDIOBJ oldFont = SelectObject(dc, font);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        const int length = static_cast<int>(strlen(text));
+        SIZE extent{};
+        GetTextExtentPoint32A(dc, text, length, &extent);
+        RECT r = {10, 0, kSocketLabelTexW, kSocketLabelTexH};
+        DrawTextA(dc, text, length, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        GdiFlush();
+        const int boxRight = 10 + extent.cx + 10 < kSocketLabelTexW ? 10 + extent.cx + 10 : kSocketLabelTexW;
+        for (int y = 0; y < kSocketLabelTexH; ++y)
+            for (int x = 0; x < kSocketLabelTexW; ++x)
+            {
+                const uint8_t coverage = bits[(y * kSocketLabelTexW + x) * 4 + 1];
+                const uint8_t box = x < boxRight ? 130 : 0;
+                uint8_t* p = &rgba[(y * kSocketLabelTexW + x) * 4];
+                p[0] = p[1] = p[2] = coverage; // the box is black, the text white: the tint colours the text
+                p[3] = coverage > box ? coverage : box;
+            }
+        SelectObject(dc, oldFont);
+        SelectObject(dc, oldBitmap);
+        DeleteObject(font);
+    }
+    if (bitmap)
+        DeleteObject(bitmap);
+    if (dc)
+        DeleteDC(dc);
+    std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+    g_setRaw(g_overlay, handle, rgba.data(), kSocketLabelTexW, kSocketLabelTexH, 4);
+}
+
+void HideSocketSlot(SocketSlotState& slot)
+{
+    std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+    if (slot.lineShown)
+        g_hide(g_overlay, slot.line);
+    if (slot.labelShown)
+        g_hide(g_overlay, slot.label);
+    slot.lineShown = slot.labelShown = false;
+}
+
+// Makes a slot's two overlays. False once SteamVR refuses one (logged): the slots made so far keep working.
+bool MakeSocketSlot(int i, SocketSlotState& slot)
+{
+    if (slot.line && slot.label)
+        return true;
+    if (g_socketCreateFailed || !g_createOverlay)
+        return false;
+    char key[48];
+    std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+    if (!slot.line)
+    {
+        snprintf(key, sizeof(key), "mohwvr.socket.line%d", i);
+        const int err = g_createOverlay(g_overlay, key, key, &slot.line);
+        if (err != 0)
+        {
+            slot.line = 0;
+            g_socketCreateFailed = true;
+            MOHW_LOG(kLogFile, "socket view: CreateOverlay(%s) err=%d -- no more socket overlays", key, err);
+            return false;
+        }
+    }
+    if (!slot.label)
+    {
+        snprintf(key, sizeof(key), "mohwvr.socket.label%d", i);
+        const int err = g_createOverlay(g_overlay, key, key, &slot.label);
+        if (err != 0)
+        {
+            slot.label = 0;
+            g_socketCreateFailed = true;
+            MOHW_LOG(kLogFile, "socket view: CreateOverlay(%s) err=%d -- no more socket overlays", key, err);
+            return false;
+        }
+    }
+    return true;
+}
+
+void UpdateSocketOverlays()
+{
+    SocketDebugLine lines[kSocketDebugSlots];
+    float head[3];
+    {
+        std::lock_guard<std::mutex> lock(g_sightMutex);
+        const unsigned long long now = GetTickCount64();
+        const bool stale = g_socketUpdateMs != 0 && now - g_socketUpdateMs > kSocketStaleMs;
+        if (!g_socketDirty && !stale)
+            return;
+        g_socketDirty = false;
+        if (stale)
+        {
+            // No body batch for a while (a vehicle, a cutscene, the menu): nothing to show.
+            for (SocketDebugLine& s : g_socketLines)
+                s.visible = false;
+            g_socketUpdateMs = 0;
+        }
+        memcpy(lines, g_socketLines, sizeof(lines));
+        memcpy(head, g_socketHead, sizeof(head));
+    }
+    for (int i = 0; i < kSocketDebugSlots; ++i)
+    {
+        SocketSlotState& slot = g_socketSlots[i];
+        const SocketDebugLine& s = lines[i];
+        if (!s.visible || !MakeSocketSlot(i, slot))
+        {
+            HideSocketSlot(slot);
+            continue;
+        }
+        if (slot.rgb[0] != s.rgb[0] || slot.rgb[1] != s.rgb[1] || slot.rgb[2] != s.rgb[2])
+        {
+            std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+            g_setColor(g_overlay, slot.line, s.rgb[0], s.rgb[1], s.rgb[2]);
+            g_setColor(g_overlay, slot.label, s.rgb[0], s.rgb[1], s.rgb[2]);
+            memcpy(slot.rgb, s.rgb, sizeof(slot.rgb));
+        }
+
+        // The line: x along it, its flat side to the head (z), centred between its ends.
+        float d[3] = {s.end[0] - s.start[0], s.end[1] - s.start[1], s.end[2] - s.start[2]};
+        const float length = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        bool placed = false;
+        float m[12];
+        if (s.line && length > 0.002f)
+        {
+            float x[3] = {d[0] / length, d[1] / length, d[2] / length};
+            float mid[3] = {s.start[0] + d[0] * 0.5f, s.start[1] + d[1] * 0.5f, s.start[2] + d[2] * 0.5f};
+            float toHead[3] = {head[0] - mid[0], head[1] - mid[1], head[2] - mid[2]};
+            const float along = toHead[0] * x[0] + toHead[1] * x[1] + toHead[2] * x[2];
+            float z[3] = {toHead[0] - x[0] * along, toHead[1] - x[1] * along, toHead[2] - x[2] * along};
+            const float zl = sqrtf(z[0] * z[0] + z[1] * z[1] + z[2] * z[2]);
+            if (zl > 1e-4f)
+            {
+                for (float& c : z)
+                    c /= zl;
+                float y[3] = {z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]};
+                for (int r = 0; r < 3; ++r)
+                {
+                    m[r * 4 + 0] = x[r];
+                    m[r * 4 + 1] = y[r];
+                    m[r * 4 + 2] = z[r];
+                    m[r * 4 + 3] = mid[r];
+                }
+                placed = true;
+            }
+        }
+        if (placed)
+        {
+            if (!slot.lineUploaded)
+            {
+                UploadSocketLineTexture(slot.line);
+                slot.lineUploaded = true;
+            }
+            std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+            if (fabsf(length - slot.lineLength) > 0.0005f) // the gun's bones are rigid: only an animated part changes
+            {
+                g_setWidth(g_overlay, slot.line, length);
+                if (g_setTexelAspect)
+                    g_setTexelAspect(g_overlay, slot.line,
+                                     static_cast<float>(kSocketLineTexH) * length /
+                                         (static_cast<float>(kSocketLineTexW) * kSocketLineThickness));
+                slot.lineLength = length;
+            }
+            g_setTransform(g_overlay, slot.line, g_trackingUniverse, m);
+            if (!slot.lineShown)
+            {
+                g_show(g_overlay, slot.line);
+                slot.lineShown = true;
+            }
+        }
+        else if (slot.lineShown)
+        {
+            std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+            g_hide(g_overlay, slot.line);
+            slot.lineShown = false;
+        }
+
+        // The name: facing the head, starting just right of the end point and a little above it.
+        if (strcmp(slot.labelText, s.label) != 0)
+        {
+            UploadSocketLabelTexture(slot.label, s.label);
+            snprintf(slot.labelText, sizeof(slot.labelText), "%s", s.label);
+        }
+        float lm[12];
+        if (BillboardMatrix(s.end, head, lm))
+        {
+            const float shiftRight = kSocketLabelWidth * 0.5f + 0.004f, shiftUp = 0.004f;
+            for (int r = 0; r < 3; ++r)
+                lm[r * 4 + 3] += lm[r * 4 + 0] * shiftRight + lm[r * 4 + 1] * shiftUp;
+            std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+            if (!slot.labelSized)
+            {
+                g_setWidth(g_overlay, slot.label, kSocketLabelWidth);
+                slot.labelSized = true;
+            }
+            g_setTransform(g_overlay, slot.label, g_trackingUniverse, lm);
+            if (!slot.labelShown)
+            {
+                g_show(g_overlay, slot.label);
+                slot.labelShown = true;
+            }
+        }
+        else if (slot.labelShown)
+        {
+            std::lock_guard<std::mutex> lock(g_overlayCallMutex);
+            g_hide(g_overlay, slot.label);
+            slot.labelShown = false;
+        }
+    }
+}
+
 void SightThreadProc()
 {
     bool debugShown[kGrabDebugSlotCount] = {}, debugUploaded[kGrabDebugSlotCount] = {};
@@ -838,6 +1112,7 @@ void SightThreadProc()
     {
         WaitForSingleObject(g_sightEvent, 200);
         UpdateDebugOverlays(debugShown, debugUploaded, debugTint);
+        UpdateSocketOverlays();
         WheelPlacement wheel;
         BeamPlacement beam;
         {
@@ -1076,6 +1351,23 @@ void UpdateGrabDebug(const GrabDebugShape shapes[kGrabDebugSlotCount], const flo
     SetEvent(g_sightEvent);
 }
 
+void UpdateSocketDebug(const SocketDebugLine lines[kSocketDebugSlots], const float headPos[3])
+{
+    if (!g_sightReady.load(std::memory_order_acquire))
+        return;
+    {
+        std::lock_guard<std::mutex> lock(g_sightMutex);
+        memcpy(g_socketLines, lines, sizeof(g_socketLines));
+        memcpy(g_socketHead, headPos, sizeof(g_socketHead));
+        g_socketDirty = true;
+        bool any = false;
+        for (int i = 0; i < kSocketDebugSlots; ++i)
+            any = any || lines[i].visible;
+        g_socketUpdateMs = any ? GetTickCount64() : 0;
+    }
+    SetEvent(g_sightEvent);
+}
+
 void UpdateWheelOverlay(bool visible, const Vec3& centre, const Vec3& right, const Vec3& up, float angle, float radius,
                         float thickness, float opacity)
 {
@@ -1155,6 +1447,7 @@ bool InitVrOverlay(void* overlay, int trackingUniverse)
     g_show = reinterpret_cast<PFN_ShowHideOverlay>(vtable[kShowOverlayIndex]);
     g_hide = reinterpret_cast<PFN_ShowHideOverlay>(vtable[kHideOverlayIndex]);
     auto createOverlay = reinterpret_cast<PFN_CreateOverlay>(vtable[kCreateOverlayIndex]);
+    g_createOverlay = createOverlay;
     const char* keys[kDotCount] = {"mohwvr.optic", "mohwvr.sight"};
     const char* names[kDotCount] = {"MOHW VR optic dot", "MOHW VR aim ray dot"};
     bool allCreated = true;

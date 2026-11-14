@@ -39,6 +39,10 @@ bool ApplyEyeOffset(void* transformPtr);
 float GetActiveEyeOffsetAlongRow0();
 // The same for a given eye, whichever is active (hooks/native_stereo.cpp: both eyes in one frame).
 float GetEyeOffsetAlongRow0(bool rightEye);
+// The eye THIS thread is drawing for, when it's known per view rather than per frame (hooks/native_stereo.h: both eyes
+// in one frame, each view's first-person batches built on that view's job): 0 left, 1 right, -1 none (the frame's eye,
+// IsRightEyeActive). GetActiveEyeOffsetAlongRow0 follows it, on this thread only.
+void SetThreadEyeOverride(int eye);
 
 // F1-F12 are all already claimed elsewhere in this project (see this project's other hooks' hotkey constants).
 // Edge-detected toggle/step, same pattern as every other runtime hotkey in this project. Call once per Present

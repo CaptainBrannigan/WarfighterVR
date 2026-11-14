@@ -98,10 +98,12 @@ void ComputeRenderPoseStamp(void* transformPtr)
     float raw[12]{};
     mohwvr::ipc::HeadPoseBlock pose{};
     float zeroYaw = 0, zeroPitch = 0, baseYaw = 0, basePitch = 0;
-    // Only while the soldier's aim runs: the reconstruction inverts its head-look mapping. Without it (the robot-control
-    // section, menus) the camera isn't following the head, and a stamp rebuilt from the stale mapping sat 7-11 deg off
-    // the head (live 2026-10-16), so SteamVR shifted each frame by that and showed its edges. No stamp = the live pose.
-    if (transformPtr && GetHeadAimEnabled() && IsPlayerAimActive() && SehReadFloats12(transformPtr, raw) &&
+    // Only while the head drives the soldier's view (IsHeadDrivingSoldier): the reconstruction inverts the head-look
+    // mapping. Otherwise (the robot-control section, menus, a scripted scene with look taken) the camera isn't
+    // following the head, and a stamp rebuilt from the mapping sat 7-11 deg off the head (live 2026-10-16) or took its
+    // pitch from a scripted camera (2026-11-12), so SteamVR shifted each frame by that and showed its edges. No stamp =
+    // the live pose: the frame is shown strapped to the head.
+    if (transformPtr && GetHeadAimEnabled() && IsHeadDrivingSoldier() && SehReadFloats12(transformPtr, raw) &&
         GetHeadAimMapping(&zeroYaw, &zeroPitch, &baseYaw, &basePitch) && GetHeadPose(&pose))
     {
         Vec3 fwd{raw[8], raw[9], raw[10]};
@@ -195,7 +197,17 @@ void PublishRenderPoseForEye(bool rightEye)
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_pendingValid)
+        {
+            // NO STAMP THIS FRAME (2026-11-10, the user: "if I quit to main menu, the screen would stop following my
+            // head"): menus, a death, a loading screen, the robot section -- the soldier's aim isn't running, so
+            // ComputeRenderPoseStamp made none. This used to return without touching the eye's stored stamp, and nothing
+            // aged it either (only the other eye's publish counts staleFrames up), so Submit went on handing SteamVR the
+            // last gameplay pose for every frame after: it reprojected each one against that frozen pose, and the image
+            // stayed put in the world instead of following the head, until a level gave the aim back. The eye's stamp
+            // goes now: GetPendingRenderPoseStamp returns false, and the frame is submitted with the live pose.
+            g_eyeStamps[rightEye ? 1 : 0].valid = false;
             return;
+        }
         for (int i = 0; i < 4; ++i)
             q[i] = g_pendingQuat[i];
         for (int i = 0; i < 3; ++i)

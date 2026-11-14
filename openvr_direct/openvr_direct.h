@@ -76,4 +76,8 @@ bool GetHandControllerType(bool left, char* out, unsigned size);
 // Returns 0.0f if not yet known (not connected, or the query failed/returned an implausible value).
 float GetDetectedDisplayFrequencyHz();
 
+// SteamVR's recommended render size per eye, with its resolution setting applied (refreshed every 2 s). Any thread.
+// False until known.
+bool GetRecommendedEyeSize(unsigned* width, unsigned* height);
+
 } // namespace mohw::openvr_direct

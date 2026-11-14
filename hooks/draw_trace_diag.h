@@ -42,4 +42,16 @@ bool FinalPassStartedThisFrame();
 // hooks/marker_projection_hook.cpp maps the in-world markers into it.
 bool GetHudRectForMarkers(float rect[4]);
 
+// Any thread, native two-view (hooks/native_stereo.h): each eye's HUD rectangle inside its own half, fractions of the
+// half {left, top, width, height} (y down): the placed one, or the whole half with placement off. The markers come from
+// one projection for both halves; hooks/marker_projection_hook.cpp puts each where the two halves agree on its
+// direction. False when two-view isn't running.
+bool GetNativeHudRectsForMarkers(float rects[2][4]);
+
+// Any thread (hooks/native_stereo.cpp): whether the frame is a whole 2D frame -- a movie, a menu, a loading screen, a
+// cutscene before the player has control -- as last decided on the render thread (Is2DFrame, at every bind of the
+// backbuffer), and in *forMs for how long it has been that way. Engine two-view stereo stands down for those, so they
+// get the floating screen in both eyes instead of being split between the halves (2026-11-08).
+bool IsWhole2DFrameNow(unsigned long long* forMs);
+
 } // namespace mohw

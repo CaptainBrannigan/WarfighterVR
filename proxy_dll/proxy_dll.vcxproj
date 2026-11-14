@@ -121,7 +121,11 @@
     <ClCompile Include="..\hooks\first_person_rig.cpp" />
     <ClCompile Include="..\hooks\native_stereo.cpp" />
     <ClCompile Include="..\hooks\player_control.cpp" />
+    <ClCompile Include="..\hooks\input_restriction.cpp" />
     <ClCompile Include="..\hooks\ui_pass.cpp" />
+    <ClCompile Include="..\hooks\ocean_water_guard.cpp" />
+    <ClCompile Include="..\hooks\sky_rays_fix.cpp" />
+    <ClCompile Include="..\hooks\screen_effect_diag.cpp" />
     <ClCompile Include="..\openvr_direct\vr_reload.cpp" />
     <ClCompile Include="..\sdk\settings.cpp" />
     <ClCompile Include="..\third_party\minhook\src\buffer.c" />
@@ -178,7 +182,11 @@
     <ClInclude Include="..\hooks\first_person_rig.h" />
     <ClInclude Include="..\hooks\native_stereo.h" />
     <ClInclude Include="..\hooks\player_control.h" />
+    <ClInclude Include="..\hooks\input_restriction.h" />
     <ClInclude Include="..\hooks\ui_pass.h" />
+    <ClInclude Include="..\hooks\ocean_water_guard.h" />
+    <ClInclude Include="..\hooks\sky_rays_fix.h" />
+    <ClInclude Include="..\hooks\screen_effect_diag.h" />
     <ClInclude Include="..\openvr_direct\vr_reload.h" />
     <ClInclude Include="..\sdk\rigid.h" />
     <ClInclude Include="..\shared\ipc_protocol.h" />

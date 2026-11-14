@@ -194,8 +194,9 @@ void GetHandOffset(float position[3], float rotationDeg[3]);
 // LeftHandIkRight/Up/Forward, LeftHandIkPitch/Yaw/Roll.
 bool GetArmIkEnabled();
 void GetLeftHandIkOffset(float position[3], float rotationDeg[3]);
-// The rest of the arm IK (hooks/first_person_rig.cpp). rightHand: added to where the gun puts the weapon hand, in the
-// gun's rest view, turned about the hand's centre; shoulder: each shoulder ([0] left, [1] right) moved {outward, up,
+// The rest of the arm IK (hooks/first_person_rig.cpp). rightHand: the weapon hand's calibration on its own controller,
+// as the left hand's (position {right, up, forward} m, rotation {pitch, yaw, roll} deg; RightHandIk*; until 2026-11-09
+// an offset on the gun the hand rode); shoulder: each shoulder ([0] left, [1] right) moved {outward, up,
 // forward}, as the game's sit a long way from a hand on the controller, and not evenly: the right sits further back.
 // naturalElbow = AvP's elbow model, its angle limits below; off, the
 // plain IK with elbowSwivelDeg. Every field is a row of the menu's "Arm IK" group.
@@ -245,8 +246,15 @@ void GetSecondaryGripOffset(float* right, float* up);
 bool GetHudPlacementEnabled();
 float GetHudScale();
 // Size of the head-locked screen a whole-2D frame (pre-rendered movie, menu, loading screen) is drawn into, as a
-// fraction of the eye's view; same depth/IPD/offset rules as the HUD. MenuScreenScale, default 0.75.
+// fraction of the eye's view; the HUD's offsets. MenuScreenScale, default 0.75.
 float GetMenuScreenScale();
+// The game's own UI laid out as on a screen this many times smaller (2026-11-12, hooks/ui_pass.cpp): its menus are laid
+// out in pixels, so they shrink as the resolution grows (the eye-sized backbuffer); above 1 makes them bigger again,
+// still drawn at the full resolution. Only with HudPlacementEnabled. UiLayoutScale, default 1 (the game's own).
+float GetUiLayoutScale();
+// Where that screen fuses, meters (MenuScreenDepth, default 2.5): its two eye copies are separated by the rendering eye
+// offset over this distance, as a real screen there would be (not the HUD's depth and IPD scale).
+float GetMenuScreenDepth();
 
 // Driving missions (game\MOHWD.exe, hooks/driving_camera_hook.cpp): which camera through UpdateMatrices gets head
 // look by hand -- 0 = auto (GetDrivingHeadLookAuto), 1.. = by call rate, busiest first (logged to mohwvr_drivingcamera.log). Session only, not saved.
@@ -300,8 +308,42 @@ void SetBodyPartCountSeen(int count);
 // In VR the game never takes the display in exclusive fullscreen (hooks/present_hook.cpp). KeepGameWindowed, default on.
 bool GetKeepGameWindowed();
 // EXPERIMENTAL (2026-11-06): both eyes rendered by the engine in one frame, through its own two-view split-screen path
-// (hooks/native_stereo.h), instead of one eye per frame. NativeStereo, default off; takes effect at the next level load.
+// (hooks/native_stereo.h), instead of one eye per frame. NativeStereo, default off. Only in 3D frames: movies, menus,
+// loading screens and cutscenes before the player has control keep the game's one view (2026-11-08).
 bool GetNativeStereoEnabled();
+// The sky drawn with exact per-pixel view rays (hooks/sky_rays_fix.h): the game's own are warped for a wide, off-centre
+// eye, differently in each eye. SkyExactRays, default on.
+bool GetSkyExactRaysEnabled();
+// Two-view (2026-11-09, "the dust effect was still only in the right eye"): both views draw the screen effects (the
+// dust), but the left view's was gone from the frame, so it's drawn right after the right view's instead
+// (hooks/screen_effect_diag.cpp). ScreenEffectsBothEyes, default on.
+bool GetScreenEffectsBothEyes();
+// Two-view (2026-11-11): the game's depth of field downsamples the whole side-by-side frame, so each eye blended both
+// eyes' images in (cutscenes with the camera on the player's body). Off in two-view unless this is on
+// (hooks/native_stereo.cpp: ForceDofEnable 0, DiffusionDofEnable and ADSDoFEnable false). DepthOfFieldTwoView, default off.
+bool GetDepthOfFieldTwoView();
+// EXPERIMENTAL (2026-11-12): the engine's 3D render scale (GameRenderSettings.ResolutionScale) follows SteamVR's
+// recommended eye size, its resolution setting included, over the eye's height in the backbuffer
+// (hooks/native_stereo.cpp). RenderScaleFromSteamVr, default off.
+bool GetRenderScaleFromSteamVr();
+// EXPERIMENTAL (2026-11-12): in two-view, the backbuffer itself is SteamVR's recommended eye size, two side by side
+// (the game's screen size, its resize path; hooks/native_stereo.cpp), so each eye gets that many pixels instead of half
+// the game's resolution. Only with KeepGameWindowed and the swap chain windowed. EyeSizedBackbuffer, default off.
+bool GetEyeSizedBackbuffer();
+// Scripted scenes (2026-11-12): while the game has taken the player's look or fire away (its input locks,
+// hooks/input_restriction.h), the gun and arms are the game's and head look goes onto the game's camera.
+// ScriptedScenesFromLocks, default on.
+bool GetScriptedScenesFromLocks();
+// The weapon socket view (2026-11-09): every weapon bone as a line from its parent's joint to its own, named, in the
+// headset (hooks/camera_matrix_test_hook.cpp, openvr_direct/vr_overlay.h). ShowWeaponSockets, default off.
+bool GetShowWeaponSockets();
+// The gun is held at its hand socket (hooks/camera_matrix_test_hook.cpp GripInCamera): the weapon's own
+// IK_Joint_RightHand where the arm IK's weapon hand holds it (the hand on its controller, RightHandIk*), plus
+// GetGunSocketOffset; the profile's grip rotation turns it about the socket. (2026-11-09: no longer a setting, and the
+// profiles' grip positions are gone.)
+// The gun's fine offset in the hand, m: right, up, forward, in the controller's frame (mirrored for the left hand).
+// GunInHandOffsetRight / Up / Forward, default 0: the gun where the game's own hand holds it.
+void GetGunSocketOffset(float out[3]);
 // Moves the HUD rectangle off head-forward: degrees, + = right / up (HudOffsetX / HudOffsetY).
 void GetHudOffsetDeg(float* x, float* y);
 // The HUD's eye separation as a multiple of the rendering IPD (the eye offset the world is drawn with, IpdScale
@@ -403,7 +445,8 @@ struct MenuSettingInfo
     const char* group;
     const char* label;
     bool isToggle;
-    bool isChoice; // a list setting (holster actions): text is the current choice, steps +/-1 cycle it
+    bool isChoice; // a list setting (holster actions, the render mode): text is the current choice, steps +/-1 cycle it
+    bool isNote;   // a line of text under the setting before it, nothing to adjust (the render mode's reload note)
     float value;   // toggles: 0 or 1
     float step;
     int decimals;
@@ -414,21 +457,26 @@ struct MenuSettingInfo
 int GetMenuSettingCount();
 bool GetMenuSettingInfo(int index, MenuSettingInfo* out);
 void AdjustMenuSetting(int index, int steps);
+// RENDER MODE (2026-11-12): one DLL, two renderers -- alternating eye, or the engine's two-view (NativeStereo). The
+// dashboard shows it as a choice, shows only the selected mode's rows, and keeps the HUD's numbers per mode (HudScale,
+// HudDepth, HudIpdScale, HudOffsetX/Y, MenuScreenScale/Depth, UiLayoutScale; the engine mode's under "...TwoView" keys;
+// the driving missions always use the alternating-eye ones). Any thread: the render mode the current level was built
+// with (hooks/native_stereo.cpp, at the level's load), for the note under the setting while the selection differs.
+void NoteLevelRenderMode(bool twoView);
 // The game actions a holster can be cycled through (keyboard-bound actions from the game's profile).
 void SetHolsterActionChoices(const std::vector<std::string>& actions);
 
-// Where the right controller sits on the gun for the weapon drive (hooks/camera_matrix_test_hook.cpp), in the gun's
-// rest view: out = {right, up, back} in meters (forward is negative back). Per weapon (SetWeaponProfile).
-void GetWeaponGripOffset(float out[3]);
-// The gun's rotation relative to the controller: out = {pitch, yaw, roll} in degrees. Per weapon (SetWeaponProfile).
+// The gun's rotation relative to the controller, about its hand socket: out = {pitch, yaw, roll} in degrees. Per weapon
+// (SetWeaponProfile).
 void GetWeaponGripRotationDeg(float out[3]);
 
-// WEAPON PROFILES (2026-10-15): the grip offset and rotation, the optic dot's zero (height / windage / forward), the
-// controller aim offset and the secondary grip offset are per weapon. Called with the equipped weapon's blueprint
-// name (hooks/weapon_identity.h; display = its short name for the menu), or nullptr when none is identified: the
-// settings switch to that weapon's
+// WEAPON PROFILES (2026-10-15): the grip rotation, the optic dot's zero (height / windage / forward), the controller
+// aim offset, the secondary grip offset, the laser's start and the magazine's grab settings are per weapon (the grip
+// position was too, until 2026-11-09). Called with the equipped weapon's blueprint name (hooks/weapon_identity.h;
+// display = its short name for the menu), or nullptr when none is identified: the settings switch to that weapon's
 // values -- a weapon without its own yet gets the default profile (the ini's keys for these settings) -- and the
-// menu's rows for them, titled "Weapon profile: <weapon>", edit that weapon's. Stored as WeaponProfile lines.
+// menu's rows for them, titled "Weapon profile: <weapon>", edit that weapon's. Stored as WeaponProfile2 lines (older
+// WeaponProfile lines are read and converted).
 void SetWeaponProfile(const char* key, const char* display);
 
 } // namespace mohw

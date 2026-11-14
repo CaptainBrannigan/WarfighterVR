@@ -10,6 +10,7 @@
 #include "aiming_controller_hook.h"
 #include "driving_camera_hook.h"
 #include "ui_pass.h"
+#include "native_stereo.h"
 #include "../sdk/mohw_offsets.h"
 #include "../sdk/d3d_util.h"
 
@@ -266,12 +267,27 @@ bool Is2DFrame()
     return twoD;
 }
 
+// The last Is2DFrame decision, for other threads (IsWhole2DFrameNow), and when it last changed. Render thread writes.
+std::atomic<bool> g_whole2DNow{false};
+std::atomic<unsigned long long> g_whole2DSinceMs{0};
+
+void PublishWhole2DFrame()
+{
+    const bool twoD = Is2DFrame();
+    if (g_whole2DSinceMs.load(std::memory_order_relaxed) == 0 || twoD != g_whole2DNow.load(std::memory_order_relaxed))
+    {
+        g_whole2DNow.store(twoD, std::memory_order_relaxed);
+        g_whole2DSinceMs.store(GetTickCount64(), std::memory_order_relaxed);
+    }
+}
+
 void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s, bool keepAspect);
 
 // Before the first draw of the final pass in a 2D frame: place it (and, the viewport being state, everything after).
 void MaybePlaceWhole2DFrame(ID3D11DeviceContext* ctx)
 {
-    if (!g_curTargetIsBackbuffer || g_backbufferDrawCount != 0 || !g_backbuffer || !Is2DFrame())
+    // Native two-view: each half is an eye; the UI is placed per half inside its own pass instead (PlaceNativeHud).
+    if (!g_curTargetIsBackbuffer || g_backbufferDrawCount != 0 || !g_backbuffer || IsNativeStereoActive() || !Is2DFrame())
         return;
     D3D11_TEXTURE2D_DESC bbDesc{};
     g_backbuffer->GetDesc(&bbDesc);
@@ -285,14 +301,13 @@ void MaybePlaceWhole2DFrame(ID3D11DeviceContext* ctx)
 // the corners.
 // The placed rectangle for the eye being rendered, as fractions of the frame: left, top, width, height (y down).
 // Any thread (the marker projection hook asks from the game thread). False when there is no placement.
-bool ComputeHudRect(float s, bool keepAspect, UINT width, UINT height, float rect[4])
+bool ComputeHudRectForEye(int eye, float s, bool keepAspect, UINT width, UINT height, float rect[4])
 {
-    if (!GetHudPlacementEnabled())
+    if (!GetHudPlacementEnabled() || eye < 0 || eye > 1)
         return false;
     mohwvr::ipc::HmdViewBlock hmd{};
     if (!GetHmdView(&hmd) || hmd.viewMode != mohwvr::ipc::kViewModeTrueFrustum)
         return false;
-    int eye = IsRightEyeActive() ? 1 : 0;
     float tL = tanf(hmd.angleLeft[eye]), tR = tanf(hmd.angleRight[eye]);
     float tU = tanf(hmd.angleUp[eye]), tD = tanf(hmd.angleDown[eye]);
     float centreX = (tL + tR) * 0.5f, halfW = (tR - tL) * 0.5f, halfH = (tU - tD) * 0.5f;
@@ -308,9 +323,16 @@ bool ComputeHudRect(float s, bool keepAspect, UINT width, UINT height, float rec
     float ipdScale = GetHudIpdScale();
     if (!(ipdScale >= 0.0f && ipdScale <= 10.0f))
         ipdScale = 1.0f;
+    // A whole 2D frame (keepAspect: a movie, a menu, a loading screen) is a screen at its own distance, fused with the
+    // rendering eye offset like a real one (2026-11-08): the HUD's 0.1 m and x0.2 put it at 0.5 m, cross-eyed.
+    if (keepAspect)
+    {
+        depth = GetMenuScreenDepth();
+        ipdScale = 1.0f;
+    }
     float offsetXDeg = 0.0f, offsetYDeg = 0.0f;
     GetHudOffsetDeg(&offsetXDeg, &offsetYDeg);
-    float eyeX = (eye == 1 ? 1.0f : -1.0f) * fabsf(GetActiveEyeOffsetAlongRow0()) * ipdScale; // right eye sits at +x
+    float eyeX = (eye == 1 ? 1.0f : -1.0f) * fabsf(GetEyeOffsetAlongRow0(eye == 1)) * ipdScale; // right eye sits at +x
     // Half extents of the placed rectangle, in tangents.
     float rectHalfW = s * halfW, rectHalfH = s * halfH;
     if (keepAspect && width > 0 && height > 0)
@@ -335,8 +357,48 @@ bool ComputeHudRect(float s, bool keepAspect, UINT width, UINT height, float rec
     return rect[2] > 0.01f && rect[3] > 0.01f;
 }
 
+// The same for the eye this frame renders (one eye per frame).
+bool ComputeHudRect(float s, bool keepAspect, UINT width, UINT height, float rect[4])
+{
+    return ComputeHudRectForEye(IsRightEyeActive() ? 1 : 0, s, keepAspect, width, height, rect);
+}
+
 // When the HUD (not a whole 2D frame) was last placed: the marker projection only maps into the rectangle then.
 std::atomic<unsigned long long> g_hudPlacedMs{0};
+
+// KEEP THE PLACEMENT (2026-11-12): the viewport the UI was placed into under this backbuffer bind (render thread),
+// put back before each later draw under the bind if the game has set another since. The placement used to be set once
+// (at the first draw, or after the world's) and left as state. With the UI layout size off 1 (hooks/ui_pass.cpp) the
+// user saw "double images, which become further separated the greater the value", anchored to one side: the UI's
+// rectangle is no longer the whole screen then, and the game presumably sets it as the viewport per movie, which undid
+// the placement for every movie after the first: drawn at the same spot in both eyes, so at another depth than the
+// placed screen. Each such viewport is logged (the first few), to confirm. Two-view places every HUD draw already.
+bool g_placedVpValid = false;
+D3D11_VIEWPORT g_placedVp{};
+
+void KeepPlacedViewport(ID3D11DeviceContext* ctx)
+{
+    if (!g_placedVpValid || !g_curTargetIsBackbuffer || IsNativeStereoActive())
+        return;
+    D3D11_VIEWPORT current{};
+    UINT count = 1;
+    ctx->RSGetViewports(&count, &current);
+    if (count == 1 && current.TopLeftX == g_placedVp.TopLeftX && current.TopLeftY == g_placedVp.TopLeftY &&
+        current.Width == g_placedVp.Width && current.Height == g_placedVp.Height)
+        return;
+    static int lines = 0; // render thread
+    if (lines < 16)
+    {
+        ++lines;
+        MOHW_LOG(kLogFile,
+                 "the game set the viewport x=%.1f y=%.1f w=%.1f h=%.1f under the placed UI (draw %d of the bind, %s): "
+                 "placed again at x=%.1f y=%.1f w=%.1f h=%.1f",
+                 current.TopLeftX, current.TopLeftY, current.Width, current.Height, g_backbufferDrawCount + 1,
+                 Is2DFrame() ? "whole 2D frame" : "HUD over the world", g_placedVp.TopLeftX, g_placedVp.TopLeftY,
+                 g_placedVp.Width, g_placedVp.Height);
+    }
+    ctx->RSSetViewports(1, &g_placedVp);
+}
 
 void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s, bool keepAspect)
 {
@@ -351,6 +413,8 @@ void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float
     vp.MinDepth = 0.0f;
     vp.MaxDepth = 1.0f;
     ctx->RSSetViewports(1, &vp);
+    g_placedVp = vp;
+    g_placedVpValid = true;
     if (!keepAspect)
         g_hudPlacedMs.store(GetTickCount64(), std::memory_order_relaxed);
 
@@ -381,6 +445,9 @@ void MaybeSnapshotUi(ID3D11DeviceContext* ctx)
     if (g_uiSnapshotTex)
         ctx->CopyResource(g_uiSnapshotTex, g_backbuffer); // recorded right after this draw's commands -- correct GPU ordering, no sync needed
     device->Release();
+    // Native two-view: draw 1 is a view's composite and the HUD is placed per half inside its own pass (PlaceNativeHud).
+    if (IsNativeStereoActive())
+        return;
     bool whole2D = Is2DFrame();
     PlaceHudForThisEye(ctx, bbDesc.Width, bbDesc.Height, whole2D ? GetMenuScreenScale() : GetHudScale(), whole2D);
 }
@@ -414,9 +481,11 @@ void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTar
         return isBb;
     }() : false;
     g_backbufferDrawCount = 0;
+    g_placedVpValid = false; // a new bind places again (KeepPlacedViewport)
     if (g_curTargetIsBackbuffer)
     {
         IsSimulationPaused(); // logs each change, whether or not anything below asks
+        PublishWhole2DFrame(); // every frame, for the view count (hooks/native_stereo.cpp)
         MaybeStartPassCapture();
     }
     else
@@ -428,13 +497,62 @@ void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTar
 // rebuild after it belongs to the NEXT frame (hooks/driving_camera_hook.cpp, 2026-10-14). Reset at Present.
 std::atomic<bool> g_finalPassStarted{false};
 
+// For the traced frame (2026-11-11, the two-view cutscene overlay hunt): what the first draw under a bind reads -- the
+// pixel shader, the textures in slots 0-3 (size and format) and the viewport -- so a pass that samples a whole-frame
+// texture into one view's half shows itself.
+std::string DescribeDrawInputs(ID3D11DeviceContext* ctx)
+{
+    char buf[512];
+    ID3D11PixelShader* ps = nullptr;
+    ctx->PSGetShader(&ps, nullptr, nullptr);
+    ID3D11ShaderResourceView* srvs[4] = {};
+    ctx->PSGetShaderResources(0, 4, srvs);
+    D3D11_VIEWPORT vp{};
+    UINT vpCount = 1;
+    ctx->RSGetViewports(&vpCount, &vp);
+    int used = snprintf(buf, sizeof(buf), "      first draw: PS=%p viewport=(%.0f,%.0f %.0fx%.0f) tex:", static_cast<void*>(ps),
+                        vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height);
+    for (int i = 0; i < 4; ++i)
+    {
+        char t[64] = " -";
+        if (srvs[i])
+        {
+            ID3D11Resource* res = nullptr;
+            srvs[i]->GetResource(&res);
+            ID3D11Texture2D* tex = nullptr;
+            if (res && SUCCEEDED(res->QueryInterface(__uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&tex))) && tex)
+            {
+                D3D11_TEXTURE2D_DESC d{};
+                tex->GetDesc(&d);
+                snprintf(t, sizeof(t), " %ux%u/%d%s", d.Width, d.Height, static_cast<int>(d.Format),
+                         tex == g_backbuffer ? "(BB)" : "");
+                tex->Release();
+            }
+            else
+                snprintf(t, sizeof(t), " (not 2D)");
+            if (res)
+                res->Release();
+            srvs[i]->Release();
+        }
+        if (used > 0 && used < static_cast<int>(sizeof(buf)))
+            used += snprintf(buf + used, sizeof(buf) - used, "%s", t);
+    }
+    if (ps)
+        ps->Release();
+    return buf;
+}
+
 void CountDraw(ID3D11DeviceContext* ctx, UINT verts)
 {
     if (g_curTargetIsBackbuffer)
         g_finalPassStarted.store(true, std::memory_order_relaxed);
     if (OnTraceThread())
     {
+        const bool first = g_curDraws == 0;
+        const std::string inputs = first ? DescribeDrawInputs(ctx) : std::string();
         std::lock_guard<std::mutex> lock(g_mutex);
+        if (first)
+            g_lines.push_back(g_curTargetDesc + "\n" + inputs);
         ++g_curDraws;
         g_curVerts += verts;
     }
@@ -483,14 +601,107 @@ bool GetDrawTexture(ID3D11DeviceContext* ctx, UINT* width, UINT* height, UINT* f
     return ok;
 }
 
-bool ShouldSkipAsReticle(ID3D11DeviceContext* ctx)
+// ---- Native two-view HUD (2026-11-08, hooks/native_stereo.h) -------------------------------------------------------
+// The HUD list is replayed once per half (hooks/ui_pass.cpp). Before each of its draws into the backbuffer the viewport
+// is that eye's HUD rectangle inside that eye's half: the halves Present hands over (hooks/present_hook.cpp). The game's
+// own viewport isn't kept: it's the flat-screen frame either way, which the one-eye placement replaces too. Not for a
+// draw sampling a frame-sized texture (a world composite), in case one is ever drawn inside the pass.
+thread_local int t_nativeHudReplay = -1;
+thread_local int t_nativeHudDraws = 0;
+
+// For a backbuffer draw inside a per-half HUD replay: counts it and returns its number in the replay (1 = the first).
+// 0 for every other draw.
+int NativeHudDrawNumber()
+{
+    if (!g_curTargetIsBackbuffer || !g_backbuffer || CurrentUiPass() != 1 || CurrentHudEye() < 0)
+        return 0;
+    const int replay = CurrentHudReplay();
+    if (replay != t_nativeHudReplay)
+    {
+        t_nativeHudReplay = replay;
+        t_nativeHudDraws = 0;
+    }
+    return ++t_nativeHudDraws;
+}
+
+void PlaceNativeHud(ID3D11DeviceContext* ctx)
+{
+    D3D11_TEXTURE2D_DESC bb{};
+    g_backbuffer->GetDesc(&bb);
+    UINT texW = 0, texH = 0, texFormat = 0;
+    if (GetDrawTexture(ctx, &texW, &texH, &texFormat) && texW * 2 >= bb.Width && texH >= bb.Height)
+    {
+        // A frame-sized source: a world composite, not HUD. Logged (2026-11-08, the menu looked different per eye):
+        // such a draw keeps the pass's own viewport, so it may cover both halves.
+        static int skippedLines = 0; // render thread
+        if (skippedLines < 12)
+        {
+            ++skippedLines;
+            D3D11_VIEWPORT current{};
+            UINT count = 1;
+            ctx->RSGetViewports(&count, &current);
+            MOHW_LOG(kLogFile,
+                     "native two-view: HUD replay draw %d for the %s half samples a %ux%u texture: not placed (taken for "
+                     "a world composite), drawn at the pass's viewport x=%.1f w=%.1f of %u (%s)",
+                     t_nativeHudDraws, CurrentHudEye() == 1 ? "right" : "left", texW, texH, current.TopLeftX,
+                     current.Width, bb.Width, Is2DFrame() ? "2D frame" : "over the world");
+        }
+        return;
+    }
+    const int eye = CurrentHudEye();
+    const UINT halfWidth = bb.Width / 2;
+    const bool whole2D = Is2DFrame();
+    float rect[4] = {0.0f, 0.0f, 1.0f, 1.0f}; // placement off or no headset data: the flat HUD fills the half
+    // The aspect a whole 2D frame keeps is the full frame's: the game lays its UI out for the whole backbuffer, not a
+    // half (with the half's, menus came out half as wide as they should).
+    const bool placed = ComputeHudRectForEye(eye, whole2D ? GetMenuScreenScale() : GetHudScale(), whole2D, bb.Width,
+                                             bb.Height, rect);
+    if (!placed)
+    {
+        rect[0] = 0.0f;
+        rect[1] = 0.0f;
+        rect[2] = 1.0f;
+        rect[3] = 1.0f;
+    }
+    D3D11_VIEWPORT vp{};
+    vp.TopLeftX = static_cast<float>(eye * halfWidth) + rect[0] * static_cast<float>(halfWidth);
+    vp.Width = rect[2] * static_cast<float>(halfWidth);
+    vp.TopLeftY = rect[1] * static_cast<float>(bb.Height);
+    vp.Height = rect[3] * static_cast<float>(bb.Height);
+    vp.MinDepth = 0.0f;
+    vp.MaxDepth = 1.0f;
+    ctx->RSSetViewports(1, &vp);
+    if (placed && !whole2D)
+        g_hudPlacedMs.store(GetTickCount64(), std::memory_order_relaxed);
+
+    static int lines = 0; // render thread
+    if (lines < 8 && t_nativeHudDraws == 1)
+    {
+        ++lines;
+        MOHW_LOG(kLogFile,
+                 "native two-view: HUD replay into the %s half: viewport x=%.1f y=%.1f w=%.1f h=%.1f of %ux%u (%s, %s)",
+                 eye == 1 ? "right" : "left", vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, bb.Width, bb.Height,
+                 whole2D ? "whole 2D frame" : "HUD over the world", placed ? "placed" : "placement off: the half");
+    }
+}
+
+bool ShouldSkipAsReticle(ID3D11DeviceContext* ctx, int nativeDraw)
 {
     // Only while the controller aims (the weapon drive): with it off, shots follow the game's own aim again and the
     // reticle is needed to see it. And not while paused: the in-game menu uses the same draw numbers.
-    if (!g_curTargetIsBackbuffer || !GetHideReticle() || !GetWeaponDriveEnabled())
+    // Nor in a scripted stretch: the gun is the game's then, and shots go where the game aims.
+    if (!g_curTargetIsBackbuffer || !GetHideReticle() || !GetWeaponDriveEnabled() || GetPlayerAimDriveWeight() < 0.5f)
         return false;
     int next = g_backbufferDrawCount + 1; // the number this draw will get
-    if (next < kReticleFirstDraw || next > kReticleLastDraw || !IsPlayerSkeletonLoaded() || IsSimulationPaused())
+    int first = kReticleFirstDraw, last = kReticleLastDraw;
+    if (nativeDraw > 0)
+    {
+        // In a per-half HUD replay: the world composite isn't one of its draws, so the reticle starts at 1 (7 kept as
+        // the end, in case it ever is). The texture check below decides.
+        next = nativeDraw;
+        first = 1;
+    }
+    if (next < first || next > last || !IsPlayerSkeletonLoaded() || IsSimulationPaused())
         return false;
     // The reticle's own texture: when it isn't drawn (live: a pass starting with the 256x64 weapon display), these
     // draw numbers are other HUD elements and must stay.
@@ -606,8 +817,15 @@ void BeforeBackbufferDraw(ID3D11DeviceContext* ctx, UINT count, bool indexed, bo
 
 void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT s, INT b)
 {
-    MaybePlaceWhole2DFrame(c);
-    bool skip = ShouldSkipAsReticle(c) || IsDebugHiddenDraw();
+    const int nativeDraw = NativeHudDrawNumber();
+    if (nativeDraw > 0)
+        PlaceNativeHud(c);
+    else
+    {
+        MaybePlaceWhole2DFrame(c);
+        KeepPlacedViewport(c);
+    }
+    bool skip = ShouldSkipAsReticle(c, nativeDraw) || IsDebugHiddenDraw();
     BeforeBackbufferDraw(c, n, true, skip);
     if (!skip)
         g_origDrawIndexed(c, n, s, b);
@@ -616,8 +834,15 @@ void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT s, 
 }
 void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
 {
-    MaybePlaceWhole2DFrame(c);
-    bool skip = ShouldSkipAsReticle(c) || IsDebugHiddenDraw();
+    const int nativeDraw = NativeHudDrawNumber();
+    if (nativeDraw > 0)
+        PlaceNativeHud(c);
+    else
+    {
+        MaybePlaceWhole2DFrame(c);
+        KeepPlacedViewport(c);
+    }
+    bool skip = ShouldSkipAsReticle(c, nativeDraw) || IsDebugHiddenDraw();
     BeforeBackbufferDraw(c, n, false, skip);
     if (!skip)
         g_origDraw(c, n, s);
@@ -626,11 +851,13 @@ void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
 }
 void STDMETHODCALLTYPE Hook_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT n, UINT i, UINT s, INT b, UINT si)
 {
+    KeepPlacedViewport(c);
     g_origDrawIndexedInstanced(c, n, i, s, b, si);
     CountDraw(c, n * i);
 }
 void STDMETHODCALLTYPE Hook_DrawInstanced(ID3D11DeviceContext* c, UINT n, UINT i, UINT s, UINT si)
 {
+    KeepPlacedViewport(c);
     g_origDrawInstanced(c, n, i, s, si);
     CountDraw(c, n * i);
 }
@@ -799,10 +1026,37 @@ bool FinalPassStartedThisFrame()
 
 bool GetHudRectForMarkers(float rect[4])
 {
+    // Native two-view: the markers are drawn into both halves from one projection: GetNativeHudRectsForMarkers.
+    if (IsNativeStereoActive())
+        return false;
     unsigned long long placed = g_hudPlacedMs.load(std::memory_order_relaxed);
     if (placed == 0 || GetTickCount64() - placed > 250) // the HUD isn't being placed (a 2D frame, placement off)
         return false;
     return ComputeHudRect(GetHudScale(), false, 0, 0, rect);
+}
+
+bool GetNativeHudRectsForMarkers(float rects[2][4])
+{
+    if (!IsNativeStereoActive())
+        return false;
+    // PlaceNativeHud's rectangles: the placed one while placement is on, else the whole half.
+    for (int eye = 0; eye < 2; ++eye)
+        if (!ComputeHudRectForEye(eye, GetHudScale(), false, 0, 0, rects[eye]))
+        {
+            rects[eye][0] = 0.0f;
+            rects[eye][1] = 0.0f;
+            rects[eye][2] = 1.0f;
+            rects[eye][3] = 1.0f;
+        }
+    return true;
+}
+
+bool IsWhole2DFrameNow(unsigned long long* forMs)
+{
+    const unsigned long long since = g_whole2DSinceMs.load(std::memory_order_relaxed);
+    if (forMs)
+        *forMs = since == 0 ? 0 : GetTickCount64() - since;
+    return since != 0 && g_whole2DNow.load(std::memory_order_relaxed);
 }
 
 ID3D11Texture2D* GetUiSnapshotTexture()
@@ -845,13 +1099,12 @@ void DrawTraceOnPresent(ID3D11Device* device, ID3D11Texture2D* backbuffer)
         g_tracing.store(false, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(g_mutex);
         FlushCurrent();
-        // A NEW file per trace (date-time in the name) so several traces (level, pause menu, ...) can be kept and compared.
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        char fileName[96];
-        snprintf(fileName, sizeof(fileName), "mohwvr_drawtrace_%04d%02d%02d_%02d%02d%02d.log", st.wYear, st.wMonth, st.wDay, st.wHour,
-                 st.wMinute, st.wSecond);
-        MOHW_LOG(fileName, "==== traced frame (%zu events) ====", g_lines.size());
+        // All traces in one file (2026-11-11), each headed with the state it was taken in, so a moment the user names
+        // can be matched by its time.
+        const char* fileName = "mohwvr_frametrace.log";
+        MOHW_LOG(fileName, "==== traced frame (%zu events): two-view %s, soldier's aim %s, first-person body %s ====",
+                 g_lines.size(), IsNativeStereoActive() ? "on" : "off", IsPlayerAimActive() ? "running" : "not running",
+                 IsPlayerSkeletonLoaded() ? "drawn" : "not drawn");
         for (const std::string& l : g_lines)
             MOHW_LOG(fileName, "%s", l.c_str());
         MOHW_LOG(fileName, "==== end of traced frame ====");
@@ -860,6 +1113,8 @@ void DrawTraceOnPresent(ID3D11Device* device, ID3D11Texture2D* backbuffer)
         g_curTargetDesc.clear();
         return;
     }
+    // (2026-11-11: automatic traces, a frame every 4 s in two-view 3D frames, found the depth-of-field passes that
+    // doubled each eye's image -- hooks/native_stereo.cpp. Removed; arm g_armed to take a trace again.)
     if (g_armed.exchange(false, std::memory_order_relaxed))
     {
         std::lock_guard<std::mutex> lock(g_mutex);

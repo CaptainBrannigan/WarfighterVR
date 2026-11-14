@@ -209,7 +209,9 @@ inline bool GetControllerAimDirection(const Vec3& nativeDirection, Vec3* outDire
     // Only the soldier's own shots (2026-11-06): while something else has the controls (the robot section, where the
     // soldier's AimingController stops), the last head-aim yaw/pitch is stale and the shots come from that thing's
     // own gun and camera, so steering them along the controller sent them astray ("shots not registering always").
-    if (!IsPlayerAimActive())
+    // Nor while the gun is (mostly) back in the game's animation (GetPlayerAimDriveWeight: a scripted scene, the
+    // game's input locks): the shots are the game's then, as the reticle is (2026-11-12, the same 0.5 threshold).
+    if (!IsPlayerAimActive() || GetPlayerAimDriveWeight() < 0.5f)
         return false;
     mohwvr::ipc::ControllerPoseBlock pose{};
     if (!GetRightControllerPose(&pose))
@@ -264,7 +266,7 @@ inline bool GetControllerAimDirection(const Vec3& nativeDirection, Vec3* outDire
 inline bool GetControllerOriginOffset(Vec3* outOffset)
 {
     constexpr float kMaxOffsetMeters = 1.5f;
-    if (!GetWeaponDriveEnabled() || !IsPlayerAimActive()) // see GetControllerAimDirection
+    if (!GetWeaponDriveEnabled() || !IsPlayerAimActive() || GetPlayerAimDriveWeight() < 0.5f) // see GetControllerAimDirection
         return false;
     mohwvr::ipc::ControllerPoseBlock controller{};
     mohwvr::ipc::HeadPoseBlock head{};

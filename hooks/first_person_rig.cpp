@@ -1,5 +1,6 @@
 #include "first_person_rig.h"
 
+#include "aiming_controller_hook.h"
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/logging.h"
 #include "../sdk/mohw_offsets.h"
@@ -112,6 +113,9 @@ struct Skeleton
     int frameBones[3] = {-1, -1, -1};               // kRigFrameBoneNames
     std::vector<std::pair<int, int>> mirroredHands; // each left hand bone and its right one
     int mirrorAxis = 0;                             // the bind pose's left-right axis
+    std::vector<std::string> names;                 // every bone's name ("" if unreadable)
+    std::vector<int> parents;                       // every bone's parent, -1 for the root (ReadHierarchy)
+    bool parentsFromGame = false;                   // read from the skeleton asset, else by name (FallbackParents)
 };
 
 std::mutex g_skeletonMutex; // ApplyArmIk and the hooks
@@ -143,6 +147,65 @@ void ClassifyArmBone(ArmBones& arm, const char* side, const char* name, int inde
         arm.handBones.push_back(index);
         if (_stricmp(name, (s + "Hand").c_str()) == 0)
             arm.hand = index;
+    }
+}
+
+// THE BONE HIERARCHY (2026-11-09, for the weapon socket view): the bind poses come from the skeleton asset
+// (Animations/Skeletons/Venice1pSke01: SkeletonAsset { BoneNames, Hierarchy, LocalPose, ModelPose, ... } after the
+// asset's name, so ModelPose at +0x18 and Hierarchy at +0x10, an int per bone, its parent; the count is the u32 before
+// the data, as every Frostbite array). Checked before it's used: the root's parent is -1 and every other bone's an
+// earlier bone, as in the game data (tools/fb2dump: Wep_Root's parent is SpineX, each socket's Wep_Root).
+bool ReadHierarchy(uint32_t asset, int count, std::vector<int>* parents)
+{
+    uint32_t data = 0, stored = 0;
+    if (!ReadU32(asset + 0x10, &data) || data < 0x10000 || !ReadU32(data - 4, &stored) ||
+        stored != static_cast<uint32_t>(count))
+        return false;
+    std::vector<int> p(count);
+    if (!ReadBytes(data, p.data(), static_cast<size_t>(count) * sizeof(int)))
+        return false;
+    for (int i = 0; i < count; ++i)
+        if (i == 0 ? p[i] != -1 : (p[i] < 0 || p[i] >= i))
+            return false;
+    *parents = std::move(p);
+    return true;
+}
+
+// Without the game's hierarchy: the weapon skeleton's own (WeaponSke01), by name, and each hand's weapon bone on its hand.
+void FallbackParents(const std::vector<std::string>& names, std::vector<int>* parents)
+{
+    const int count = static_cast<int>(names.size());
+    parents->assign(count, -1);
+    auto find = [&](const char* name) {
+        for (int i = 0; i < count; ++i)
+            if (_stricmp(names[i].c_str(), name) == 0)
+                return i;
+        return -1;
+    };
+    const int root = find("Wep_Root");
+    for (int i = 0; i < count; ++i)
+    {
+        const char* n = names[i].c_str();
+        int parent = -1;
+        if (_stricmp(n, "Wep_Mag_Ammo") == 0)
+            parent = find("Wep_Mag");
+        else if (_stricmp(n, "Wep_Grenade2") == 0)
+            parent = find("Wep_Grenade1");
+        else if (_stricmp(n, "Wep_Bipod2") == 0 || _stricmp(n, "Wep_Bipod3") == 0)
+            parent = find("Wep_Bipod1");
+        else if (StartsWith(n, "Wep_Belt") && n[8] >= '2' && n[8] <= '5' && n[9] == '\0')
+        {
+            char previous[16];
+            snprintf(previous, sizeof(previous), "Wep_Belt%c", n[8] - 1);
+            parent = find(previous);
+        }
+        else if (_stricmp(n, "RightWeapon") == 0)
+            parent = find("RightHand");
+        else if (_stricmp(n, "LeftWeapon") == 0)
+            parent = find("LeftHand");
+        else if (i != root && (StartsWith(n, "Wep_") || StartsWith(n, "IK_Joint_")))
+            parent = root;
+        (*parents)[i] = parent;
     }
 }
 
@@ -204,6 +267,29 @@ bool ReadSkeleton(uintptr_t skeleton)
         line += entry;
     }
     MOHW_LOG(kLogFile, "skeleton %p, %u bones:%s", reinterpret_cast<void*>(skeleton), count, line.c_str());
+
+    next.names = names;
+    next.names.resize(count);
+    next.parentsFromGame = ReadHierarchy(bindHolder, static_cast<int>(count), &next.parents);
+    if (!next.parentsFromGame)
+        FallbackParents(next.names, &next.parents);
+    {
+        std::string weaponParents;
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const std::string& n = next.names[i];
+            if (StartsWith(n.c_str(), "Wep_") || StartsWith(n.c_str(), "IK_Joint_") || _stricmp(n.c_str(), "RightWeapon") == 0 ||
+                _stricmp(n.c_str(), "LeftWeapon") == 0)
+            {
+                const int p = next.parents[i];
+                char entry[96];
+                snprintf(entry, sizeof(entry), " %s<-%s", n.c_str(), p >= 0 ? next.names[p].c_str() : "(none)");
+                weaponParents += entry;
+            }
+        }
+        MOHW_LOG(kLogFile, "bone hierarchy %s; the weapon bones' parents:%s",
+                 next.parentsFromGame ? "read from the skeleton asset" : "NOT readable, taken by name", weaponParents.c_str());
+    }
 
     // For the gun in the left hand: each left hand bone's right twin, and the axis the two sides mirror across.
     for (uint32_t i = 0; i < named; ++i)
@@ -920,37 +1006,39 @@ Rigid AnglesRotation(const float deg[3])
     return Compose(Compose(roll, pitch), yaw);
 }
 
-// The right hand's calibration on the gun, in the gun's rest view: turned about the hand's centre, then moved.
-Rigid RightHandOnGun(const ArmIkSettings& s, const float centreInCamera[3], bool mirrored)
+// A hand's calibration on its controller: where the controller holds it, as the gun's grip does for the gun. The hand's
+// centre lands on the controller, moved by position (right, up, forward) in the controller's frame, the hand turned by
+// rotation (pitch, yaw, roll); both mirrored with the gun in the left hand.
+Rigid HandOnController(const float position[3], const float rotationDeg[3], const float centreInCamera[3], bool mirrored)
 {
-    const float side = mirrored ? -1.0f : 1.0f;
-    const float deg[3] = {s.rightHandDeg[0], s.rightHandDeg[1] * side, s.rightHandDeg[2] * side};
-    Rigid o = AnglesRotation(deg);
-    float turned[3];
-    PointTimes(centreInCamera, o, turned);
-    const float off[3] = {s.rightHandPos[0] * side, s.rightHandPos[1], -s.rightHandPos[2]};
-    for (int k = 0; k < 3; ++k)
-        o.t[k] = centreInCamera[k] - turned[k] + off[k];
-    return o;
-}
-
-// The left hand's calibration: where its controller holds it, as the gun's grip does for the gun.
-Rigid LeftHandGrip(const float centreInCamera[3], bool mirrored)
-{
-    float position[3], deg[3];
-    GetLeftHandIkOffset(position, deg);
+    float deg[3] = {rotationDeg[0], rotationDeg[1], rotationDeg[2]};
+    float off[3] = {position[0], position[1], -position[2]};
     if (mirrored)
     {
-        position[0] = -position[0];
+        off[0] = -off[0];
         deg[1] = -deg[1];
         deg[2] = -deg[2];
     }
     Rigid j = AnglesRotation(deg);
-    // The hand's centre lands on the controller, moved by the offset (right, up, forward) in the controller's frame.
-    const float off[3] = {position[0], position[1], -position[2]};
     for (int k = 0; k < 3; ++k)
         j.t[k] = centreInCamera[k] - (off[0] * j.R[0][k] + off[1] * j.R[1][k] + off[2] * j.R[2][k]);
     return j;
+}
+
+// The off hand's: LeftHandIk*.
+Rigid LeftHandGrip(const float centreInCamera[3], bool mirrored)
+{
+    float position[3], deg[3];
+    GetLeftHandIkOffset(position, deg);
+    return HandOnController(position, deg, centreInCamera, mirrored);
+}
+
+// The weapon hand's: RightHandIk* (2026-11-09). It used to ride the gun (the gun's move, plus this as an offset on the
+// gun), so it went wherever a grip profile put the gun; now it's on its own controller like the off hand, and the gun
+// follows the hand instead ("Gun held at its hand socket").
+Rigid WeaponHandGrip(const ArmIkSettings& s, const float centreInCamera[3], bool mirrored)
+{
+    return HandOnController(s.rightHandPos, s.rightHandDeg, centreInCamera, mirrored);
 }
 
 // THE GUN IN THE LEFT HAND (2026-11-01): the rig's right hand is the one animated on the grip, and its left on the
@@ -1033,8 +1121,44 @@ bool MeshUsesBones(uintptr_t mesh, const int* wanted, int wantedCount)
     return false;
 }
 
-bool g_ikOnceDone = false;
-float g_lastWrittenHand[12]; // the right hand as last written: a batch that already holds it is done
+// A batch is drawn by several passes, each through the camera hook, so the arms are solved once and later passes keep
+// them: a bone array whose right hand still holds what was written into it is done. ONE RECORD PER ARRAY (2026-11-09,
+// "the body did flicker constantly" in two-view mode): it used to be one global record, which one eye per frame never
+// broke. With two views each eye has its own array, drawn in several passes on different threads, so the other eye's
+// solve replaced the record. The controller had moved a little in between, so this eye's later passes no longer
+// matched and solved again on bones already on the controllers: the arms moved twice, a pass at a time. Guarded by
+// g_skeletonMutex, as ApplyArmIk.
+struct IkWritten
+{
+    const float* bones = nullptr;
+    float hand[12] = {};
+};
+constexpr int kIkWrittenSlots = 8;
+IkWritten g_ikWritten[kIkWrittenSlots];
+int g_ikWrittenNext = 0;
+
+bool IkAlreadyWritten(const float* bones, const float* hand)
+{
+    for (const IkWritten& w : g_ikWritten)
+        if (w.bones == bones && memcmp(hand, w.hand, sizeof(w.hand)) == 0)
+            return true;
+    return false;
+}
+
+void NoteIkWritten(const float* bones, const float* hand)
+{
+    IkWritten* slot = nullptr;
+    for (IkWritten& w : g_ikWritten)
+        if (w.bones == bones)
+            slot = &w;
+    if (!slot)
+    {
+        slot = &g_ikWritten[g_ikWrittenNext];
+        g_ikWrittenNext = (g_ikWrittenNext + 1) % kIkWrittenSlots;
+    }
+    slot->bones = bones;
+    memcpy(slot->hand, hand, sizeof(slot->hand));
+}
 
 // Settling which skeleton is the first-person one, from a body batch's bones.
 constexpr float kBoneMatchMetres = 0.02f; // mean translation difference per bone: 0 = the very copy, a little = a tick old
@@ -1064,11 +1188,16 @@ float BoneDifference(const SkeletonCandidate& c, const float* batchBones, int co
 // average O' takes out the bone's own fixed turn, and M' = O'^-1 * bone is the camera the rig really goes with. Only a
 // small wobble is that: anything bigger is an animation moving the bone, and following one turned the whole rig and let
 // it ease back over the average's second (live: "jump and lerp back", with CameraJoint as the bone).
-void AlignRigToBones(Rigid* rigCamera)
+void AlignRigToBones(Rigid* rigCamera, const float batchRows[3][3][3])
 {
     constexpr float kFollowSeconds = 1.0f;
     constexpr float kMaxWobbleDegrees = 3.0f;
     float rows[3][3][3];
+    if (batchRows)
+    {
+        memcpy(rows, batchRows, sizeof(rows));
+    }
+    else
     {
         std::lock_guard<std::mutex> lock(g_frameMutex);
         if (!g_haveFrameRows)
@@ -1121,12 +1250,266 @@ void AlignRigToBones(Rigid* rigCamera)
                  kRigFrameBoneNames[0], peak[0], kRigFrameBoneNames[1], peak[1], kRigFrameBoneNames[2], peak[2]);
         peak[0] = peak[1] = peak[2] = 0.0f;
     }
-    if (!GetStabilizeRig() || wobble0 > kMaxWobbleDegrees)
+    // Not in a scripted scene (2026-11-12): the rig is the game's then, and easing its turn against the camera made an
+    // animated body lag and drift.
+    if (!GetStabilizeRig() || wobble0 > kMaxWobbleDegrees || GetPlayerAimDriveWeight() < 1.0f)
         return;
     for (int i = 0; i < 3; ++i)
         for (int j = 0; j < 3; ++j)
             rigCamera->R[i][j] = average[0][0][i] * rows[0][0][j] + average[0][1][i] * rows[0][1][j] +
                                  average[0][2][i] * rows[0][2][j];
+}
+
+namespace {
+
+// NATIVE TWO-VIEW BODY (see SyncTwoViewBodyPose in the header). Guarded by g_twoViewPoseMutex.
+std::mutex g_twoViewPoseMutex;
+unsigned g_twoViewPoseFrame = 0;             // the frame whose first body batch g_twoViewPose holds
+const float* g_twoViewPoseSource = nullptr;  // that batch's bone array
+const float* g_twoViewPoseTarget = nullptr;  // the other eye's, once given the pose (a batch is drawn by several passes)
+int g_twoViewPoseCount = 0;
+float g_twoViewPose[kMaxBones * 12];
+long g_twoViewPairs = 0, g_twoViewDiffered = 0;
+float g_twoViewLargest = 0.0f;
+unsigned long long g_twoViewNextLogMs = 0;
+
+bool ReadBatchBones(const unsigned char* batch, float** bones, int* count)
+{
+    __try
+    {
+        *bones = *reinterpret_cast<float* const*>(batch + kBatchBones);
+        *count = *reinterpret_cast<const int*>(batch + kBatchBoneCount);
+        return *bones != nullptr && *count > 0 && *count <= kMaxBones;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+bool CopyFloats(float* to, const float* from, int n)
+{
+    __try
+    {
+        memcpy(to, from, static_cast<size_t>(n) * sizeof(float));
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+// Largest translation difference over the bones, -1 if unreadable.
+float LargestBoneDifference(const float* a, const float* b, int count)
+{
+    __try
+    {
+        float largest = 0.0f;
+        for (int i = 0; i < count * 12; i += 12)
+            for (int k = 3; k < 12; k += 4)
+            {
+                const float d = std::fabs(a[i + k] - b[i + k]);
+                if (d > largest)
+                    largest = d;
+            }
+        return largest;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return -1.0f;
+    }
+}
+
+} // namespace
+
+void SyncTwoViewBodyPose(const unsigned char* batch, unsigned frame)
+{
+    if (frame == 0)
+        return;
+    float* bones = nullptr;
+    int count = 0;
+    if (!ReadBatchBones(batch, &bones, &count))
+        return;
+    std::lock_guard<std::mutex> lock(g_twoViewPoseMutex);
+    if (frame != g_twoViewPoseFrame)
+    {
+        // The first eye's body batch of this frame, before anything moves its bones: its pose is the frame's.
+        if (!CopyFloats(g_twoViewPose, bones, count * 12))
+            return;
+        g_twoViewPoseFrame = frame;
+        g_twoViewPoseSource = bones;
+        g_twoViewPoseTarget = nullptr;
+        g_twoViewPoseCount = count;
+        return;
+    }
+    // One array for both eyes, the one already given the pose (its arms may be on the controllers by now), or another
+    // rig: nothing to do.
+    if (bones == g_twoViewPoseSource || bones == g_twoViewPoseTarget || count != g_twoViewPoseCount)
+        return;
+    g_twoViewPoseTarget = bones;
+    const float largest = LargestBoneDifference(bones, g_twoViewPose, count);
+    ++g_twoViewPairs;
+    if (largest != 0.0f && CopyFloats(bones, g_twoViewPose, count * 12))
+    {
+        ++g_twoViewDiffered;
+        if (largest > g_twoViewLargest)
+            g_twoViewLargest = largest;
+    }
+    const unsigned long long now = GetTickCount64();
+    if (now >= g_twoViewNextLogMs)
+    {
+        g_twoViewNextLogMs = now + 5000;
+        MOHW_LOG(kLogFile,
+                 "native two-view body, last 5 s: %ld frame(s) with a batch per eye, %ld of them with the eyes' poses "
+                 "different (largest bone gap %.3f m: copied from different ticks), the second eye given the first's",
+                 g_twoViewPairs, g_twoViewDiffered, g_twoViewLargest);
+        g_twoViewPairs = 0;
+        g_twoViewDiffered = 0;
+        g_twoViewLargest = 0.0f;
+    }
+}
+
+bool ReadBatchFrameRows(const unsigned char* batch, float rows[3][3][3])
+{
+    float* bones = nullptr;
+    int count = 0;
+    if (!ReadBatchBones(batch, &bones, &count) || g_frameBoneIndex[0].load(std::memory_order_relaxed) < 0)
+        return false;
+    memset(rows, 0, sizeof(float) * 27);
+    for (int b = 0; b < 3; ++b)
+    {
+        // As NoteFrameBones: a bone the skeleton lacks stays zero (AlignRigToBones skips it), a bone is the transpose of
+        // the row-vector matrix.
+        const int index = g_frameBoneIndex[b].load(std::memory_order_relaxed);
+        float slot[12];
+        if (index < 0 || index >= count || !CopyFloats(slot, bones + index * 12, 12))
+        {
+            if (b == 0)
+                return false;
+            continue;
+        }
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                rows[b][i][j] = slot[j * 4 + i];
+    }
+    return true;
+}
+
+bool ReadGunSocketInCamera(const unsigned char* batch, const Rigid& rigCamera, float out[3], float handCentre[3])
+{
+    float* bones = nullptr;
+    int count = 0;
+    if (!ReadBatchBones(batch, &bones, &count))
+        return false;
+    float slot[12];
+    float bind[3];
+    float centreWorld[3];
+    {
+        std::lock_guard<std::mutex> lock(g_skeletonMutex);
+        const Skeleton& sk = g_skeleton;
+        const int bone = sk.ikHand[1];
+        if (bone < 0 || bone >= sk.boneCount || bone >= static_cast<int>(sk.bind.size()) || count != sk.boneCount ||
+            !sk.armsValid || sk.arms[1].hand < 0)
+            return false;
+        // Only the game's own pose (2026-11-09, "the weapon is now affected by the head, while the hand IK is not"): a
+        // batch is drawn by several passes, and after the first one the arm IK has put this array's hand on its
+        // controller. Read then, the "hand centre" was the controller's place in the camera, which moves as the head
+        // turns, so the socket's offset from it -- and the gun's grip with it -- did too. A pass after the solve keeps
+        // the values the first one read.
+        float hand[12];
+        if (!CopyFloats(hand, BoneSlot(bones, sk.arms[1].hand), 12) || IkAlreadyWritten(bones, hand))
+            return false;
+        memcpy(bind, sk.bind[bone].data(), sizeof(bind));
+        if (!CopyFloats(slot, bones + bone * 12, 12) || !HandCentre(bones, sk, sk.arms[1], centreWorld))
+            return false;
+    }
+    float s[16], world[3];
+    ReadBone(slot, s);
+    PointThrough(bind, s, world);
+    const Rigid inverse = Inverse(rigCamera);
+    PointTimes(world, inverse, out);
+    PointTimes(centreWorld, inverse, handCentre);
+    for (int k = 0; k < 3; ++k)
+        if (!std::isfinite(out[k]) || !std::isfinite(handCentre[k]) || std::fabs(out[k]) >= 3.0f ||
+            std::fabs(handCentre[k]) >= 3.0f)
+            return false;
+    return true;
+}
+
+bool ReadWeaponSocketBones(const unsigned char* batch, const Rigid& rigCamera, bool gunInLeftHand, WeaponSocketBones* out)
+{
+    out->count = 0;
+    float* bones = nullptr;
+    int count = 0;
+    if (!ReadBatchBones(batch, &bones, &count))
+        return false;
+    const ArmIkSettings settings = GetArmIkSettings();
+    const Rigid rigInverse = Inverse(rigCamera);
+    std::lock_guard<std::mutex> lock(g_skeletonMutex);
+    const Skeleton& sk = g_skeleton;
+    if (!sk.armsValid || count != sk.boneCount || static_cast<int>(sk.parents.size()) != count ||
+        static_cast<int>(sk.names.size()) != count || static_cast<int>(sk.bind.size()) != count)
+        return false;
+    // The game's own pose only, as ReadGunSocketInCamera.
+    float hand[12];
+    if (!CopyFloats(hand, BoneSlot(bones, sk.arms[1].hand), 12) || IkAlreadyWritten(bones, hand))
+        return false;
+    static float pose[kMaxBones * 12]; // under g_skeletonMutex
+    if (!CopyFloats(pose, bones, count * 12))
+        return false;
+
+    // Each hand's grip on its controller, as ApplyArmIk takes it from this pose. With the gun in the left hand the hands
+    // trade poses first (MirrorHands), so the hand bones are left out then.
+    Rigid gripInverse[2];
+    if (!gunInLeftHand)
+        for (int h = 0; h < 2; ++h)
+        {
+            float centre[3], inCamera[3];
+            if (!HandCentre(pose, sk, sk.arms[h], centre))
+                return false;
+            PointTimes(centre, rigInverse, inCamera);
+            gripInverse[h] = Inverse(h ? WeaponHandGrip(settings, inCamera, false) : LeftHandGrip(inCamera, false));
+        }
+
+    int listed[kMaxBones];
+    for (int i = 0; i < count; ++i)
+        listed[i] = -1;
+    auto add = [&](int bone, int onHand) {
+        if (bone < 0 || bone >= count || listed[bone] >= 0 || out->count >= kMaxSocketBones)
+            return;
+        const int k = out->count++;
+        listed[bone] = k;
+        snprintf(out->names[k], sizeof(out->names[k]), "%s", sk.names[bone].c_str());
+        out->hand[k] = onHand;
+        float s[16], world[3];
+        ReadBone(BoneSlot(pose, bone), s);
+        PointThrough(sk.bind[bone].data(), s, world);
+        PointTimes(world, rigInverse, out->joint[k]);
+        if (onHand)
+            PointTimes(out->joint[k], gripInverse[onHand == 1 ? 1 : 0], out->handGrip[k]);
+    };
+    for (int i = 0; i < count; ++i)
+        if (StartsWith(sk.names[i].c_str(), "Wep_") || StartsWith(sk.names[i].c_str(), "IK_Joint_"))
+            add(i, 0);
+    if (!gunInLeftHand)
+        for (int h = 1; h >= 0; --h)
+        {
+            const char* weaponBone = h ? "RightWeapon" : "LeftWeapon";
+            for (int i = 0; i < count; ++i)
+                if (_stricmp(sk.names[i].c_str(), weaponBone) == 0)
+                {
+                    add(sk.parents[i], h ? 1 : 2); // its hand
+                    add(i, h ? 1 : 2);
+                }
+        }
+    for (int i = 0; i < count; ++i)
+        if (listed[i] >= 0)
+        {
+            const int p = sk.parents[i];
+            out->parent[listed[i]] = p >= 0 ? listed[p] : -1;
+        }
+    return out->count > 0;
 }
 
 void SetInstantReload(uintptr_t firing, uintptr_t otherFiringsData)
@@ -1284,14 +1667,100 @@ void LogWeaponSockets(float* bones, const Skeleton& sk, const Rigid& rigCamera)
     int magazineParts = 0;
     for (const auto& slot : g_magazineMeshes)
         magazineParts += slot.load(std::memory_order_relaxed) != 0 ? 1 : 0;
-    float grip[3];
-    GetWeaponGripOffset(grip);
-    MOHW_LOG(kSocketLog, "%s (%s): %s; magazine parts %d; grip profile now (%.3f, %.3f, %.3f)", display, key, line.c_str(),
-             magazineParts, grip[0], grip[1], grip[2]);
+    MOHW_LOG(kSocketLog, "%s (%s): %s; magazine parts %d", display, key, line.c_str(), magazineParts);
+
+    // THE GUN AT ITS HAND SOCKET (2026-11-08): the right-hand socket against the gun's own frame, which the animation
+    // doesn't change (the logged camera-frame offsets above turn with the gun). The bones are skinning matrices (model
+    // to world, row vectors): a world direction in the gun's model axes is its dot with each of Wep_Root's rows. And
+    // each bone's turn in the camera (its skinning rows in the camera's axes: relative to its bind pose, so the same bone
+    // compares between guns), for the right hand and the socket. (Until 2026-11-09 this also compared the socket with
+    // the weapon profile's grip position, which is gone now.)
+    const int socket = sk.ikHand[1], hand = sk.arms[1].hand;
+    if (sk.gunBone >= 0 && socket >= 0 && socket < sk.boneCount && socket < static_cast<int>(sk.bind.size()))
+    {
+        float rootSkin[16], socketSkin[16], rootWorld[3], socketWorld[3];
+        ReadBone(BoneSlot(bones, sk.gunBone), rootSkin);
+        ReadBone(BoneSlot(bones, socket), socketSkin);
+        PointThrough(sk.bind[sk.gunBone].data(), rootSkin, rootWorld);
+        PointThrough(sk.bind[socket].data(), socketSkin, socketWorld);
+        float d[3], inGun[3];
+        for (int k = 0; k < 3; ++k)
+            d[k] = socketWorld[k] - rootWorld[k];
+        for (int j = 0; j < 3; ++j)
+            inGun[j] = d[0] * rootSkin[j * 4 + 0] + d[1] * rootSkin[j * 4 + 1] + d[2] * rootSkin[j * 4 + 2];
+        auto rowsInCamera = [&](const float s[16], char* out, size_t size) {
+            float r[3][3];
+            for (int j = 0; j < 3; ++j)
+                for (int k = 0; k < 3; ++k)
+                    r[j][k] = s[j * 4 + 0] * rigCamera.R[k][0] + s[j * 4 + 1] * rigCamera.R[k][1] +
+                              s[j * 4 + 2] * rigCamera.R[k][2];
+            snprintf(out, size, "(%.3f %.3f %.3f)(%.3f %.3f %.3f)(%.3f %.3f %.3f)", r[0][0], r[0][1], r[0][2], r[1][0],
+                     r[1][1], r[1][2], r[2][0], r[2][1], r[2][2]);
+        };
+        char socketRows[128] = "", handRows[128] = "";
+        rowsInCamera(socketSkin, socketRows, sizeof(socketRows));
+        if (hand >= 0 && hand < sk.boneCount)
+        {
+            float handSkin[16];
+            ReadBone(BoneSlot(bones, hand), handSkin);
+            rowsInCamera(handSkin, handRows, sizeof(handRows));
+        }
+        float socketCam[3];
+        PointTimes(socketWorld, rigInverse, socketCam);
+        MOHW_LOG(kSocketLog,
+                 "  %s IK_Joint_RightHand from Wep_Root in the gun's own frame %+.4f %+.4f %+.4f (%.3f m); in the camera "
+                 "(%.3f, %.3f, %.3f); turn in the camera: right hand %s, socket %s",
+                 display, inGun[0], inGun[1], inGun[2], std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]), socketCam[0],
+                 socketCam[1], socketCam[2], handRows[0] ? handRows : "(no hand bone)", socketRows);
+    }
+
+    // EVERY WEAPON BONE (2026-11-09, with the socket view, ShowWeaponSockets): each one from its parent (the skeleton's
+    // hierarchy), in the gun's own frame (Wep_Root's model axes), and the line's length. Bones on their parent's joint
+    // (the parts this gun doesn't have) are counted, not listed.
+    if (sk.gunBone >= 0 && static_cast<int>(sk.parents.size()) == sk.boneCount &&
+        static_cast<int>(sk.names.size()) == sk.boneCount)
+    {
+        float rootSkin[16];
+        ReadBone(BoneSlot(bones, sk.gunBone), rootSkin);
+        auto worldOf = [&](int bone, float p[3]) {
+            float s[16];
+            ReadBone(BoneSlot(bones, bone), s);
+            PointThrough(sk.bind[bone].data(), s, p);
+        };
+        std::string list;
+        int onParent = 0;
+        for (int i = 0; i < sk.boneCount; ++i)
+        {
+            const char* n = sk.names[i].c_str();
+            const int p = sk.parents[i];
+            if (p < 0 || i == sk.gunBone || !(StartsWith(n, "Wep_") || StartsWith(n, "IK_Joint_")))
+                continue;
+            float a[3], b[3], d[3], inGun[3];
+            worldOf(i, a);
+            worldOf(p, b);
+            for (int k = 0; k < 3; ++k)
+                d[k] = a[k] - b[k];
+            const float length = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (length < 0.003f)
+            {
+                ++onParent;
+                continue;
+            }
+            for (int j = 0; j < 3; ++j)
+                inGun[j] = d[0] * rootSkin[j * 4 + 0] + d[1] * rootSkin[j * 4 + 1] + d[2] * rootSkin[j * 4 + 2];
+            char entry[160];
+            snprintf(entry, sizeof(entry), "%s%s from %s %+.3f %+.3f %+.3f (%.3f m)", list.empty() ? "" : "; ", n,
+                     sk.names[p].c_str(), inGun[0], inGun[1], inGun[2], length);
+            list += entry;
+        }
+        MOHW_LOG(kSocketLog, "  %s every weapon bone from its parent, in the gun's frame (hierarchy %s): %s; %d more on "
+                 "their parent's joint", display, sk.parentsFromGame ? "from the game" : "by name",
+                 list.empty() ? "(none)" : list.c_str(), onParent);
+    }
 }
 
 bool ApplyArmIk(const unsigned char* batch, const Rigid& cam, const Rigid& rigCamera, const Rigid& drawn, const Rigid& gun,
-                const Rigid& offHand, bool haveOffHand, bool twoHanded, bool gunInLeftHand)
+                const Rigid& weaponHand, const Rigid& offHand, bool haveOffHand, bool twoHanded, bool gunInLeftHand)
 {
     std::lock_guard<std::mutex> lock(g_skeletonMutex);
     const Skeleton& sk = g_skeleton;
@@ -1307,8 +1776,8 @@ bool ApplyArmIk(const unsigned char* batch, const Rigid& cam, const Rigid& rigCa
         return false;
     }
     g_armsDrawnTick.store(GetTickCount(), std::memory_order_relaxed);
-    // Several views draw one batch, each through this hook (and from several threads).
-    if (g_ikOnceDone && memcmp(BoneSlot(bones, sk.arms[1].hand), g_lastWrittenHand, sizeof(g_lastWrittenHand)) == 0)
+    // Several passes and views draw a batch, each through this hook (and from several threads): solved once per array.
+    if (IkAlreadyWritten(bones, BoneSlot(bones, sk.arms[1].hand)))
         return true;
     LogWeaponSockets(bones, sk, rigCamera); // the game's own pose, before anything below moves it
 
@@ -1325,17 +1794,18 @@ bool ApplyArmIk(const unsigned char* batch, const Rigid& cam, const Rigid& rigCa
     const int weaponArm = gunInLeftHand ? 0 : 1, offArm = 1 - weaponArm;
     float weaponMove[16], offMove[16];
     {
+        // The weapon hand on its own controller (2026-11-09), as the off hand below: it no longer rides the gun.
         float centre[3], inCamera[3];
         if (!HandCentre(bones, sk, sk.arms[weaponArm], centre))
             return false;
         PointTimes(centre, rigInverse, inCamera);
-        const Rigid onGun =
-            Compose(Compose(rigInverse, RightHandOnGun(settings, inCamera, gunInLeftHand)), Compose(rigCamera, gun));
-        ToMatrix4(Compose(onGun, toRig), weaponMove);
+        const Rigid held =
+            Compose(Compose(rigInverse, Inverse(WeaponHandGrip(settings, inCamera, gunInLeftHand))), weaponHand);
+        ToMatrix4(Compose(held, toRig), weaponMove);
     }
     if (twoHanded || !haveOffHand)
     {
-        memcpy(offMove, weaponMove, sizeof(offMove)); // keeps the game's own grip on the gun
+        ToMatrix4(Compose(gun, toRig), offMove); // the gun's own move: keeps the game's own grip on the gun
     }
     else
     {
@@ -1362,19 +1832,20 @@ bool ApplyArmIk(const unsigned char* batch, const Rigid& cam, const Rigid& rigCa
     const float offD[3] = {-offFrame.R[1][0], -offFrame.R[1][1], -offFrame.R[1][2]};
     VecTimes(offF, rot, fwd[offArm]);
     VecTimes(offD, rot, dwn[offArm]);
-    // The gun's frame as the weapon hand: the camera's axes carried by the gun's move.
-    const Rigid gunAxes = Compose(rigCamera, gun);
-    const float gunF[3] = {-gunAxes.R[2][0], -gunAxes.R[2][1], -gunAxes.R[2][2]};
-    const float gunD[3] = {-gunAxes.R[1][0], -gunAxes.R[1][1], -gunAxes.R[1][2]};
-    VecTimes(gunF, rot, fwd[weaponArm]);
-    VecTimes(gunD, rot, dwn[weaponArm]);
+    // The weapon hand's controller, as the off hand's.
+    const float weaponF[3] = {-weaponHand.R[2][0], -weaponHand.R[2][1], -weaponHand.R[2][2]};
+    const float weaponD[3] = {-weaponHand.R[1][0], -weaponHand.R[1][1], -weaponHand.R[1][2]};
+    VecTimes(weaponF, rot, fwd[weaponArm]);
+    VecTimes(weaponD, rot, dwn[weaponArm]);
 
     // A mirrored hand's turn isn't its move, so the forearm twist can't be read from it: the forearm doesn't twist then.
     const bool twist = !gunInLeftHand;
-    SolveArm(settings, bones, sk, weaponArm, weaponMove, forward, right, cam.t, fwd[weaponArm], dwn[weaponArm], twist);
-    SolveArm(settings, bones, sk, offArm, offMove, forward, right, cam.t, fwd[offArm], dwn[offArm], twist);
-    memcpy(g_lastWrittenHand, BoneSlot(bones, sk.arms[1].hand), sizeof(g_lastWrittenHand));
-    g_ikOnceDone = true;
+    // The head: the camera the rig was posed against (cam's own position is the eye in two-view mode, and the arms are
+    // solved once for both eyes).
+    SolveArm(settings, bones, sk, weaponArm, weaponMove, forward, right, rigCamera.t, fwd[weaponArm], dwn[weaponArm],
+             twist);
+    SolveArm(settings, bones, sk, offArm, offMove, forward, right, rigCamera.t, fwd[offArm], dwn[offArm], twist);
+    NoteIkWritten(bones, BoneSlot(bones, sk.arms[1].hand));
     return true;
 }
 

@@ -62,10 +62,53 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   HUD is in its panel (in the driving missions too); ones outside the panel are pinned to its edge, like the game's
   own off-screen arrows.
 - Pre-rendered movies, menus and loading screens are shown as a floating screen (see [Known issues](#known-issues)).
-- **Experimental, off by default: engine two-view stereo** (View > "Engine two-view stereo"). The game renders both
-  eyes in one frame through its own two-view path, instead of one eye per frame. Turn it on, then reload the level.
-  The first-person weapon and the HUD aren't adapted to it yet. Details and what to check:
+- **Two render modes in one DLL** (View > "Render mode", the first row):
+  - **Alternating eye** (the original): one eye per frame.
+  - **Engine two-view:** in play, the game renders both eyes in one frame through its own two-view path. Movies,
+    menus, loading screens and cutscenes before you have control stay on the floating screen. The first-person weapon
+    and the HUD are drawn per eye, the in-world markers in the right direction at the HUD's depth, and the desktop
+    window shows both eyes side by side. The ocean water's per-view jobs are kept in order, which fixed the crashes
+    in levels with open water.
+
+  A change applies fully at the next level load: while the level in play was loaded in the other mode, a note under
+  the setting says so ("Changed: reload the level to apply"). The menu shows only the selected mode's settings. The
+  HUD's numbers (menu/movie screen size and distance, Hud Element Scale, HUD scale, depth, IPD and offsets) are kept
+  per mode, so each mode keeps its own tuning; the driving missions always use the alternating-eye values. Details:
   [docs/native_stereo_render_path.md](docs/native_stereo_render_path.md).
+- **The sky is drawn with exact view rays** (View > "Exact sky rays", on by default). The game's own rays warp the
+  clouds differently in each eye with a headset's wide, off-centre view.
+- **Screen effects in both eyes** (View > "Screen effects (dust) in both eyes", on by default, engine two-view
+  only): the left eye's dust and other full-screen effects are drawn after the right eye's, since the right eye's
+  render was wiping them.
+- **No depth of field in two-view mode** (View > "Depth of field (doubles the image)", off by default, engine
+  two-view only): the game's depth of field blurs the whole side-by-side frame, so each eye got a faint copy of both
+  eyes' images (seen in cutscenes once the camera is on the player). Turned off while two views render, including the
+  ADS blur.
+- **Experimental, off by default: backbuffer at SteamVR's eye size** (View > "Backbuffer at SteamVR eye size", engine
+  two-view only). In two-view each eye is only half the game's resolution; this asks the game for SteamVR's recommended
+  eye size, two side by side (e.g. 5824x3112), through its own resize path, so the world and the HUD reach the headset
+  at SteamVR's resolution. Needs "Keep game out of exclusive fullscreen". Switched on mid-level, it shows fully after
+  a level reload. Details: [docs/native_stereo_render_path.md](docs/native_stereo_render_path.md).
+- **HUD element scale** (HUD > "Hud Element Scale", 1 = the game's own): the game lays its menus out in pixels, so at
+  a high resolution they come out small. Above 1 lays the UI out as on a screen that much smaller, so the menus are
+  bigger again and still drawn at the full resolution. Applies live. The HUD section sits under View, in the first
+  column of the settings.
+- The floating screen's distance is its own setting (HUD > "Menu / movie screen distance", 2.5 m by default).
+
+### Scripted scenes
+- **The game's own input locks mark scripted scenes** (View > "Scripted scenes follow the game's input locks", on by
+  default). Cutscenes, breaches and other scripted moments take inputs away through the game's input restrictions;
+  the mod reads them and steps aside, leaving only the stereo rendering:
+  - look taken: the head stops driving anything (no head look, head position or head roll), the mod no longer undoes
+    the game's own turns of the player, and the game's camera is shown as it is, in 3D, fixed to your view (like a
+    screen strapped to the headset). The same as when the aim stops altogether (the robot section, menus);
+  - look or fire taken: the controllers stop driving anything too. The gun and arms go back to the game's animation,
+    the shots, laser and sight dots go back to the game's aim, and the reticle returns;
+  - in either case the body is where the game puts it: no Body offset or "Keep body upright" turn and no "Keep body
+    and gun steady" easing.
+
+  Every change is logged in `mohwvr_control.log` ("INPUT LOCKS"), with the inputs taken. Details:
+  [docs/camera_state_and_resets.md](docs/camera_state_and_resets.md).
 
 ### Head look
 - Head yaw is **added** to the game's own turning (right stick or mouse), and head pitch is absolute; the game's own
@@ -81,14 +124,26 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
 - **Hand calibration** (all weapons): "Hand offset right / up / forward" and "Hand rotation pitch / yaw / roll" in
   the Hands settings move and turn the hand itself before anything uses it -- the gun, the laser and shots, the dots,
   holsters and two-handed aim -- mirrored for the left hand. Per-weapon settings come on top.
+- **The gun sits at its own hand socket:** each gun is placed in the arm IK's weapon hand by the point the game's own
+  animation holds the right hand on (its IK_Joint_RightHand), so no per-gun grip position is needed (the profiles'
+  grip positions were removed, 2026-11-09). The hand sits on its controller ("Right hand ..." in Arm IK), and "Gun
+  offset in the hand right / up / forward" fine-tunes the gun in it for all guns. The profiles' grip rotation still
+  applies. Details: [docs/weapons_sockets_magazines.md](docs/weapons_sockets_magazines.md).
+- **Weapon socket view** (Hands > "Show weapon sockets (debug lines)", off by default): every bone of the gun's
+  skeleton drawn in the headset as a line from its parent to itself, with its name, plus each hand's weapon bone. For
+  checking where the gun's grip points are against the hands.
 - **Two-handed aiming:** grip with your other hand on the barrel to aim along the line between your hands. Only the
   other hand's position counts (its palm, the SteamVR grip pose), so turning that hand doesn't move the aim.
 - **Left-handed mode.** With the gun in the left hand the game's arms swap roles, each hand mirroring the other's pose.
 - **Arms on your hands:** the first-person arms follow the controllers, with two-bone IK and an elbow model that
-  follows your wrist. The weapon hand stays on the gun's grip; the other hand follows its controller, or stays on the
-  gun when two-handed. Hand offsets, each shoulder's position and the elbow limits are in the **Arm IK** settings.
+  follows your wrist. Each hand follows its own controller, the weapon hand included (it used to ride the gun); the
+  other hand stays on the gun when two-handed. With "Gun held at its hand socket" the gun follows the weapon hand.
+  Hand offsets, each shoulder's position and the elbow limits are in the **Arm IK** settings.
 - **Body:** the body and legs can be moved under your view, and kept upright when you look up or down, in the **Body**
   settings. The hands stay on the controllers. Which other parts are drawn is set by the "Hide part" rows in Weapon.
+- **Scripted moments** (a breach's door kick, cutscenes, a locked camera): while the game has taken your aim away, the
+  gun and arms go back to the game's own animation, the shots and laser go back to the game's aim, and the reticle
+  returns. They glide back onto your hands a quarter second after you have control again.
 - **Manual reload:** there's no reload animation; you change the magazine yourself.
   1. Grip with your other hand on the magazine and pull it out. The gun can't fire while it's out.
   2. Let go away from the gun, and the magazine moves to a pouch on your chest.
@@ -124,7 +179,7 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   move stick: analog lean left / right and peek up / down, as on a gamepad. LB stays on while your thumb moves to the
   stick, and for as long as the stick is off centre. Turn off the game's
   own **Auto ADS** option to lean without aiming down sights (with it on, a full lean aims down sights by itself).
-- **Weapon profiles:** the grip offset and rotation, the optic zero, the controller aim offset, the secondary
+- **Weapon profiles:** the grip rotation, the optic zero, the controller aim offset, the secondary
   (two-handed) grip offset, the laser / beam start and the magazine's setup (grab box, aim point, turn, lock and seat
   distances) are kept per weapon
   and switch automatically with the weapon in your hand (picked-up weapons included). The settings menu's "Weapon
@@ -212,7 +267,7 @@ is there, applies immediately and saves by itself. There is also a Recenter butt
 | Group | What's in it |
 |---|---|
 | Head | Head look, its sensitivity and direction, head roll, head position |
-| View | IPD, world scale, rotation smoothing, keeping the game out of exclusive fullscreen, engine two-view stereo (experimental) |
+| View | Render mode (alternating eye or engine two-view), IPD, world scale, rotation smoothing, keeping the game out of exclusive fullscreen, exact sky rays, scripted scenes from the game's input locks; two-view only: screen effects in both eyes, depth of field, backbuffer at SteamVR eye size |
 | Controls | Turn speed, stick range, two-handed grab, shot spread, fire as mouse or triggers, double-tap bumpers |
 | Hands | Left-handed, holster size, hand calibration, sight dots, laser beam |
 | Holsters | The grab zone view, each zone's position, the magazine pouch |
@@ -221,7 +276,7 @@ is there, applies immediately and saves by itself. There is also a Recenter butt
 | Body | Body position, keeping it upright, steadying it on head turns |
 | Weapon | Gun follows the controller, manual reload, which body parts are hidden |
 | Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand |
-| HUD | The HUD panel on or off, its size, depth, IPD and offset, the menu and movie screen size, hiding the reticle |
+| HUD | The HUD panel on or off, its size, depth, IPD and offset, Hud Element Scale, the menu and movie screen size and distance, hiding the reticle (the numbers are kept per render mode) |
 | Driving | Head look, stereo and the steering wheel in the driving missions |
 
 **Grab zone view:** turn on **Show grab zones (setup)** in Holsters to see everywhere a grip does something, drawn in
@@ -291,9 +346,11 @@ The rough edges known so far:
   as well as turns.
 - Pre-rendered movies, menus and loading screens: the switch to a floating screen is new and may not apply to every
   movie yet.
-- The sky and clouds have a small per-eye offset.
-- Scripted "breach" scenes lock the camera; head look can briefly fight them.
-- In-engine cutscenes are shown in 3D with head tracking, the same as gameplay.
+- The sky and clouds had a per-eye offset. The "Exact sky rays" fix (on by default) is confirmed in two-view mode, not
+  yet in the one-eye-per-frame mode.
+- In-engine cutscenes and other scenes where the game takes look away are shown in 3D but fixed to your view, without
+  head tracking (see [Scripted scenes](#scripted-scenes)). A scripted camera that doesn't take look away still gets head
+  tracking.
 
 ## Contributing
 

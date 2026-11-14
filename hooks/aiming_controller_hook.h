@@ -99,6 +99,19 @@ unsigned long long GetLastAimingUpdateMs();
 // robot has its own controls and the soldier's aim stops. Head look, head position, the stick's pitch removal, the
 // render-pose stamp and the laser all belong to the soldier's aim.
 bool IsPlayerAimActive();
+// Any thread (2026-11-08): how much the first-person rig follows the controllers, 0..1. 1 while the soldier's aim runs.
+// While it doesn't -- a scripted stretch: a door breach's kick, a cutscene, a locked camera, the robot -- the gun, arms
+// and magazine go back to the game's own animation (hooks/camera_matrix_test_hook.cpp), blended over 200 ms from 500 ms
+// after the last update (a hitch doesn't do it), and come back 250 ms after the updates resume, blended the same way.
+// (2026-11-12) Also while the game's input locks have taken look or fire away, whichever is lower
+// (hooks/input_restriction.h GetInputLockDriveWeight): the aim keeps running through most scripted scenes.
+float GetPlayerAimDriveWeight();
+// Any thread (2026-11-12): whether the head drives the soldier's view -- the soldier's aim runs and the game hasn't
+// taken look away (hooks/input_restriction.h IsLookRestricted). While it doesn't (a cutscene, a door breach's kick,
+// a locked camera, the robot, menus), every head hook stands aside and the game's camera is shown as it is, in stereo,
+// strapped to the head: no head look, head position, head roll or render-pose stamp. The user (2026-11-12): "just
+// toggle our head and control hooks, leaving only the stereo rendering enabled".
+bool IsHeadDrivingSoldier();
 // HMD position (XR local space, meters) captured at the last recenter -- the origin head-position tracking measures from.
 bool GetHeadAimPositionOrigin(float out[3]);
 

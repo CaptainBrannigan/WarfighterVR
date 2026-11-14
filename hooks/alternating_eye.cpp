@@ -83,9 +83,18 @@ float GetEyeOffsetAlongRow0(bool rightEye)
     return eyeSign * kBaseIpdMeters * GetIpdScale() * 0.5f;
 }
 
+namespace {
+thread_local int t_eyeOverride = -1;
+} // namespace
+
+void SetThreadEyeOverride(int eye)
+{
+    t_eyeOverride = eye;
+}
+
 float GetActiveEyeOffsetAlongRow0()
 {
-    return GetEyeOffsetAlongRow0(IsRightEyeActive());
+    return GetEyeOffsetAlongRow0(t_eyeOverride >= 0 ? t_eyeOverride == 1 : IsRightEyeActive());
 }
 
 bool ApplyEyeOffset(void* transformPtr)

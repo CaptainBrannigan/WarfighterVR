@@ -36,6 +36,23 @@ struct GrabDebugShape
 // Submit thread, every frame while the view is on, and once to clear it.
 void UpdateGrabDebug(const GrabDebugShape shapes[kGrabDebugSlotCount], const float headPos[3]);
 
+// The weapon socket view (2026-11-09, ShowWeaponSockets; hooks/camera_matrix_test_hook.cpp): per bone, a line from its
+// parent's joint (start) to its own (end), tracking space, and its name beside the end, facing the head. A slot's two
+// overlays are made the first time it shows, so the view costs nothing until it's used; hidden when no update has come
+// for half a second.
+constexpr int kSocketDebugSlots = 32;
+struct SocketDebugLine
+{
+    bool visible = false;
+    bool line = true; // false: the name only (a bone whose parent isn't one of these, Wep_Root)
+    float start[3] = {};
+    float end[3] = {};
+    float rgb[3] = {1.0f, 1.0f, 1.0f};
+    char label[40] = "";
+};
+// Render thread, every frame while the view is on, and once to clear it.
+void UpdateSocketDebug(const SocketDebugLine lines[kSocketDebugSlots], const float headPos[3]);
+
 // Submit thread, every frame: places the optic dot (the weapon hand's forward turned by the optic zero, at
 // OpticDistance) and the aim ray dot (straight along it, at SightZeroDistance), facing the head, all tracking space;
 // or hides them (visible false, or each dot's own setting off).

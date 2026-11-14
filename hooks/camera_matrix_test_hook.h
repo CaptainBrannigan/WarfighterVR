@@ -11,13 +11,16 @@ bool InstallCameraMatrixTestHook();
 void RemoveCameraMatrixTestHook();
 
 // Numpad . once per frame (present_hook.cpp): toggles the weapon drive. Turning it on snaps the gun onto the controller
-// at the ini's grip point (WeaponGripRight/Up/Back) and logs where the hand actually is, for tuning that point.
+// (held at its hand socket) and logs where the hand actually is against the camera.
 void CheckWeaponDriveHotkey();
 
 // For projection_aspect_hook.cpp's UpdateMatrices hook: true (once) if `camera` is the first-person viewmodel camera
 // this thread just set a batch matrix on, so the viewmodel can be given the same per-eye true frustum as the world
 // (its own 55 degree symmetric projection doesn't match the headset, which is what doubles and head-locks the gun).
 bool ConsumeViewmodelCamera(const void* camera);
+// For projection_aspect_hook.cpp, same thread: the eye (0 left, 1 right) the first-person batch this thread is building
+// is for, with native two-view stereo (hooks/native_stereo.h); -1 otherwise.
+int LastViewmodelEye();
 
 // "Player skeleton loaded" signal (2026-09-22, for draw_trace_diag.cpp's UI element separation): true if the
 // viewmodel batch matrix setter (this file's own HookImpl, gated on OFFSET_CAMERAMATRIX_CALLER_VIEWMODEL's call

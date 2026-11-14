@@ -1,5 +1,6 @@
 #include "projection_aspect_hook.h"
 #include "camera_matrix_test_hook.h"
+#include "native_stereo.h"
 
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/mohw_offsets.h"
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+
 
 namespace mohw {
 namespace {
@@ -45,7 +47,7 @@ std::atomic<unsigned long long> g_lastWorldFrustumMs{0};
 // with the WRONG eye's off-axis projection -- exactly a double-sided edge mismatch, not a directional smear.
 // High-resolution (QueryPerformanceCounter) gap detection groups writes into batches; a batch that contains
 // BOTH eye0 and eye1 writes is logged. GetTickCount64 (~15ms resolution) is too coarse for this -- the whole
-// batch cycles within under 1ms per the existing "TRUE FRUSTUM MATCH CHANGED" log's own timestamps.
+// batch cycles within under 1ms per the timestamps of the (since removed) "TRUE FRUSTUM MATCH CHANGED" log.
 std::atomic<long long> g_lastWriteQpc{0};
 std::atomic<int> g_batchEyeMask{0}; // bit0 = eye0 seen (confirmed) this batch, bit1 = eye1 seen (confirmed)
 // QueryPerformanceFrequency is a cheap, thread-safe call on modern Windows (no caching needed -- avoids any
@@ -62,14 +64,9 @@ std::atomic<int> g_batchEyeMask{0}; // bit0 = eye0 seen (confirmed) this batch, 
 // resetting the established mask to the new eye rather than keep rejecting a whole legitimate frame.
 std::atomic<int> g_pendingEyeIdx{-1};
 
-// DIAGNOSTIC (2026-09-21): the true-frustum match below identifies "the world camera" purely by comparing its fov FIELD
-// (bit-exact) against whatever eye_matched_fov.cpp last set -- it has no idea WHICH physical camera object that is, only
-// that its fov happens to match. That's fine as long as only one object ever carries that value, but nothing enforces it:
-// a resize/fullscreen change that transiently resets several cameras' fov to a shared value (or just an unlucky
-// coincidence) could make this hijack the WRONG object -- e.g. a shadow or menu camera -- for a stretch of frames. Logs
-// whenever the matched object's ADDRESS changes, so a "camera identity changed" line can be checked against when
-// ghosting is reported to start/stop.
-std::atomic<void*> g_lastMatchedObj{nullptr};
+// The matched cameras this window, for the periodic frustum summary. (A per-change "TRUE FRUSTUM MATCH CHANGED" line,
+// a 2026-09-21 ghosting diagnostic, was removed 2026-11-10: in scenes with many matching cameras it wrote over a
+// thousand lines a second.)
 std::atomic<int> g_distinctMatchedThisWindow{0};
 std::mutex g_matchedSetMutex;
 void* g_matchedSet[8] = {};
@@ -202,28 +199,6 @@ void MaybeLogCameraSignatures()
     g_sigCount = 0; // restart the window so counts are per-interval and new configs show up
 }
 
-// SEH-guarded. Distinguishing info for the SELECTOR log (2026-09-21, "is there a way to distinguish between the
-// cameras?"): position comes from the SAME transform block the fov/aspect fields live in (LinearTransform layout used
-// throughout this project -- translation at floats 12-14, e.g. head_position.cpp's cam[12..14]), near/far from
-// ReadCameraSignature's already-confirmed offsets. Lets the log say roughly WHERE a candidate sits in the world, which
-// is normally enough to tell "the real player camera" (near the player) apart from a shadow/reflection/menu camera
-// (near a light, a probe, or the origin).
-bool ReadCandidateDebugInfo(float* self, float pos[3], float* outNear, float* outFar)
-{
-    __try
-    {
-        pos[0] = self[12];
-        pos[1] = self[13];
-        pos[2] = self[14];
-        *outNear = self[0x14];
-        *outFar = self[0x15];
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
-}
 
 // FIX 3 (2026-09-21): confirmed live -- fov-bit matching alone is far too weak. The log showed a tight, continuously
 // REPEATING cycle of ~20 objects matching every frame (not just a brief burst at mode switch), most sitting at
@@ -309,6 +284,28 @@ bool WriteViewmodelFrustumProjection(float* self)
     return WriteFrustumProjection(self);
 }
 
+// NATIVE TWO-VIEW (hooks/native_stereo.h): the gun's camera gets the frustum of the eye whose view its batch is being
+// built for, as that view has it (fovY, aspect, viewport offset). SEH-guarded like the writes above.
+bool WriteViewmodelEyeProjection(float* self, const float projection[4])
+{
+    __try
+    {
+        if (*reinterpret_cast<int*>(self + 0x10) != 0) // perspective only
+            return false;
+        self[0x12] = projection[0]; // +0x48 fovY
+        self[0x16] = projection[1]; // +0x58 aspect
+        self[0x1b] = projection[2]; // +0x6C viewport offset x
+        self[0x1c] = projection[3]; // +0x70 viewport offset y
+        self[0x1d] = 1.0f;          // +0x74 viewport scale x
+        self[0x1e] = 1.0f;          // +0x78 viewport scale y
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
 // SEH-guarded, no C++ objects in scope -- same C2712 reason as TryApplyFrustumMatch above.
 bool TryApplyInnerEdgeTrim(float* self, float trim)
 {
@@ -339,6 +336,66 @@ bool TryApplyInnerEdgeTrim(float* self, float trim)
     }
 }
 
+// NATIVE TWO-VIEW DIAGNOSTIC (2026-11-08, the menu showed the IPD moving only the right eye): where the engine really
+// draws each eye's world from. A world camera of the two views carries its eye's frustum (viewport offset x negative
+// for the left eye, positive for the right) and the view's own near/far (not a shadow cascade's); its position is
+// matched against the cameras hooks/native_stereo.cpp wrote over the last frames (NativeStereoClassifyWorldCamera).
+// Counted per eye, logged every 5 s.
+struct NativeWorldSample
+{
+    int type;
+    float pos[3];
+    float offX, nearZ, farZ;
+};
+
+bool ReadNativeWorldSample(const float* self, NativeWorldSample* out)
+{
+    __try
+    {
+        out->type = *reinterpret_cast<const int*>(self + 0x10);
+        out->pos[0] = self[12];
+        out->pos[1] = self[13];
+        out->pos[2] = self[14];
+        out->offX = self[0x1b];
+        out->nearZ = self[0x14];
+        out->farZ = self[0x15];
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+// [frustum eye][where: 0 the left eye's camera, 1 the right eye's, 2 the head centre, 3 none of them]
+std::atomic<long> g_nativeWorldSeen[2][4] = {};
+std::atomic<unsigned long long> g_nextNativeWorldLogMs{0};
+
+void NoteNativeWorldCamera(const float* self)
+{
+    NativeWorldSample s{};
+    if (!ReadNativeWorldSample(self, &s) || s.type != 0 || !(s.nearZ < 1.0f) || !(s.farZ > 100.0f) ||
+        !(fabsf(s.offX) > 0.01f))
+        return;
+    const int eye = s.offX < 0.0f ? 0 : 1;
+    const int where = NativeStereoClassifyWorldCamera(s.pos);
+    g_nativeWorldSeen[eye][where >= 0 ? where : 3].fetch_add(1, std::memory_order_relaxed);
+
+    const unsigned long long now = GetTickCount64();
+    unsigned long long due = g_nextNativeWorldLogMs.load(std::memory_order_relaxed);
+    if (now < due || !g_nextNativeWorldLogMs.compare_exchange_strong(due, now + 5000, std::memory_order_relaxed))
+        return;
+    long n[2][4];
+    for (int e = 0; e < 2; ++e)
+        for (int k = 0; k < 4; ++k)
+            n[e][k] = g_nativeWorldSeen[e][k].exchange(0, std::memory_order_relaxed);
+    MOHW_LOG(kLogFile,
+             "NATIVE WORLD CAMERAS, last 5 s (each eye's frustum, and where its camera was): left-eye frustum at the "
+             "left eye %ld, at the right eye %ld, at the head centre %ld, elsewhere %ld; right-eye frustum at the left "
+             "eye %ld, at the right eye %ld, at the head centre %ld, elsewhere %ld",
+             n[0][0], n[0][1], n[0][2], n[0][3], n[1][0], n[1][1], n[1][2], n[1][3]);
+}
+
 void __fastcall Hooked_UpdateMatrices(float* self, void* edx)
 {
     ++g_calls;
@@ -347,6 +404,26 @@ void __fastcall Hooked_UpdateMatrices(float* self, void* edx)
         RecordCameraSignature(self);
         MaybeLogCameraSignatures();
     }
+    if (self && IsNativeStereoActive() && ConsumeViewmodelCamera(self))
+    {
+        float projection[4];
+        const int eye = LastViewmodelEye();
+        static std::atomic<long long> nativeWrites{0};
+        if (eye >= 0 && GetNativeEyeProjection(eye, projection) && WriteViewmodelEyeProjection(self, projection))
+        {
+            long long n = ++nativeWrites;
+            if (n == 1 || n % 5000 == 0)
+                MOHW_LOG(kLogFile,
+                         "VIEWMODEL NATIVE TWO-VIEW: camera %p given eye %d's frustum (fov %.1f deg, aspect %.4f, offset "
+                         "%.4f, %.4f) (count=%lld)",
+                         static_cast<void*>(self), eye, projection[0] * 57.29578f, projection[1], projection[2],
+                         projection[3], n);
+        }
+        g_original(self, edx);
+        return;
+    }
+    if (self && IsNativeStereoActive())
+        NoteNativeWorldCamera(self);
     if (g_frustumActive.load(std::memory_order_relaxed) && self && ConsumeViewmodelCamera(self))
     {
         static std::atomic<long long> viewmodelWrites{0};
@@ -455,19 +532,6 @@ void __fastcall Hooked_UpdateMatrices(float* self, void* edx)
             {
                 ++g_matched;
                 g_lastWorldFrustumMs.store(GetTickCount64(), std::memory_order_relaxed); // see WorldRenderedRecently
-                // Identity-change diagnostic -- see g_lastMatchedObj's comment. Also answers "how do I tell the
-                // candidates apart" -- position + near/far of whichever object just BECAME the one being written to.
-                void* prev = g_lastMatchedObj.exchange(self, std::memory_order_relaxed);
-                if (prev != self)
-                {
-                    float pos[3] = {0, 0, 0}, near_ = 0, far_ = 0;
-                    if (ReadCandidateDebugInfo(self, pos, &near_, &far_))
-                        MOHW_LOG(kLogFile, "TRUE FRUSTUM MATCH CHANGED: object %p -> %p, pos=(%.2f,%.2f,%.2f) near=%.3f far=%.1f", prev,
-                                   static_cast<void*>(self), pos[0], pos[1], pos[2], near_, far_);
-                    else
-                        MOHW_LOG(kLogFile, "TRUE FRUSTUM MATCH CHANGED: object %p -> %p (position read failed)", prev,
-                                   static_cast<void*>(self));
-                }
                 std::lock_guard<std::mutex> lock(g_matchedSetMutex);
                 bool seen = false;
                 for (int i = 0; i < g_matchedSetCount; ++i)

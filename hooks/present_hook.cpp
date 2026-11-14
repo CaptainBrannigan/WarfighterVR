@@ -19,13 +19,17 @@
 #include "projection_aspect_hook.h"
 #include "eye_matched_fov.h"
 #include "native_stereo.h"
+#include "input_restriction.h"
 #include "player_control.h"
 #include "../openvr_direct/openvr_direct.h"
 #include "../sdk/d3d_util.h"
 #include "../sdk/settings.h"
 #include <atomic>
+#include <cstdio>
+#include <cstring>
 #include <thread>
 #include <mutex>
+#include <vector>
 
 namespace mohw {
 namespace {
@@ -180,6 +184,121 @@ bool EnsureNativeHalfTextures(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& 
     return true;
 }
 
+// NATIVE TWO-VIEW DIAGNOSTIC (2026-11-08): the frame the headset is handed (both eyes side by side), saved at half size
+// as a BMP next to the game. Game thread. RGBA and BGRA 8-bit formats only.
+void SaveFrameBmpHalfSize(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* frame, const char* name)
+{
+    D3D11_TEXTURE2D_DESC desc{};
+    frame->GetDesc(&desc);
+    const bool rgba = desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+    const bool bgra = desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM || desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+    if ((!rgba && !bgra) || desc.SampleDesc.Count != 1)
+    {
+        MOHW_LOG(kLogFile, "native frame dump %s: format %d / %u samples not handled", name, static_cast<int>(desc.Format),
+                 desc.SampleDesc.Count);
+        return;
+    }
+    D3D11_TEXTURE2D_DESC sd = desc;
+    sd.Usage = D3D11_USAGE_STAGING;
+    sd.BindFlags = 0;
+    sd.MiscFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    sd.MipLevels = 1;
+    sd.ArraySize = 1;
+    ID3D11Texture2D* staging = nullptr;
+    if (FAILED(device->CreateTexture2D(&sd, nullptr, &staging)) || !staging)
+    {
+        MOHW_LOG(kLogFile, "native frame dump %s: staging texture FAILED", name);
+        return;
+    }
+    ctx->CopyResource(staging, frame);
+    D3D11_MAPPED_SUBRESOURCE m{};
+    if (SUCCEEDED(ctx->Map(staging, 0, D3D11_MAP_READ, 0, &m)))
+    {
+        char path[MAX_PATH] = {};
+        DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+        while (n > 0 && path[n - 1] != '\\')
+            --n;
+        path[n] = 0;
+        strcat_s(path, name);
+        FILE* f = nullptr;
+        if (fopen_s(&f, path, "wb") == 0 && f)
+        {
+            const UINT w = desc.Width / 2, h = desc.Height / 2;
+            const unsigned imgSize = w * h * 4;
+            unsigned char hdr[54] = {'B', 'M'};
+            const unsigned fileSize = 54 + imgSize, off = 54, dib = 40;
+            const int iw = static_cast<int>(w), ih = -static_cast<int>(h); // top-down
+            const unsigned short planes = 1, bpp = 32;
+            memcpy(hdr + 2, &fileSize, 4);
+            memcpy(hdr + 10, &off, 4);
+            memcpy(hdr + 14, &dib, 4);
+            memcpy(hdr + 18, &iw, 4);
+            memcpy(hdr + 22, &ih, 4);
+            memcpy(hdr + 26, &planes, 2);
+            memcpy(hdr + 28, &bpp, 2);
+            memcpy(hdr + 34, &imgSize, 4);
+            fwrite(hdr, 1, sizeof(hdr), f);
+            std::vector<unsigned char> row(static_cast<size_t>(w) * 4);
+            for (UINT y = 0; y < h; ++y)
+            {
+                const unsigned char* src = static_cast<const unsigned char*>(m.pData) + static_cast<size_t>(y * 2) * m.RowPitch;
+                for (UINT x = 0; x < w; ++x)
+                {
+                    const unsigned char* p = src + static_cast<size_t>(x) * 8;
+                    unsigned char* q = &row[static_cast<size_t>(x) * 4];
+                    q[0] = bgra ? p[0] : p[2];
+                    q[1] = p[1];
+                    q[2] = bgra ? p[2] : p[0];
+                    q[3] = 255;
+                }
+                fwrite(row.data(), 1, row.size(), f);
+            }
+            fclose(f);
+            MOHW_LOG(kLogFile, "native frame dump saved: %ux%u (half of %ux%u) -> %s", w, h, desc.Width, desc.Height, path);
+        }
+        ctx->Unmap(staging, 0);
+    }
+    staging->Release();
+}
+
+// Once in the main menu (6 s without a player) and once in play (10 s with the aim running and the gun on the
+// controller), per game launch.
+void MaybeDumpNativeFrame(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11Texture2D* frame)
+{
+    static bool menuSaved = false, playSaved = false;
+    static unsigned long long menuSince = 0, playSince = 0;
+    if (menuSaved && playSaved)
+        return;
+    const unsigned long long now = GetTickCount64();
+    const bool skeleton = IsPlayerSkeletonLoaded();
+    const bool aim = IsPlayerAimActive();
+    if (!menuSaved)
+    {
+        if (skeleton || aim)
+            menuSince = 0;
+        else if (menuSince == 0)
+            menuSince = now;
+        else if (now - menuSince > 6000)
+        {
+            menuSaved = true;
+            SaveFrameBmpHalfSize(device, ctx, frame, "mohwvr_native_menu.bmp");
+        }
+    }
+    if (!playSaved)
+    {
+        if (!(skeleton && aim && GetPlayerAimDriveWeight() >= 1.0f))
+            playSince = 0;
+        else if (playSince == 0)
+            playSince = now;
+        else if (now - playSince > 10000)
+        {
+            playSaved = true;
+            SaveFrameBmpHalfSize(device, ctx, frame, "mohwvr_native_play.bmp");
+        }
+    }
+}
+
 std::atomic<long long> g_presentCalls{0};
 std::atomic<long long> g_resizeBuffersCalls{0};
 
@@ -316,16 +435,66 @@ void LeaveExclusiveFullscreen(IDXGISwapChain* self)
     MOHW_LOG(kLogFile, "swap chain was in exclusive fullscreen: left it (0x%08X)", static_cast<unsigned>(hr));
 }
 
+// FRAME TIMING (2026-11-12, an A/B test of exclusive fullscreen against KeepGameWindowed): every 10 s, the presents per
+// second, the average and worst time between presents, how many frames took over 1.5x the headset's frame time, and
+// whether the swap chain is in exclusive fullscreen. To mohwvr_present.log.
+void LogFrameTiming(IDXGISwapChain* self, UINT syncInterval)
+{
+    static LARGE_INTEGER freq{}, last{}, windowStart{};
+    static long long frames = 0, slow = 0;
+    static double sumMs = 0.0, worstMs = 0.0;
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (freq.QuadPart == 0)
+    {
+        QueryPerformanceFrequency(&freq);
+        last = windowStart = now;
+        return;
+    }
+    const double ms = static_cast<double>(now.QuadPart - last.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+    last = now;
+    const float hz = mohw::openvr_direct::GetDetectedDisplayFrequencyHz();
+    const double budgetMs = hz > 1.0f ? 1000.0 / hz : 1000.0 / 90.0;
+    ++frames;
+    sumMs += ms;
+    if (ms > worstMs)
+        worstMs = ms;
+    if (ms > budgetMs * 1.5)
+        ++slow;
+    const double windowMs =
+        static_cast<double>(now.QuadPart - windowStart.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+    if (windowMs < 10000.0)
+        return;
+    BOOL fullscreen = FALSE;
+    self->GetFullscreenState(&fullscreen, nullptr);
+    MOHW_LOG(kLogFile,
+             "frame timing, last %.1f s: %.1f presents/s, average %.2f ms, worst %.2f ms, %lld of %lld frames over 1.5x the "
+             "headset's %.2f ms; %s, two-view %s, syncInterval %u",
+             windowMs / 1000.0, frames * 1000.0 / windowMs, sumMs / frames, worstMs, slow, frames, budgetMs,
+             fullscreen ? "EXCLUSIVE fullscreen" : "windowed", IsNativeStereoActive() ? "on" : "off", syncInterval);
+    windowStart = now;
+    frames = slow = 0;
+    sumMs = worstMs = 0.0;
+}
+
 HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT flags)
 {
+    LogFrameTiming(self, syncInterval);
     // One frame per display frame when the engine renders both eyes at once (hooks/native_stereo.h), two otherwise.
     NativeStereoOnPresent();
     PlayerControlOnPresent(); // logs every change of what the player controls (hooks/player_control.h)
+    InputRestrictionOnPresent(); // the game's input locks: scripted scenes (hooks/input_restriction.h)
     PaceToDisplayFrequency(IsNativeStereoActive() ? 1.0 : 2.0);
 
     long long n = ++g_presentCalls;
     if (n == 1 || n % 300 == 0)
         LeaveExclusiveFullscreen(self);
+    if (n == 1 || n % 30 == 0)
+    {
+        BOOL exclusive = TRUE;
+        if (SUCCEEDED(self->GetFullscreenState(&exclusive, nullptr)))
+            NativeStereoNoteSwapChainWindowed(!exclusive);
+    }
     if (n == 1 || n % 300 == 0)
         MOHW_LOG(kLogFile, "Present #%lld self=%p syncInterval=%u flags=%u", n, static_cast<void*>(self),
                   syncInterval, flags);
@@ -394,6 +563,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
 
             D3D11_TEXTURE2D_DESC backbufferDesc{};
             backbuffer->GetDesc(&backbufferDesc);
+            NativeStereoNoteBackbuffer(backbufferDesc.Width, backbufferDesc.Height);
 
             // Copy into our own independent texture BEFORE anything below touches it as a cross-process source --
             // see EnsureLeftCaptureTexture's comment for why. leftEye (not backbuffer) is what actually goes to
@@ -435,6 +605,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
                     immediateContext->CopySubresourceRegion(g_nativeHalves[0], 0, 0, 0, 0, leftEye, 0, &left);
                     immediateContext->CopySubresourceRegion(g_nativeHalves[1], 0, 0, 0, 0, leftEye, 0, &right);
                     mohw::openvr_direct::UpdateOpenVrDirectPair(device, g_nativeHalves[0], g_nativeHalves[1], stamp);
+                    MaybeDumpNativeFrame(device, immediateContext, leftEye);
                 }
                 g_pairLeftStaged = false;
                 if (immediateContext)

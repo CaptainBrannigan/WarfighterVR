@@ -108,10 +108,39 @@ void* g_system = nullptr;
 PFN_PollNextEvent g_pollNextEvent = nullptr;
 PFN_GetEventTypeName g_getEventTypeName = nullptr;
 
+// SteamVR's recommended render size per eye (2026-11-12): IVRSystem::GetRecommendedRenderTargetSize (vtable 0), which
+// carries SteamVR's resolution setting (the global slider and the per-app multiplier). Read at connect and every 2 s
+// (the slider can move while the game runs). 0 until read.
+using PFN_GetRecommendedRenderTargetSize = void(__thiscall*)(void* self, uint32_t* width, uint32_t* height);
+constexpr int kGetRecommendedRenderTargetSizeVtableIndex = 0;
+std::atomic<uint32_t> g_recommendedWidth{0}, g_recommendedHeight{0};
+
+void RefreshRecommendedSize(void* system)
+{
+    if (!system)
+        return;
+    uint32_t w = 0, h = 0;
+    reinterpret_cast<PFN_GetRecommendedRenderTargetSize>(
+        (*reinterpret_cast<void***>(system))[kGetRecommendedRenderTargetSizeVtableIndex])(system, &w, &h);
+    if (w == 0 || h == 0 || w > 16384 || h > 16384)
+        return;
+    const uint32_t oldW = g_recommendedWidth.exchange(w, std::memory_order_relaxed);
+    const uint32_t oldH = g_recommendedHeight.exchange(h, std::memory_order_relaxed);
+    if (oldW != w || oldH != h)
+        MOHW_LOG(kLogFile, "SteamVR recommended render size per eye: %ux%u (with its resolution setting)", w, h);
+}
+
 void PollSystemEvents()
 {
     if (!g_system || !g_pollNextEvent)
         return;
+    static unsigned long long nextSizeMs = 0;
+    const unsigned long long nowMs = GetTickCount64();
+    if (nowMs >= nextSizeMs)
+    {
+        nextSizeMs = nowMs + 2000;
+        RefreshRecommendedSize(g_system);
+    }
     RawVrEvent ev{};
     while (g_pollNextEvent(g_system, &ev, sizeof(ev)))
     {
@@ -463,6 +492,7 @@ ConnectResult ConnectAttempt()
         g_pollNextEvent = reinterpret_cast<PFN_PollNextEvent>(sysVtable[kPollNextEventVtableIndex]);
         g_getEventTypeName = reinterpret_cast<PFN_GetEventTypeName>(sysVtable[kGetEventTypeNameVtableIndex]);
         g_system = system;
+        RefreshRecommendedSize(system);
         auto getProjectionRaw = reinterpret_cast<PFN_GetProjectionRaw>(sysVtable[kGetProjectionRawVtableIndex]);
         auto getFloatProp =
             reinterpret_cast<PFN_GetFloatTrackedDeviceProperty>(sysVtable[kGetFloatTrackedDevicePropertyVtableIndex]);
@@ -1017,6 +1047,13 @@ bool GetHandControllerType(bool left, char* out, unsigned size)
 float GetDetectedDisplayFrequencyHz()
 {
     return g_detectedDisplayFrequencyHz.load(std::memory_order_relaxed);
+}
+
+bool GetRecommendedEyeSize(unsigned* width, unsigned* height)
+{
+    *width = g_recommendedWidth.load(std::memory_order_relaxed);
+    *height = g_recommendedHeight.load(std::memory_order_relaxed);
+    return *width != 0 && *height != 0;
 }
 
 } // namespace mohw::openvr_direct

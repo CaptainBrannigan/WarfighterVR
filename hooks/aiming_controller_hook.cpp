@@ -6,6 +6,7 @@
 #include "../sdk/vr_math.h"
 #include "../sdk/settings.h"
 #include "companion_bridge.h"
+#include "input_restriction.h"
 #include "weapon_identity.h"
 
 #include <windows.h>
@@ -89,6 +90,8 @@ std::atomic<float> g_zeroHeadPitch{0.0f};
 std::atomic<float> g_baselineYaw{0.0f};
 std::atomic<float> g_baselinePitch{0.0f};
 std::atomic<float> g_headYawOffset{0.0f}; // radians added on top of the game's own yaw this tick (AimingController space)
+// Whether the latest head-aim tick found look taken by the game (hooks/input_restriction.h), for the hand-off log.
+std::atomic<bool> g_lookTakenLogged{false};
 // HMD position at the last recenter (XR local space, meters) -- origin for head-position tracking (hooks/head_position.cpp).
 std::atomic<float> g_zeroHeadPosX{0.0f}, g_zeroHeadPosY{0.0f}, g_zeroHeadPosZ{0.0f};
 
@@ -383,6 +386,21 @@ void ApplyHeadAim(void* aimingController)
 
     g_baselineYaw.store(currentYaw, std::memory_order_relaxed);
     g_headYawOffset.store(yawOffset, std::memory_order_relaxed);
+
+    // The game has taken look away (a scripted scene): the aim is the game's, and head look stands aside
+    // (IsHeadDrivingSoldier). The baseline and offset above are still kept, so the aim picks up cleanly when look comes
+    // back. Logged on each change.
+    const bool lookLocked = IsLookRestricted();
+    if (lookLocked != g_lookTakenLogged.load(std::memory_order_relaxed))
+    {
+        g_lookTakenLogged.store(lookLocked, std::memory_order_relaxed);
+        MOHW_LOG(kLogFile, "head look %s (game yaw %.2f deg, head offset %.2f deg)",
+                 lookLocked ? "stands aside: the game has taken look away" : "back in the aim: the game gave look back",
+                 currentYaw / kDegToRad, yawOffset / kDegToRad);
+    }
+    if (lookLocked)
+        return;
+
     float newYaw = WrapAngleUnsigned(currentYaw + yawOffset);
     float newPitch = pitchDelta;
 
@@ -477,6 +495,10 @@ void* g_hookAddress = nullptr;
 // the question.
 std::atomic<long long> g_updateCalls{0};
 std::atomic<unsigned long long> g_lastUpdateMs{0}; // GetLastAimingUpdateMs
+// When the current run of updates began, and how long the gap before it was (GetPlayerAimDriveWeight).
+constexpr unsigned long long kAimRunGapMs = 300;
+std::atomic<unsigned long long> g_aimRunSinceMs{0};
+std::atomic<unsigned long long> g_aimGapBeforeMs{0};
 
 struct ThisCallTrampoline
 {
@@ -485,7 +507,11 @@ struct ThisCallTrampoline
         void* self = this;
         // Forward to the original every call, preserving every other side effect (aim-assist state, etc.). With
         // head-aim on, pitch input is removed from the args first so the update never applies any.
-        bool headAimOn = GetHeadAimEnabled();
+        // Not while the game has taken look away (hooks/input_restriction.h): the update is then passed through
+        // untouched. The game is placing and turning the player itself, and the guard would put each of its turns back;
+        // skipping it also breaks the guard's continuity, so whatever heading the scene ends on is accepted as the
+        // game's. ApplyHeadAim below keeps its bookkeeping but writes nothing.
+        bool headAimOn = GetHeadAimEnabled() && !IsLookRestricted();
         if (headAimOn)
         {
             GuardStoredHeading(self);
@@ -508,7 +534,14 @@ struct ThisCallTrampoline
         if (haveBefore)
             LogYawChangeInsideUpdate(self, storedBefore, yawBefore, args.dwords, deviceAxesBefore);
 
-        g_lastUpdateMs.store(GetTickCount64(), std::memory_order_relaxed);
+        const unsigned long long updateMs = GetTickCount64();
+        const unsigned long long previousMs = g_lastUpdateMs.load(std::memory_order_relaxed);
+        if (previousMs == 0 || updateMs - previousMs > kAimRunGapMs)
+        {
+            g_aimGapBeforeMs.store(previousMs == 0 ? ~0ull : updateMs - previousMs, std::memory_order_relaxed);
+            g_aimRunSinceMs.store(updateMs, std::memory_order_relaxed);
+        }
+        g_lastUpdateMs.store(updateMs, std::memory_order_relaxed);
         NoteActiveAimingController(self); // hooks/weapon_identity.h: which weapon is equipped
         long long n = ++g_updateCalls;
         if (n == 1 || n % 300 == 0)
@@ -728,6 +761,11 @@ bool GetHeadAimMapping(float* zeroHeadYaw, float* zeroHeadPitch, float* baseline
     return true;
 }
 
+bool IsHeadDrivingSoldier()
+{
+    return IsPlayerAimActive() && !IsLookRestricted();
+}
+
 unsigned long long GetLastAimingUpdateMs()
 {
     return g_lastUpdateMs.load(std::memory_order_relaxed);
@@ -739,6 +777,46 @@ bool IsPlayerAimActive()
     unsigned long long last = g_lastUpdateMs.load(std::memory_order_relaxed);
     return last != 0 && GetTickCount64() - last <= kActiveWithinMs;
 }
+
+namespace {
+float AimRunningDriveWeight();
+}
+
+float GetPlayerAimDriveWeight()
+{
+    // The aim stopping, or the game's own input locks (look or fire taken: hooks/input_restriction.h), whichever has
+    // the rig further back with the game.
+    const float aim = AimRunningDriveWeight();
+    const float locks = GetInputLockDriveWeight();
+    return aim < locks ? aim : locks;
+}
+
+namespace {
+float AimRunningDriveWeight()
+{
+    constexpr unsigned long long kOutAfterMs = 500; // no update for this long: a scripted stretch, not a hitch
+    constexpr unsigned long long kInAfterMs = 250;  // after one, the aim has to run this long before the rig comes back
+    constexpr float kBlendMs = 200.0f;
+    const unsigned long long last = g_lastUpdateMs.load(std::memory_order_relaxed);
+    if (last == 0)
+        return 0.0f;
+    const unsigned long long now = GetTickCount64();
+    if (now - last > kOutAfterMs)
+    {
+        const float t = static_cast<float>(now - last - kOutAfterMs) / kBlendMs;
+        return t >= 1.0f ? 0.0f : 1.0f - t;
+    }
+    const unsigned long long since = g_aimRunSinceMs.load(std::memory_order_relaxed);
+    const unsigned long long gap = g_aimGapBeforeMs.load(std::memory_order_relaxed);
+    if (gap <= kOutAfterMs || now < since) // only a hitch before this run: the rig never left
+        return 1.0f;
+    const unsigned long long running = now - since;
+    if (running <= kInAfterMs)
+        return 0.0f;
+    const float t = static_cast<float>(running - kInAfterMs) / kBlendMs;
+    return t >= 1.0f ? 1.0f : t;
+}
+} // namespace
 
 float GetHeadYawOffset()
 {

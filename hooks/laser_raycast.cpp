@@ -196,7 +196,8 @@ void LaserCaptureGameCamera(const float* gameTransform)
 void LaserOnCommit(const float* renderTransform)
 {
     if (g_drivingExe || !renderTransform || (!GetSightDotEnabled() && !GetLaserBeamEnabled()) ||
-        !GetWeaponDriveEnabled() || !IsPlayerAimActive()) // the soldier's gun only (not the robot's camera, menus)
+        !GetWeaponDriveEnabled() || !IsPlayerAimActive() || // the soldier's gun only (not the robot's camera, menus)
+        GetPlayerAimDriveWeight() < 0.5f) // nor while the gun is back in the game's animation (a scripted scene)
         return;
     if (++g_frame < GetLaserRaycastEveryFrames())
         return;

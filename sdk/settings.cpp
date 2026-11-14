@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "default_settings.h"
+#include "mohw_offsets.h" // g_drivingExe: the driving missions use the alternating-eye HUD values
 
 #include "logging.h" // reuses LogFilePath()'s "next to the DLL" resolution
 
@@ -67,6 +68,9 @@ constexpr bool kDefaultHudPlacementEnabled = true;
 constexpr bool kDefaultHideReticle = true; // hooks/draw_trace_diag.cpp: the controller aims, the screen reticle doesn't
 constexpr float kDefaultHudScale = 0.75f;
 constexpr float kDefaultMenuScreenScale = 0.75f; // whole-2D frames: movies, menus, loading screens
+// Where that screen fuses, meters (2026-11-08): the HUD's depth and IPD scale had it at 0.5 m, so the loading movies
+// sat cross-eyed and too far inward in both eyes.
+constexpr float kDefaultMenuScreenDepth = 2.5f;
 constexpr float kDefaultHudOffsetXDeg = 0.0f; // + = right
 constexpr float kDefaultHudOffsetYDeg = 0.0f; // + = up
 constexpr float kDefaultHudIpdScale = 1.0f; // x the rendering IPD; 0 = HUD at infinity
@@ -110,12 +114,10 @@ constexpr float kDefaultHolsterPos[kHolsterZoneCount][3] = {
 const char* const kDefaultHolsterActions[kHolsterZoneCount] = {"ConceptSelectInventoryItem1",
                                                                "ConceptSelectInventoryItem2", "ConceptThrowGrenade",
                                                                "ConceptMeleeAttack", "ConceptMeleeAttack"};
-// Weapon drive grip point (hooks/camera_matrix_test_hook.cpp): where the controller sits on the gun, in the gun's
-// rest view (right, up, back; meters). Default = the average of three live "hold it where the gun sits" captures.
-constexpr float kDefaultWeaponGripRight = 0.13f;
-constexpr float kDefaultWeaponGripUp = -0.20f;
-constexpr float kDefaultWeaponGripBack = -0.51f;
-constexpr float kDefaultWeaponGripPitchDeg = 0.0f; // gun rotation relative to the controller, degrees
+// The weapon drive's grip rotation (hooks/camera_matrix_test_hook.cpp GripInCamera): the gun turned about its hand
+// socket, relative to the controller, degrees. (Its grip POSITION was a per-weapon setting too, until 2026-11-09: the
+// gun is placed at its own hand socket now, so that's gone.)
+constexpr float kDefaultWeaponGripPitchDeg = 0.0f;
 constexpr float kDefaultWeaponGripYawDeg = 0.0f;
 constexpr float kDefaultWeaponGripRollDeg = 0.0f;
 
@@ -151,6 +153,15 @@ std::atomic<float> g_handOffsetPos[3] = {{0.0f}, {0.0f}, {0.0f}};
 std::atomic<float> g_handOffsetRotDeg[3] = {{0.0f}, {0.0f}, {0.0f}};
 constexpr const char* kHandOffsetPosKeys[3] = {"HandOffsetRight", "HandOffsetUp", "HandOffsetForward"};
 constexpr const char* kHandOffsetRotKeys[3] = {"HandOffsetPitch", "HandOffsetYaw", "HandOffsetRoll"};
+// The gun held at its hand socket (2026-11-08, hooks/camera_matrix_test_hook.cpp GripInCamera): the weapon's own
+// IK_Joint_RightHand put where the arm IK's weapon hand holds it (2026-11-09; at first it was the controller plus an
+// offset of its own), plus this fine offset of the gun in the hand (right / up / forward, m, in the controller's frame,
+// mirrored for the left hand). All guns. It was a setting (GunAtSocket) beside the profiles' grip positions until it
+// proved right on every gun tried ("gun grip is fixed, no offset position necessary", 2026-11-09): now it's how the
+// gun is held, and the profiles' positions are gone. The fine offset's keys were GunSocketOffset* while it was the
+// socket's offset from the controller: renamed so those values, which meant something else, don't carry over.
+std::atomic<float> g_gunSocketOffset[3] = {{0.0f}, {0.0f}, {0.0f}};
+constexpr const char* kGunSocketOffsetKeys[3] = {"GunInHandOffsetRight", "GunInHandOffsetUp", "GunInHandOffsetForward"};
 std::atomic<bool> g_armIkEnabled{true};
 std::atomic<float> g_leftHandIkPos[3] = {{0.0f}, {0.0f}, {0.0f}};
 std::atomic<float> g_leftHandIkRotDeg[3] = {{0.0f}, {0.0f}, {0.0f}};
@@ -161,6 +172,13 @@ std::atomic<float> g_magazinePouchRadius{0.12f};
 std::atomic<float> g_magazinePouch[3] = {{-0.14f}, {-0.42f}, {0.16f}};
 std::atomic<bool> g_keepGameWindowed{true};
 std::atomic<bool> g_nativeStereo{false}; // hooks/native_stereo.cpp, EXPERIMENTAL
+std::atomic<bool> g_skyExactRays{true};  // hooks/sky_rays_fix.cpp
+std::atomic<bool> g_screenEffectsBothEyes{true}; // hooks/screen_effect_diag.cpp: two-view, the left view's drawn last
+std::atomic<bool> g_depthOfFieldTwoView{false};  // hooks/native_stereo.cpp: depth of field in two-view (doubles the image)
+std::atomic<bool> g_renderScaleFromSteamVr{false}; // hooks/native_stereo.cpp: ResolutionScale from SteamVR's eye size
+std::atomic<bool> g_eyeSizedBackbuffer{false};    // hooks/native_stereo.cpp: two-view backbuffer at SteamVR's eye size
+std::atomic<bool> g_scriptedScenesFromLocks{true}; // hooks/input_restriction.cpp: the game's input locks = scripted scene
+std::atomic<bool> g_showWeaponSockets{false};    // hooks/camera_matrix_test_hook.cpp: the weapon socket view
 // Per weapon (kProfileFields, MagazineProfile).
 std::atomic<float> g_magazineGrabOffset[3] = {{0.0f}, {-0.06f}, {0.0f}};
 std::atomic<float> g_magazineGrabHalfSize[3] = {{0.08f}, {0.10f}, {0.08f}};
@@ -234,6 +252,8 @@ std::atomic<int> g_bodyPartCountSeen{0};       // parts in the body batch now dr
 int BodyPartRowCount();
 std::atomic<float> g_hudScale{kDefaultHudScale};
 std::atomic<float> g_menuScreenScale{kDefaultMenuScreenScale};
+std::atomic<float> g_menuScreenDepth{kDefaultMenuScreenDepth};
+std::atomic<float> g_uiLayoutScale{1.0f}; // hooks/ui_pass.cpp: the game's UI laid out as on a screen this much smaller
 // Marker test (2026-09-29): from this draw of the final 2D pass on, the full frame instead of the HUD rectangle; 0 = off.
 std::atomic<float> g_drivingCameraIndex{0.0f};     // hooks/driving_camera_hook.cpp: 0 = auto, 1.. = ranked camera. Session-only
                                                    // (not saved): a leftover manual pick silently overrode auto (2026-10-14)
@@ -259,6 +279,36 @@ std::atomic<float> g_hudOffsetXDeg{kDefaultHudOffsetXDeg};
 std::atomic<float> g_hudOffsetYDeg{kDefaultHudOffsetYDeg};
 std::atomic<float> g_hudIpdScale{kDefaultHudIpdScale};
 std::atomic<float> g_hudDepth{kDefaultHudDepth};
+// PER RENDER MODE (2026-11-12, settings.h RENDER MODE): the engine two-view mode's own values of the HUD's numbers (the
+// plain ones above are the alternating-eye mode's). An ini without them starts both modes from the same values.
+std::atomic<float> g_hudScaleTv{kDefaultHudScale};
+std::atomic<float> g_menuScreenScaleTv{kDefaultMenuScreenScale};
+std::atomic<float> g_menuScreenDepthTv{kDefaultMenuScreenDepth};
+std::atomic<float> g_uiLayoutScaleTv{1.0f};
+std::atomic<float> g_hudOffsetXDegTv{kDefaultHudOffsetXDeg};
+std::atomic<float> g_hudOffsetYDegTv{kDefaultHudOffsetYDeg};
+std::atomic<float> g_hudIpdScaleTv{kDefaultHudIpdScale};
+std::atomic<float> g_hudDepthTv{kDefaultHudDepth};
+struct PerModeSetting
+{
+    const char* key; // the alternating-eye key; the engine mode's is key + "TwoView"
+    std::atomic<float>* alternating;
+    std::atomic<float>* twoView;
+};
+const PerModeSetting kPerMode[] = {
+    {"HudScale", &g_hudScale, &g_hudScaleTv},
+    {"MenuScreenScale", &g_menuScreenScale, &g_menuScreenScaleTv},
+    {"MenuScreenDepth", &g_menuScreenDepth, &g_menuScreenDepthTv},
+    {"UiLayoutScale", &g_uiLayoutScale, &g_uiLayoutScaleTv},
+    {"HudOffsetX", &g_hudOffsetXDeg, &g_hudOffsetXDegTv},
+    {"HudOffsetY", &g_hudOffsetYDeg, &g_hudOffsetYDegTv},
+    {"HudIpdScale", &g_hudIpdScale, &g_hudIpdScaleTv},
+    {"HudDepth", &g_hudDepth, &g_hudDepthTv},
+};
+constexpr int kPerModeCount = static_cast<int>(sizeof(kPerMode) / sizeof(kPerMode[0]));
+// The render mode each level was built with (NoteLevelRenderMode), for the dashboard's reload note.
+std::atomic<bool> g_levelModeKnown{false};
+std::atomic<bool> g_levelModeTwoView{false};
 std::atomic<bool> g_removeShotSpread{kDefaultRemoveShotSpread};
 std::atomic<float> g_controllerAimUpDeg{0.0f};    // sdk/motion_controller_aim.h ApplyControllerAimOffset
 std::atomic<float> g_controllerAimRightDeg{0.0f};
@@ -301,9 +351,6 @@ std::mutex g_holsterMutex;
 std::string g_holsterActions[kHolsterZoneCount] = {kDefaultHolsterActions[0], kDefaultHolsterActions[1],
                                                    kDefaultHolsterActions[2], kDefaultHolsterActions[3],
                                                    kDefaultHolsterActions[4]}; // guarded by g_holsterMutex
-std::atomic<float> g_weaponGripRight{kDefaultWeaponGripRight};
-std::atomic<float> g_weaponGripUp{kDefaultWeaponGripUp};
-std::atomic<float> g_weaponGripBack{kDefaultWeaponGripBack};
 std::atomic<float> g_weaponGripPitchDeg{kDefaultWeaponGripPitchDeg};
 std::atomic<float> g_weaponGripYawDeg{kDefaultWeaponGripYawDeg};
 std::atomic<float> g_weaponGripRollDeg{kDefaultWeaponGripRollDeg};
@@ -322,12 +369,15 @@ std::string SettingsFilePath()
 // hooks/weapon_identity.cpp), and the menu rows edit the equipped weapon's profile. A weapon with no profile yet starts
 // from the DEFAULT profile -- the ini's own keys for these settings -- which is also what applies while no weapon is
 // identified (menus, the driving missions). A weapon's profile is only stored once it differs from the default. Saved
-// as one "WeaponProfile=<blueprint name>|v0|v1|..." line per weapon, values in kProfileFields order. All guarded by
+// as one "WeaponProfile2=<blueprint name>|v0|v1|..." line per weapon, values in kProfileFields order. All guarded by
 // g_fileMutex.
+// FORMAT 2 (2026-11-09): the grip position (right / up / back) was the first three values; the gun is held at its own
+// hand socket now, so they're gone. Lines in the old format ("WeaponProfile=") are still read, their first three
+// values skipped (kOldProfileGripValues), and saved again in the new one.
+constexpr int kOldProfileGripValues = 3;
 std::atomic<float>* const kProfileFields[] = {
-    &g_weaponGripRight, &g_weaponGripUp,  &g_weaponGripBack,  &g_weaponGripPitchDeg,  &g_weaponGripYawDeg,
-    &g_weaponGripRollDeg, &g_opticHeight, &g_opticWindage,    &g_opticDistance,       &g_controllerAimUpDeg,
-    &g_controllerAimRightDeg,
+    &g_weaponGripPitchDeg,  &g_weaponGripYawDeg,   &g_weaponGripRollDeg, &g_opticHeight, &g_opticWindage,
+    &g_opticDistance,       &g_controllerAimUpDeg, &g_controllerAimRightDeg,
     // Appended 2026-10-15 (lines saved before take the default for these).
     &g_secondaryGripRight, &g_secondaryGripUp, &g_laserStartMeters,
     &g_laserBeamStartRight, &g_laserBeamStartUp,
@@ -385,17 +435,35 @@ float DefaultProfileValue(const std::atomic<float>* field)
     return field->load(std::memory_order_relaxed);
 }
 
-// "WeaponProfile=<key>|v0|v1|..." -> g_weaponProfiles. Missing values take the default's.
+// "WeaponProfile2=<key>|v0|v1|..." -> g_weaponProfiles. Missing values take the default's. The old format,
+// "WeaponProfile=", has the grip position first: skipped.
+constexpr char kProfilePrefix[] = "WeaponProfile2=";
+constexpr char kOldProfilePrefix[] = "WeaponProfile=";
+bool IsWeaponProfileLine(const std::string& line)
+{
+    return line.compare(0, sizeof(kProfilePrefix) - 1, kProfilePrefix) == 0 ||
+           line.compare(0, sizeof(kOldProfilePrefix) - 1, kOldProfilePrefix) == 0;
+}
+
 bool ParseWeaponProfileLine(const std::string& line)
 {
-    static const char kPrefix[] = "WeaponProfile=";
-    if (line.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0)
+    int skip = 0;
+    std::string rest;
+    if (line.compare(0, sizeof(kProfilePrefix) - 1, kProfilePrefix) == 0)
+        rest = line.substr(sizeof(kProfilePrefix) - 1);
+    else if (line.compare(0, sizeof(kOldProfilePrefix) - 1, kOldProfilePrefix) == 0)
+    {
+        rest = line.substr(sizeof(kOldProfilePrefix) - 1);
+        skip = kOldProfileGripValues;
+    }
+    else
         return false;
-    std::string rest = line.substr(sizeof(kPrefix) - 1);
     size_t bar = rest.find('|');
     std::string key = rest.substr(0, bar);
     if (key.empty())
         return true;
+    for (int i = 0; i < skip && bar != std::string::npos; ++i)
+        bar = rest.find('|', bar + 1);
     WeaponProfile p = g_defaultProfile;
     for (int i = 0; i < kProfileFieldCount && bar != std::string::npos; ++i)
     {
@@ -451,6 +519,8 @@ void WriteSettingsFileLocked()
         fprintf(f, "%s=%.2f\n", kLeftHandIkRotKeys[i], g_leftHandIkRotDeg[i].load(std::memory_order_relaxed));
         fprintf(f, "%s=%.4f\n", kMagazinePouchKeys[i], g_magazinePouch[i].load(std::memory_order_relaxed));
     }
+    for (int i = 0; i < 3; ++i)
+        fprintf(f, "%s=%.4f\n", kGunSocketOffsetKeys[i], g_gunSocketOffset[i].load(std::memory_order_relaxed));
     fprintf(f, "SecondaryGripRight=%.4f\n", DefaultProfileValue(&g_secondaryGripRight));
     fprintf(f, "SecondaryGripUp=%.4f\n", DefaultProfileValue(&g_secondaryGripUp));
     fprintf(f, "HudPlacementEnabled=%d\n", g_hudPlacementEnabled.load(std::memory_order_relaxed) ? 1 : 0);
@@ -459,6 +529,8 @@ void WriteSettingsFileLocked()
         fprintf(f, "HideBodyPart%d=%d\n", i + 1, g_hideBodyPart[i].load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HudScale=%.4f\n", g_hudScale.load(std::memory_order_relaxed));
     fprintf(f, "MenuScreenScale=%.4f\n", g_menuScreenScale.load(std::memory_order_relaxed));
+    fprintf(f, "UiLayoutScale=%.4f\n", g_uiLayoutScale.load(std::memory_order_relaxed));
+    fprintf(f, "MenuScreenDepth=%.4f\n", g_menuScreenDepth.load(std::memory_order_relaxed));
     fprintf(f, "DrivingHeadLookInvert=%d\n", g_drivingHeadLookInvert.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "DrivingHeadLookAuto=%d\n", g_drivingHeadLookAuto.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "DrivingStickLookRange=%.0f\n", g_drivingStickLookRangeDeg.load(std::memory_order_relaxed));
@@ -479,6 +551,8 @@ void WriteSettingsFileLocked()
     fprintf(f, "HudDepth=%.4f\n", g_hudDepth.load(std::memory_order_relaxed));
     fprintf(f, "HudOffsetX=%.4f\n", g_hudOffsetXDeg.load(std::memory_order_relaxed));
     fprintf(f, "HudOffsetY=%.4f\n", g_hudOffsetYDeg.load(std::memory_order_relaxed));
+    for (const PerModeSetting& p : kPerMode) // the engine two-view mode's own values
+        fprintf(f, "%sTwoView=%.4f\n", p.key, p.twoView->load(std::memory_order_relaxed));
     fprintf(f, "RemoveShotSpread=%d\n", g_removeShotSpread.load(std::memory_order_relaxed) ? 1 : 0);
     // Per-weapon settings (weapon profiles): these keys hold the default profile.
     fprintf(f, "ControllerAimUp=%.2f\n", DefaultProfileValue(&g_controllerAimUpDeg));
@@ -495,6 +569,13 @@ void WriteSettingsFileLocked()
     fprintf(f, "ShowGrabZones=%d\n", g_showGrabZones.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "KeepGameWindowed=%d\n", g_keepGameWindowed.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "NativeStereo=%d\n", g_nativeStereo.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "SkyExactRays=%d\n", g_skyExactRays.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ScreenEffectsBothEyes=%d\n", g_screenEffectsBothEyes.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "DepthOfFieldTwoView=%d\n", g_depthOfFieldTwoView.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "RenderScaleFromSteamVr=%d\n", g_renderScaleFromSteamVr.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "EyeSizedBackbuffer=%d\n", g_eyeSizedBackbuffer.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ScriptedScenesFromLocks=%d\n", g_scriptedScenesFromLocks.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "ShowWeaponSockets=%d\n", g_showWeaponSockets.load(std::memory_order_relaxed) ? 1 : 0);
     for (const NamedFloat& n : kArmIkKeys)
         fprintf(f, "%s=%.4f\n", n.key, n.value->load(std::memory_order_relaxed));
     for (const NamedFloat& n : kMagazineProfileKeys)
@@ -532,16 +613,14 @@ void WriteSettingsFileLocked()
     fprintf(f, "LaserStart=%.3f\n", DefaultProfileValue(&g_laserStartMeters));
     fprintf(f, "LaserBeamStartRight=%.3f\n", DefaultProfileValue(&g_laserBeamStartRight));
     fprintf(f, "LaserBeamStartUp=%.3f\n", DefaultProfileValue(&g_laserBeamStartUp));
-    fprintf(f, "WeaponGripRight=%.4f\n", DefaultProfileValue(&g_weaponGripRight));
-    fprintf(f, "WeaponGripUp=%.4f\n", DefaultProfileValue(&g_weaponGripUp));
-    fprintf(f, "WeaponGripBack=%.4f\n", DefaultProfileValue(&g_weaponGripBack));
     fprintf(f, "WeaponGripPitch=%.4f\n", DefaultProfileValue(&g_weaponGripPitchDeg));
     fprintf(f, "WeaponGripYaw=%.4f\n", DefaultProfileValue(&g_weaponGripYawDeg));
     fprintf(f, "WeaponGripRoll=%.4f\n", DefaultProfileValue(&g_weaponGripRollDeg));
-    // Weapon profiles: grip right/up/back, grip pitch/yaw/roll, optic height/windage/forward, controller aim up/right.
+    // Weapon profiles (format 2): grip pitch/yaw/roll, optic height/windage/forward, controller aim up/right, then the
+    // rest of kProfileFields.
     for (const auto& profile : g_weaponProfiles)
     {
-        fprintf(f, "WeaponProfile=%s", profile.first.c_str());
+        fprintf(f, "%s%s", kProfilePrefix, profile.first.c_str());
         for (int i = 0; i < kProfileFieldCount; ++i)
             fprintf(f, "|%.4f", profile.second.v[i]);
         fprintf(f, "\n");
@@ -647,6 +726,7 @@ void LoadSettings()
     }
 
     std::vector<std::string> profileLines;
+    bool twoViewSeen[kPerModeCount] = {};
     char lineBuf[512];
     while (fgets(lineBuf, sizeof(lineBuf), f))
     {
@@ -658,6 +738,19 @@ void LoadSettings()
 
         float value = 0.0f;
         bool boolValue = false;
+        bool perMode = false;
+        for (int i = 0; i < kPerModeCount && !perMode; ++i)
+        {
+            const std::string key = std::string(kPerMode[i].key) + "TwoView";
+            if (ParseFloatSetting(line, key.c_str(), &value))
+            {
+                kPerMode[i].twoView->store(value, std::memory_order_relaxed);
+                twoViewSeen[i] = true;
+                perMode = true;
+            }
+        }
+        if (perMode)
+            continue;
         if (ParseFloatSetting(line, "IpdScale", &value))
             g_ipdScale.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "HeadAimEnabled", &boolValue))
@@ -697,6 +790,10 @@ void LoadSettings()
             g_hudScale.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "MenuScreenScale", &value))
             g_menuScreenScale.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "UiLayoutScale", &value))
+            g_uiLayoutScale.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "MenuScreenDepth", &value))
+            g_menuScreenDepth.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "DrivingHeadLookInvert", &boolValue))
             g_drivingHeadLookInvert.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "DrivingHeadLookAuto", &boolValue))
@@ -767,6 +864,20 @@ void LoadSettings()
             g_keepGameWindowed.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "NativeStereo", &boolValue))
             g_nativeStereo.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "SkyExactRays", &boolValue))
+            g_skyExactRays.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ScreenEffectsBothEyes", &boolValue))
+            g_screenEffectsBothEyes.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "DepthOfFieldTwoView", &boolValue))
+            g_depthOfFieldTwoView.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "RenderScaleFromSteamVr", &boolValue))
+            g_renderScaleFromSteamVr.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "EyeSizedBackbuffer", &boolValue))
+            g_eyeSizedBackbuffer.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ScriptedScenesFromLocks", &boolValue))
+            g_scriptedScenesFromLocks.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "ShowWeaponSockets", &boolValue))
+            g_showWeaponSockets.store(boolValue, std::memory_order_relaxed);
         else if ([&] {
                      for (int k = 0; k < 3; ++k)
                          if (ParseFloatSetting(line, kOldShoulderKeys[k], &value))
@@ -881,6 +992,17 @@ void LoadSettings()
                  }())
         {
         }
+        else if ([&] {
+                     for (int i = 0; i < 3; ++i)
+                         if (ParseFloatSetting(line, kGunSocketOffsetKeys[i], &value))
+                         {
+                             g_gunSocketOffset[i].store(value, std::memory_order_relaxed);
+                             return true;
+                         }
+                     return false;
+                 }())
+        {
+        }
         else if (ParseFloatSetting(line, "SecondaryGripRight", &value))
             g_secondaryGripRight.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SecondaryGripUp", &value))
@@ -889,22 +1011,20 @@ void LoadSettings()
             g_vrStickFullDeflection.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "VrTurnSpeed", &value))
             g_vrTurnSpeed.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "WeaponGripRight", &value))
-            g_weaponGripRight.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "WeaponGripUp", &value))
-            g_weaponGripUp.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "WeaponGripPitch", &value))
             g_weaponGripPitchDeg.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "WeaponGripYaw", &value))
             g_weaponGripYawDeg.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "WeaponGripRoll", &value))
             g_weaponGripRollDeg.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "WeaponGripBack", &value))
-            g_weaponGripBack.store(value, std::memory_order_relaxed);
-        else if (line.compare(0, 14, "WeaponProfile=") == 0)
+        else if (IsWeaponProfileLine(line))
             profileLines.push_back(line); // after the loop, once the default profile is known
     }
     fclose(f);
+    // An ini from before the per-mode HUD values: the engine mode starts from the same values.
+    for (int i = 0; i < kPerModeCount; ++i)
+        if (!twoViewSeen[i])
+            kPerMode[i].twoView->store(kPerMode[i].alternating->load(std::memory_order_relaxed), std::memory_order_relaxed);
     // The ini's own values for the per-weapon settings are the default profile; then the weapons' own.
     g_defaultProfile = ReadProfileFields();
     g_profileKey.clear();
@@ -919,10 +1039,10 @@ void LoadSettings()
         const char* end = strchr(p, '\n');
         std::string line = end ? std::string(p, end) : std::string(p);
         p = end ? end + 1 : p + line.size();
-        static const char kPrefix[] = "WeaponProfile=";
-        if (line.compare(0, sizeof(kPrefix) - 1, kPrefix) != 0)
+        if (!IsWeaponProfileLine(line))
             continue;
-        std::string key = line.substr(sizeof(kPrefix) - 1, line.find('|') - (sizeof(kPrefix) - 1));
+        const size_t keyStart = line.find('=') + 1;
+        std::string key = line.substr(keyStart, line.find('|') - keyStart);
         if (!key.empty() && g_weaponProfiles.find(key) == g_weaponProfiles.end() && ParseWeaponProfileLine(line))
             ++builtInAdded;
     }
@@ -1251,14 +1371,40 @@ void SetBodyPartCountSeen(int count)
     g_bodyPartCountSeen.store(count < 0 ? 0 : (count > kMaxBodyParts ? kMaxBodyParts : count), std::memory_order_relaxed);
 }
 
+namespace {
+// The render mode whose HUD values are in force: the selected one; the driving missions only render alternating eyes.
+float ModeValue(const std::atomic<float>& alternating, const std::atomic<float>& twoView)
+{
+    const bool tv = g_nativeStereo.load(std::memory_order_relaxed) && !g_drivingExe;
+    return (tv ? twoView : alternating).load(std::memory_order_relaxed);
+}
+} // namespace
+
 float GetHudScale()
 {
-    return g_hudScale.load(std::memory_order_relaxed);
+    return ModeValue(g_hudScale, g_hudScaleTv);
 }
 
 float GetMenuScreenScale()
 {
-    return g_menuScreenScale.load(std::memory_order_relaxed);
+    return ModeValue(g_menuScreenScale, g_menuScreenScaleTv);
+}
+
+float GetUiLayoutScale()
+{
+    return ModeValue(g_uiLayoutScale, g_uiLayoutScaleTv);
+}
+
+float GetMenuScreenDepth()
+{
+    const float d = ModeValue(g_menuScreenDepth, g_menuScreenDepthTv);
+    return d >= 0.3f && d <= 20.0f ? d : kDefaultMenuScreenDepth;
+}
+
+void NoteLevelRenderMode(bool twoView)
+{
+    g_levelModeTwoView.store(twoView, std::memory_order_relaxed);
+    g_levelModeKnown.store(true, std::memory_order_relaxed);
 }
 
 int GetDrivingCameraIndex()
@@ -1335,18 +1481,18 @@ int GetDebugHideDraw()
 
 void GetHudOffsetDeg(float* x, float* y)
 {
-    *x = g_hudOffsetXDeg.load(std::memory_order_relaxed);
-    *y = g_hudOffsetYDeg.load(std::memory_order_relaxed);
+    *x = ModeValue(g_hudOffsetXDeg, g_hudOffsetXDegTv);
+    *y = ModeValue(g_hudOffsetYDeg, g_hudOffsetYDegTv);
 }
 
 float GetHudIpdScale()
 {
-    return g_hudIpdScale.load(std::memory_order_relaxed);
+    return ModeValue(g_hudIpdScale, g_hudIpdScaleTv);
 }
 
 float GetHudDepth()
 {
-    return g_hudDepth.load(std::memory_order_relaxed);
+    return ModeValue(g_hudDepth, g_hudDepthTv);
 }
 
 bool GetRemoveShotSpread()
@@ -1413,6 +1559,47 @@ bool GetKeepGameWindowed()
 bool GetNativeStereoEnabled()
 {
     return g_nativeStereo.load(std::memory_order_relaxed);
+}
+
+bool GetSkyExactRaysEnabled()
+{
+    return g_skyExactRays.load(std::memory_order_relaxed);
+}
+
+bool GetScreenEffectsBothEyes()
+{
+    return g_screenEffectsBothEyes.load(std::memory_order_relaxed);
+}
+
+bool GetDepthOfFieldTwoView()
+{
+    return g_depthOfFieldTwoView.load(std::memory_order_relaxed);
+}
+
+bool GetRenderScaleFromSteamVr()
+{
+    return g_renderScaleFromSteamVr.load(std::memory_order_relaxed);
+}
+
+bool GetEyeSizedBackbuffer()
+{
+    return g_eyeSizedBackbuffer.load(std::memory_order_relaxed);
+}
+
+bool GetScriptedScenesFromLocks()
+{
+    return g_scriptedScenesFromLocks.load(std::memory_order_relaxed);
+}
+
+bool GetShowWeaponSockets()
+{
+    return g_showWeaponSockets.load(std::memory_order_relaxed);
+}
+
+void GetGunSocketOffset(float out[3])
+{
+    for (int i = 0; i < 3; ++i)
+        out[i] = g_gunSocketOffset[i].load(std::memory_order_relaxed);
 }
 
 MagazineProfile GetMagazineProfile()
@@ -1606,13 +1793,6 @@ int GetLaserRaycastEveryFrames()
     return n < 1 ? 1 : (n > 30 ? 30 : n);
 }
 
-void GetWeaponGripOffset(float out[3])
-{
-    out[0] = g_weaponGripRight.load(std::memory_order_relaxed);
-    out[1] = g_weaponGripUp.load(std::memory_order_relaxed);
-    out[2] = g_weaponGripBack.load(std::memory_order_relaxed);
-}
-
 void GetWeaponGripRotationDeg(float out[3])
 {
     out[0] = g_weaponGripPitchDeg.load(std::memory_order_relaxed);
@@ -1622,6 +1802,10 @@ void GetWeaponGripRotationDeg(float out[3])
 
 // ---- Menu table (2026-09-26, for openvr_direct/vr_overlay.cpp's SteamVR dashboard tab) ----------------------------
 namespace {
+
+constexpr int kRowBothModes = 0;
+constexpr int kRowAlternatingEye = 1;
+constexpr int kRowTwoView = 2;
 
 struct MenuEntry
 {
@@ -1633,6 +1817,10 @@ struct MenuEntry
     int decimals;
     const char* unit;
     int holsterZone = -1; // a choice entry: this zone's game action, cycled through g_holsterChoices
+    // A toggle shown as a two-way choice (the render mode): the text for off and for on.
+    const char* offText = nullptr;
+    const char* onText = nullptr;
+    int mode = kRowBothModes; // which render mode's menu shows the row
 };
 
 // Game actions a holster can be set to: every keyboard-bound action in the game's own profile, filled in by
@@ -1651,12 +1839,55 @@ const MenuEntry kMenu[] = {
     {"Head", "Head position", &g_headPositionEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Head", "Head position scale", nullptr, &g_headPositionScale, 0.1f, 3.0f, 0.05f, 2, "x"},
     {"Head", "Invert head position (horizontal)", &g_headPositionInvertHorizontal, nullptr, 0, 0, 0, 0, ""},
+    // RENDER MODE (2026-11-12): one DLL, two renderers; a change applies fully at the next level load (its note row
+    // follows while the level was built with the other mode, see MenuRows).
+    {"View", "Render mode", &g_nativeStereo, nullptr, 0, 0, 0, 0, "", -1, "Alternating eye", "Engine two-view"},
     {"View", "IPD scale", nullptr, &g_ipdScale, 0.5f, 2.0f, 0.02f, 2, "x"},
     {"View", "World scale (frustum)", nullptr, &g_frustumScale, 0.5f, 2.0f, 0.02f, 2, "x"},
     {"View", "Rotation smoothing (keep on)", &g_rotationSmoothingEnabled, nullptr, 0, 0, 0, 0, ""},
     {"View", "Smoothing window", nullptr, &g_rotationSmoothingWindowMs, 10.0f, 200.0f, 1.0f, 1, "ms"},
     {"View", "Keep game out of exclusive fullscreen", &g_keepGameWindowed, nullptr, 0, 0, 0, 0, ""},
-    {"View", "Engine two-view stereo (experimental, reload the level)", &g_nativeStereo, nullptr, 0, 0, 0, 0, ""},
+    {"View", "Exact sky rays (clouds match both eyes)", &g_skyExactRays, nullptr, 0, 0, 0, 0, ""},
+    {"View", "Screen effects (dust) in both eyes", &g_screenEffectsBothEyes, nullptr, 0, 0, 0, 0, "", -1, nullptr, nullptr,
+     kRowTwoView},
+    {"View", "Depth of field (doubles the image)", &g_depthOfFieldTwoView, nullptr, 0, 0, 0, 0, "", -1, nullptr, nullptr,
+     kRowTwoView},
+    {"View", "3D render scale from SteamVR resolution (experimental)", &g_renderScaleFromSteamVr, nullptr, 0, 0, 0, 0, ""},
+    {"View", "Backbuffer at SteamVR eye size (experimental)", &g_eyeSizedBackbuffer, nullptr, 0, 0, 0, 0, "", -1, nullptr,
+     nullptr, kRowTwoView},
+    {"View", "Scripted scenes follow the game's input locks", &g_scriptedScenesFromLocks, nullptr, 0, 0, 0, 0, ""},
+    // HUD right after View (2026-11-12, the user). The numbers are per render mode: each has one row per mode, and only
+    // the selected mode's shows.
+    {"HUD", "HUD placement", &g_hudPlacementEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"HUD", "Menu / movie screen size", nullptr, &g_menuScreenScale, 0.3f, 1.2f, 0.01f, 2, "x", -1, nullptr, nullptr,
+     kRowAlternatingEye},
+    {"HUD", "Menu / movie screen size", nullptr, &g_menuScreenScaleTv, 0.3f, 1.2f, 0.01f, 2, "x", -1, nullptr, nullptr,
+     kRowTwoView},
+    {"HUD", "Menu / movie screen distance", nullptr, &g_menuScreenDepth, 0.5f, 10.0f, 0.1f, 1, "m", -1, nullptr, nullptr,
+     kRowAlternatingEye},
+    {"HUD", "Menu / movie screen distance", nullptr, &g_menuScreenDepthTv, 0.5f, 10.0f, 0.1f, 1, "m", -1, nullptr, nullptr,
+     kRowTwoView},
+    {"HUD", "Hud Element Scale", nullptr, &g_uiLayoutScale, 0.5f, 3.0f, 0.05f, 2, "x", -1, nullptr, nullptr,
+     kRowAlternatingEye},
+    {"HUD", "Hud Element Scale", nullptr, &g_uiLayoutScaleTv, 0.5f, 3.0f, 0.05f, 2, "x", -1, nullptr, nullptr, kRowTwoView},
+    {"HUD", "Debug: hide draw # (0 off)", nullptr, &g_debugHideDraw, 0.0f, 128.0f, 1.0f, 0, ""},
+    {"HUD", "Hide reticle (may clip pause-menu items)", &g_hideReticle, nullptr, 0, 0, 0, 0, ""},
+    {"HUD", "HUD scale", nullptr, &g_hudScale, 0.3f, 1.2f, 0.01f, 2, "x", -1, nullptr, nullptr, kRowAlternatingEye},
+    {"HUD", "HUD scale", nullptr, &g_hudScaleTv, 0.3f, 1.2f, 0.01f, 2, "x", -1, nullptr, nullptr, kRowTwoView},
+    {"HUD", "HUD depth", nullptr, &g_hudDepth, 0.1f, 10.0f, 0.1f, 1, "m", -1, nullptr, nullptr, kRowAlternatingEye},
+    {"HUD", "HUD depth", nullptr, &g_hudDepthTv, 0.1f, 10.0f, 0.1f, 1, "m", -1, nullptr, nullptr, kRowTwoView},
+    {"HUD", "HUD IPD (x render IPD)", nullptr, &g_hudIpdScale, 0.0f, 4.0f, 0.02f, 2, "x", -1, nullptr, nullptr,
+     kRowAlternatingEye},
+    {"HUD", "HUD IPD (x render IPD)", nullptr, &g_hudIpdScaleTv, 0.0f, 4.0f, 0.02f, 2, "x", -1, nullptr, nullptr,
+     kRowTwoView},
+    {"HUD", "HUD offset right", nullptr, &g_hudOffsetXDeg, -30.0f, 30.0f, 0.5f, 1, "deg", -1, nullptr, nullptr,
+     kRowAlternatingEye},
+    {"HUD", "HUD offset right", nullptr, &g_hudOffsetXDegTv, -30.0f, 30.0f, 0.5f, 1, "deg", -1, nullptr, nullptr,
+     kRowTwoView},
+    {"HUD", "HUD offset up", nullptr, &g_hudOffsetYDeg, -30.0f, 30.0f, 0.5f, 1, "deg", -1, nullptr, nullptr,
+     kRowAlternatingEye},
+    {"HUD", "HUD offset up", nullptr, &g_hudOffsetYDegTv, -30.0f, 30.0f, 0.5f, 1, "deg", -1, nullptr, nullptr,
+     kRowTwoView},
     {"Controls", "Stick turn speed", nullptr, &g_vrTurnSpeed, 0.2f, 3.0f, 0.05f, 2, "x"},
     {"Controls", "Stick full deflection", nullptr, &g_vrStickFullDeflection, 0.5f, 1.0f, 0.01f, 2, ""},
     {"Controls", "Two-hand grab radius", nullptr, &g_twoHandGrabRadius, 0.05f, 0.5f, 0.01f, 2, "m"},
@@ -1676,6 +1907,10 @@ const MenuEntry kMenu[] = {
     {"Hands", "Hand rotation pitch (+ up)", nullptr, &g_handOffsetRotDeg[0], -45.0f, 45.0f, 0.5f, 1, "deg"},
     {"Hands", "Hand rotation yaw (+ right)", nullptr, &g_handOffsetRotDeg[1], -45.0f, 45.0f, 0.5f, 1, "deg"},
     {"Hands", "Hand rotation roll (+ right)", nullptr, &g_handOffsetRotDeg[2], -45.0f, 45.0f, 0.5f, 1, "deg"},
+    {"Hands", "Gun offset in the hand right (all guns)", nullptr, &g_gunSocketOffset[0], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Hands", "Gun offset in the hand up", nullptr, &g_gunSocketOffset[1], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Hands", "Gun offset in the hand forward", nullptr, &g_gunSocketOffset[2], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Hands", "Show weapon sockets (debug lines)", &g_showWeaponSockets, nullptr, 0, 0, 0, 0, ""},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Show grab zones (setup)", &g_showGrabZones, nullptr, 0, 0, 0, 0, ""},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach X (each side)", nullptr, &g_holsterPos[0][0], 0.0f, 0.6f, 0.01f, 2, "m"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach Y", nullptr, &g_holsterPos[0][1], -1.2f, 0.3f, 0.01f, 2, "m"},
@@ -1713,7 +1948,7 @@ const MenuEntry kMenu[] = {
     {"Hands", "Laser raycast every N frames", nullptr, &g_laserRaycastEveryFrames, 1.0f, 30.0f, 1.0f, 0, ""},
     {"Hands", "Dot size", nullptr, &g_sightDotSizeDeg, 0.05f, 2.0f, 0.05f, 2, "deg"},
     {"Arm IK", "Arms follow the controllers", &g_armIkEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Arm IK", "Right hand right (on the gun)", nullptr, &g_rightHandIkPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {"Arm IK", "Right hand right (on its controller)", nullptr, &g_rightHandIkPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
     {"Arm IK", "Right hand up", nullptr, &g_rightHandIkPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
     {"Arm IK", "Right hand forward", nullptr, &g_rightHandIkPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
     {"Arm IK", "Right hand pitch", nullptr, &g_rightHandIkRotDeg[0], -180.0f, 180.0f, 1.0f, 0, "deg"},
@@ -1749,9 +1984,6 @@ const MenuEntry kMenu[] = {
     {"Weapon", "Gun + shots follow controller (Numpad .)", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Weapon", "Manual reload", &g_manualReloadEnabled, nullptr, 0, 0, 0, 0, ""},
     // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon.
-    {kProfileGroup, "Grip offset right", nullptr, &g_weaponGripRight, -0.5f, 0.5f, 0.005f, 3, "m"},
-    {kProfileGroup, "Grip offset up", nullptr, &g_weaponGripUp, -0.5f, 0.5f, 0.005f, 3, "m"},
-    {kProfileGroup, "Grip offset back", nullptr, &g_weaponGripBack, -1.0f, 0.5f, 0.005f, 3, "m"},
     {kProfileGroup, "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {kProfileGroup, "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {kProfileGroup, "Grip roll", nullptr, &g_weaponGripRollDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
@@ -1794,15 +2026,6 @@ const MenuEntry kMenu[] = {
     {"Driving", "Wheel opacity (0 = hidden)", nullptr, &g_drivingWheelOpacity, 0.0f, 1.0f, 0.05f, 2, ""},
     {"Driving", "Debug: manual views from # (0 = auto)", nullptr, &g_drivingCameraIndex, 0.0f, 64.0f, 1.0f, 0, ""},
     {"Driving", "Debug: manual views to # (0 = only from)", nullptr, &g_drivingCameraIndexTo, 0.0f, 64.0f, 1.0f, 0, ""},
-    {"HUD", "HUD placement", &g_hudPlacementEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"HUD", "Menu / movie screen size", nullptr, &g_menuScreenScale, 0.3f, 1.2f, 0.01f, 2, "x"},
-    {"HUD", "Debug: hide draw # (0 off)", nullptr, &g_debugHideDraw, 0.0f, 128.0f, 1.0f, 0, ""},
-    {"HUD", "Hide reticle (may clip pause-menu items)", &g_hideReticle, nullptr, 0, 0, 0, 0, ""},
-    {"HUD", "HUD scale", nullptr, &g_hudScale, 0.3f, 1.2f, 0.01f, 2, "x"},
-    {"HUD", "HUD depth", nullptr, &g_hudDepth, 0.1f, 10.0f, 0.1f, 1, "m"},
-    {"HUD", "HUD IPD (x render IPD)", nullptr, &g_hudIpdScale, 0.0f, 4.0f, 0.02f, 2, "x"},
-    {"HUD", "HUD offset right", nullptr, &g_hudOffsetXDeg, -30.0f, 30.0f, 0.5f, 1, "deg"},
-    {"HUD", "HUD offset up", nullptr, &g_hudOffsetYDeg, -30.0f, 30.0f, 0.5f, 1, "deg"},
 };
 constexpr int kMenuCount = static_cast<int>(sizeof(kMenu) / sizeof(kMenu[0]));
 
@@ -1827,6 +2050,7 @@ bool GetBodyPartMenuInfo(int part, MenuSettingInfo* out)
     out->label = out->labelBuffer;
     out->isToggle = true;
     out->isChoice = false;
+    out->isNote = false;
     out->value = g_hideBodyPart[part].load(std::memory_order_relaxed) ? 1.0f : 0.0f;
     out->step = 0.0f;
     out->decimals = 0;
@@ -1835,30 +2059,114 @@ bool GetBodyPartMenuInfo(int part, MenuSettingInfo* out)
     return true;
 }
 
+// THE ROWS ON SHOW (2026-11-12): the table's rows for the selected render mode (MenuEntry::mode), the render mode's
+// reload note right after its row while it's due, then the body parts. Rebuilt on every call (the table is small); the
+// overlay thread is the only caller, and the only one changing the render mode from the menu.
+enum class RowKind
+{
+    Entry,
+    Note,
+    BodyPart
+};
+struct MenuRow
+{
+    RowKind kind;
+    int i; // the table entry (Entry, Note: the render mode's) or the body part
+};
+
+bool RowShown(const MenuEntry& e)
+{
+    if (e.mode == kRowBothModes)
+        return true;
+    return e.mode == (g_nativeStereo.load(std::memory_order_relaxed) ? kRowTwoView : kRowAlternatingEye);
+}
+
+// The level in play was built with the other render mode: the change applies fully at the next level load.
+bool ReloadNoteDue()
+{
+    return g_levelModeKnown.load(std::memory_order_relaxed) &&
+           g_levelModeTwoView.load(std::memory_order_relaxed) != g_nativeStereo.load(std::memory_order_relaxed);
+}
+
+// Row `index` (out), or with index < 0 the number of rows (total).
+bool FindMenuRow(int index, MenuRow* out, int* total)
+{
+    const bool note = ReloadNoteDue();
+    int n = 0;
+    for (int i = 0; i < kMenuCount; ++i)
+    {
+        if (!RowShown(kMenu[i]))
+            continue;
+        if (n++ == index)
+        {
+            *out = MenuRow{RowKind::Entry, i};
+            return true;
+        }
+        if (note && kMenu[i].toggle == &g_nativeStereo && kMenu[i].onText && n++ == index)
+        {
+            *out = MenuRow{RowKind::Note, i};
+            return true;
+        }
+    }
+    const int parts = BodyPartRowCount();
+    if (index >= n && index < n + parts)
+    {
+        *out = MenuRow{RowKind::BodyPart, index - n};
+        return true;
+    }
+    if (total)
+        *total = n + parts;
+    return false;
+}
+
 } // namespace
 
 int GetMenuSettingCount()
 {
-    return kMenuCount + BodyPartRowCount(); // the body part rows follow the table
+    MenuRow unused{};
+    int total = 0;
+    FindMenuRow(-1, &unused, &total);
+    return total;
 }
 
 bool GetMenuSettingInfo(int index, MenuSettingInfo* out)
 {
-    if (index < 0 || !out)
+    MenuRow row{};
+    if (index < 0 || !out || !FindMenuRow(index, &row, nullptr))
         return false;
-    if (index >= kMenuCount)
-        return GetBodyPartMenuInfo(index - kMenuCount, out);
-    const MenuEntry& e = kMenu[index];
+    if (row.kind == RowKind::BodyPart)
+        return GetBodyPartMenuInfo(row.i, out);
+    const MenuEntry& e = kMenu[row.i];
+    if (row.kind == RowKind::Note)
+    {
+        out->group = e.group;
+        out->label = "Changed: reload the level to apply";
+        out->isToggle = false;
+        out->isChoice = false;
+        out->isNote = true;
+        out->value = 0.0f;
+        out->step = 0.0f;
+        out->decimals = 0;
+        out->unit = "";
+        out->text[0] = '\0';
+        return true;
+    }
     out->group = e.group == kProfileGroup ? g_profileTitle.load(std::memory_order_acquire) : e.group;
     out->label = e.label;
-    out->isToggle = e.toggle != nullptr;
-    out->isChoice = e.holsterZone >= 0;
+    out->isToggle = e.toggle != nullptr && !e.onText;
+    out->isChoice = e.holsterZone >= 0 || (e.toggle != nullptr && e.onText != nullptr);
+    out->isNote = false;
     out->value = e.toggle ? (e.toggle->load(std::memory_order_relaxed) ? 1.0f : 0.0f)
                           : (e.number ? e.number->load(std::memory_order_relaxed) : 0.0f);
     out->step = e.step;
     out->decimals = e.decimals;
     out->unit = e.unit;
     out->text[0] = '\0';
+    if (e.toggle && e.onText)
+    {
+        snprintf(out->text, sizeof(out->text), "%s", out->value != 0.0f ? e.onText : (e.offText ? e.offText : ""));
+        return true;
+    }
     if (out->isChoice)
     {
         std::string action = GetHolsterAction(e.holsterZone);
@@ -1904,11 +2212,12 @@ void SetHolsterActionChoices(const std::vector<std::string>& actions)
 
 void AdjustMenuSetting(int index, int steps)
 {
-    if (index < 0 || steps == 0)
+    MenuRow row{};
+    if (index < 0 || steps == 0 || !FindMenuRow(index, &row, nullptr) || row.kind == RowKind::Note)
         return;
-    if (index >= kMenuCount)
+    if (row.kind == RowKind::BodyPart)
     {
-        int part = index - kMenuCount;
+        int part = row.i;
         if (part >= kMaxBodyParts)
             return;
         g_hideBodyPart[part].store(!g_hideBodyPart[part].load(std::memory_order_relaxed), std::memory_order_relaxed);
@@ -1916,7 +2225,7 @@ void AdjustMenuSetting(int index, int steps)
         WriteSettingsFileLocked();
         return;
     }
-    const MenuEntry& e = kMenu[index];
+    const MenuEntry& e = kMenu[row.i];
     if (e.holsterZone >= 0)
     {
         // Cycle through "(none)" + the game's keyboard-bound actions.

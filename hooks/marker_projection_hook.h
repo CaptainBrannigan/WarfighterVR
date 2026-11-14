@@ -10,8 +10,15 @@
 // placed over the 3D world (not in movies / menus, not with placement off). Both executables: MOHW.exe and the
 // driving missions' MOHWD.exe (the same function at its own address, see the .cpp).
 
+// Native two-view (2026-11-08): one projection serves both halves, so each marker goes where the two halves' HUD
+// rectangles agree on its direction: the right direction, at the HUD's depth.
+
 namespace mohw {
 
 bool InstallMarkerProjectionHook();
+
+// Diagnostics (hooks/ui_pass.cpp): the markers mapped in two-view mode within the last withinMs, as
+// " [game u,v hud u,v]" items written into out. Returns how many.
+int DescribeRecentMarkers(char* out, int size, unsigned long long withinMs);
 
 } // namespace mohw

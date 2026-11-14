@@ -61,9 +61,10 @@ DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
     // Stick pitch only with head aim off: with it on the head owns pitch (the aiming controller hook also removes pitch
     // input then), so the stick's Y stays 0.
     // (In the driving missions' executable there is no head look at all -- g_drivingExe -- so the stick keeps its Y.)
-    // Nor while the soldier's aim isn't running (the robot-control section, menus): the head doesn't drive that
-    // camera, so its pitch is the stick's (live 2026-10-16: the robot couldn't look up or down).
-    if (GetHeadAimEnabled() && !g_drivingExe && IsPlayerAimActive())
+    // Nor while the head isn't driving the soldier's view (IsHeadDrivingSoldier: the robot-control section, menus, a
+    // scripted scene with look taken): the head doesn't drive that camera, so its pitch is the stick's (live 2026-10-16:
+    // the robot couldn't look up or down).
+    if (GetHeadAimEnabled() && !g_drivingExe && IsHeadDrivingSoldier())
         turnY = 0.0f;
 
     XINPUT_GAMEPAD& pad = state->Gamepad;

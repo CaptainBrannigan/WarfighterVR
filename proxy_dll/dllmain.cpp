@@ -40,6 +40,9 @@
 #include "../hooks/first_person_rig.h"
 #include "../hooks/native_stereo.h"
 #include "../hooks/ui_pass.h"
+#include "../hooks/ocean_water_guard.h"
+#include "../hooks/sky_rays_fix.h"
+#include "../hooks/screen_effect_diag.h"
 #include "../hooks/memory_dump.h"
 #include "../hooks/driving_camera_hook.h"
 #include "../third_party/minhook/include/MinHook.h"
@@ -164,6 +167,20 @@ void InstallGameHooks()
     // Marks the Scaleform UI's pass, to find the HUD's exact draws (hooks/ui_pass.h). Logging only.
     if (!mohw::InstallUiPassHook())
         MOHW_LOG(kLogFile, "InstallUiPassHook FAILED -- see mohwvr_uipass.log");
+
+    // The ocean water's jobs, which the engine runs per view on one set of buffers: serialized while the two-view stereo
+    // is on, and every LOD range checked (hooks/ocean_water_guard.h).
+    if (!mohw::InstallOceanWaterGuard())
+        MOHW_LOG(kLogFile, "InstallOceanWaterGuard FAILED -- see mohwvr_oceanwater.log");
+
+    // The sky's per-corner view rays, exact instead of normalised (hooks/sky_rays_fix.h): the clouds were warped
+    // differently in each eye.
+    if (!mohw::InstallSkyRaysFix())
+        MOHW_LOG(kLogFile, "InstallSkyRaysFix FAILED -- see mohwvr_sky.log");
+
+    // DIAGNOSTIC: the screen effects per view (a dust effect showed in one eye only), hooks/screen_effect_diag.h.
+    if (!mohw::InstallScreenEffectDiag())
+        MOHW_LOG(kLogFile, "InstallScreenEffectDiag FAILED -- see mohwvr_screeneffect.log");
 
     // ADS sway: scales the weapons' zoomed sway (GunSwayData) by AdsSwayScale -- see hooks/weapon_sway_patch.h.
     mohw::StartWeaponSwayPatch();

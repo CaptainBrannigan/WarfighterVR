@@ -440,7 +440,9 @@ std::atomic<float> g_appliedHeadRoll{0.0f}; // see GetAppliedHeadRoll
 
 bool ApplyHeadRoll(void* transformPtr)
 {
-    if (!GetHeadRollEnabled())
+    // Not while the head isn't driving the soldier's view (aiming_controller_hook.h IsHeadDrivingSoldier): the frame is
+    // then shown strapped to the head, and the game's camera as it is.
+    if (!GetHeadRollEnabled() || !IsHeadDrivingSoldier())
     {
         g_appliedHeadRoll.store(0.0f, std::memory_order_relaxed);
         return false;
@@ -531,15 +533,49 @@ void* g_hookAddress = nullptr;
 // next update). Remove once that's answered.
 std::atomic<long long> g_commitCalls{0};
 
+// THE GAME'S VIEW IS NEVER WRITTEN (2026-11-10): everything below used to edit param_2 in place -- the eye's fov, the
+// smoothed rotation, head roll, head position, the eye offset -- and param_2 isn't a scratch copy: it's the game's
+// own, stable view source (OFFSET_COMMITVIEWTRANSFORM's comment), which the original then copies into the renderer
+// (0x394 dwords into renderer+0x50, as the driving missions' FUN_00926dd0 copies 0x290). So the head's translation,
+// the eye shift and the roll sat in the game's own camera state every tick, for whatever else reads it. A tester fell
+// through the floor the moment a cutscene handed control back (2026-11-07, logs: the player put back on their spot,
+// then straight down), and the user: "our head tracking is forcing the capsule through the map, that's the only
+// thing that affects the player capsule". Now the edits go into a copy and the original commits that, as the driving
+// missions' hook has done from the start: the renderer gets exactly what it got before, the game's own view stays
+// the game's. 16-byte aligned, for the game's SSE copy.
+constexpr int kViewDwords = 0x394;
+bool CopyView(float* to, const void* from)
+{
+    __try
+    {
+        memcpy(to, from, sizeof(float) * kViewDwords);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
 struct ThisCallTrampoline
 {
-    void Hooked(void* param2)
+    void Hooked(void* gameView)
     {
         int param1 = reinterpret_cast<int>(this);
 
         long long n = ++g_commitCalls;
         if (n == 1 || n % 300 == 0)
             MOHW_LOG(kLogFile, "CommitViewTransform #%lld", n);
+
+        alignas(16) float view[kViewDwords];
+        void* param2 = gameView != nullptr && CopyView(view, gameView) ? view : nullptr;
+        if (gameView != nullptr && param2 == nullptr)
+        {
+            static std::atomic<int> copyFailures{0};
+            if (copyFailures.fetch_add(1, std::memory_order_relaxed) < 4)
+                MOHW_LOG(kLogFile, "CommitViewTransform: the game's view at %p couldn't be copied -- passed through untouched",
+                         gameView);
+        }
 
         bool applied = false;
         if (param2 != nullptr)
@@ -567,6 +603,8 @@ struct ThisCallTrampoline
             // declaration comment. Runs BEFORE head-roll so roll's already-
             // smooth effect layers on top of the smoothed base.
             SmoothCameraRotation(param2);
+            // Head roll, head position and the stamp stand aside while the head isn't driving the soldier's view
+            // (IsHeadDrivingSoldier: a scripted scene, the robot, menus): the game's camera is shown as it is.
             ApplyHeadRoll(param2); // additive on top of the native yaw/pitch sync, see its own comment
             // EXPERIMENTAL head position (hooks/head_position.h): moves the camera translation by the real head delta since recenter.
             ApplyHeadPosition(param2);
@@ -579,9 +617,10 @@ struct ThisCallTrampoline
                 ApplyEyeOffset(param2);
         }
 
-        LogIfDue(param2, applied);
+        if (param2 != nullptr)
+            LogIfDue(param2, applied);
 
-        g_original(param1, param2);
+        g_original(param1, param2 != nullptr ? param2 : gameView);
     }
 };
 

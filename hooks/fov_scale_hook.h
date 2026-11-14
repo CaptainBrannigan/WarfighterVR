@@ -57,9 +57,10 @@ void CheckFovScaleHotkeys();
 // hooks/render_pose_stamp.cpp. Equals GetHeadYawOffset() when rotation smoothing is off.
 float GetRenderedHeadYawOffset();
 
-// The roll (radians, about the camera's local Z) ApplyHeadRoll last added to the world camera; 0 while head roll is off
-// or no pose is available. The first-person rig's camera doesn't get it, so camera_matrix_test_hook.cpp adds the
-// same rotation to the body to keep it from rolling with the head.
+// The roll (radians, about the camera's local Z) ApplyHeadRoll last added to the world camera; 0 while head roll is off,
+// no pose is available or the head isn't driving the soldier's view (aiming_controller_hook.h IsHeadDrivingSoldier).
+// The first-person rig's camera doesn't get it, so camera_matrix_test_hook.cpp adds the same rotation to the body to
+// keep it from rolling with the head.
 float GetAppliedHeadRoll();
 
 } // namespace mohw

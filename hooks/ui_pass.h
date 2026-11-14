@@ -20,5 +20,11 @@ int CurrentUiPass();
 
 // From the D3D draw hooks, every draw: counted when it lands inside the UI pass on this thread.
 void UiPassNoteDraw();
+// NATIVE TWO-VIEW (hooks/native_stereo.h, 2026-11-08): the HUD list is replayed once per half here, the way the
+// engine's own stereo HUD replays it once per eye (FUN_00CBB4E0, OFFSET_UI_LIST_REPLAY). The half this thread is
+// drawing it into: 0 left, 1 right, -1 none. hooks/draw_trace_diag.cpp places each replay in its eye's HUD rectangle.
+int CurrentHudEye();
+// Changes with every such replay, so the draw hooks can tell a new one started.
+int CurrentHudReplay();
 
 } // namespace mohw
