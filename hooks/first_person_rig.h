@@ -44,7 +44,13 @@ bool ReadBatchFrameRows(const unsigned char* batch, float rows[3][3][3]);
 // animation holds the right hand on, the pistol grip) is in this body batch's pose, in rigCamera's frame (right, up,
 // back): the frame the weapon drive's grip is in. And the right hand's centre (the point the arm IK puts on the
 // controller), same pose and frame. Before the arm IK moves anything. False if the skeleton or the bone isn't known.
-bool ReadGunSocketInCamera(const unsigned char* batch, const Rigid& rigCamera, float out[3], float handCentre[3]);
+// gunInCamera / haveGun (optional): the gun bone's (Wep_Root's) skin matrix against rigCamera, for the held pose.
+bool ReadGunSocketInCamera(const unsigned char* batch, const Rigid& rigCamera, float out[3], float handCentre[3],
+                           Rigid* gunInCamera = nullptr, bool* haveGun = nullptr);
+// HELD POSE (2026-11-21, HoldHandPose): the equipped weapon's held pose, taken once it settled (the .cpp's HELD POSE): its
+// socket, the right hand's centre and the gun bone's skin matrix, all against rigCamera. False before it's taken, with
+// the setting off, or for another weapon. hooks/camera_matrix_test_hook.cpp GripInCamera draws the gun from it.
+bool GetHeldGunPose(float socket[3], float centre[3], Rigid* gunInCamera);
 
 // THE WEAPON SOCKET VIEW (2026-11-09, ShowWeaponSockets): every weapon bone of the first-person skeleton (Wep_*,
 // IK_Joint_*) and each hand's weapon bone (RightWeapon, LeftWeapon), with its parent (the skeleton asset's hierarchy:

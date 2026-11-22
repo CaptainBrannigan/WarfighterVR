@@ -1,5 +1,8 @@
 # When something else has the controls (2026-11-06)
 
+The Basilan RHIB (its wheel and its Mk19, with the seat signal these offsets lead to) has its own doc since 2026-11-22:
+[boat_sequence.md](boat_sequence.md).
+
 Frostbite hands the player's input to a "controllable": the player's own soldier, or whatever they've entered or
 taken over. MOHW's two problem sequences are both in **050_Somalia**: the MAARS robot (`b_050_somalia_maarsrobot`,
 `levels/sp/050_somalia/animations/maars/maars_robotanim`) and the sniper setup (`b_050_somalia_snipersetup`, scripting

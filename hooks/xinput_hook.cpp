@@ -7,12 +7,14 @@
 #include "../sdk/settings.h"
 #include "../sdk/mohw_offsets.h"
 #include "aiming_controller_hook.h"
+#include "boat_seat.h"
 #include "driving_camera_hook.h"
 
 #include <windows.h>
 #include <Xinput.h> // types only -- nothing from xinput is linked, the real function is reached through the hook
 
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <initializer_list>
 
@@ -85,9 +87,13 @@ DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
     // over the thumbstick's, lifted past the game's deadzone like the head look. Not in the menu (paused): the menu
     // gets the real stick.
     float wheel = 0.0f;
-    if (g_drivingExe && !DrivingSimulationPaused() && openvr_direct::GetSteeringWheelStick(&wheel))
+    // The Basilan RHIB's wheel as well (hooks/boat_seat.h), with its own deadzone.
+    const BoatSeat boatSeat = GetBoatSeat();
+    const bool wheelSeat = g_drivingExe ? !DrivingSimulationPaused()
+                                        : boatSeat == BoatSeat::Driver && GetBoatWheel() && !IsBoatPaused();
+    if (wheelSeat && openvr_direct::GetSteeringWheelStick(&wheel))
     {
-        float deadzone = GetDrivingStickDeadzone();
+        float deadzone = g_drivingExe ? GetDrivingStickDeadzone() : GetBoatStickDeadzone();
         if (fabsf(wheel) > 0.01f && deadzone > 0.0f && deadzone < 0.9f)
             wheel = (wheel > 0.0f ? 1.0f : -1.0f) * (deadzone + (1.0f - deadzone) * fabsf(wheel));
         pad.sThumbLX = ToThumb(wheel);
@@ -105,6 +111,18 @@ DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
     {
         pad.sThumbRX = ToThumb(turn + headLook);
         pad.sThumbRY = ToThumb(pitch);
+    }
+    // The RHIB's Mk19 under the hands: the stick that brings it to them, alone (both sticks turn it).
+    float gunX = 0.0f, gunY = 0.0f;
+    if (boatSeat == BoatSeat::Gunner && GetBoatGunStick(&gunX, &gunY))
+    {
+        pad.sThumbRX = ToThumb(gunX);
+        pad.sThumbRY = ToThumb(gunY);
+        if (!IsBoatPaused()) // the pause menu is moved through with the left one
+        {
+            pad.sThumbLX = 0;
+            pad.sThumbLY = 0;
+        }
     }
 
     // Pad buttons and triggers from the SteamVR pad actions (openvr_direct/vr_input.cpp), on top of a real pad's.
@@ -182,7 +200,78 @@ bool HookExport(HMODULE module, const char* name, void* detour, void** original,
     return true;
 }
 
+// GAMEPAD WITHOUT FOCUS (xinput_hook.h GamepadFocusOnPresent). The running executable's ClientSettings and the byte in
+// it. False until the game has cached the object, and unless the byte and the two either side of it (Booleans in both
+// builds) read as Booleans, so another object is never written.
+bool ReadFocusOverride(uintptr_t pointerAddress, uint32_t field, uintptr_t* object, uint8_t* value)
+{
+    __try
+    {
+        const uintptr_t settings = *reinterpret_cast<const uint32_t*>(pointerAddress);
+        if (!settings)
+            return false;
+        const uint8_t* flag = reinterpret_cast<const uint8_t*>(settings + field);
+        if (flag[-1] > 1 || flag[0] > 1 || flag[1] > 1)
+            return false;
+        *object = settings;
+        *value = flag[0];
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+bool WriteFocusOverride(uintptr_t object, uint32_t field, uint8_t value)
+{
+    __try
+    {
+        *reinterpret_cast<uint8_t*>(object + field) = value;
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+uintptr_t g_focusOverrideSetOn = 0; // Present thread: the ClientSettings whose byte this set, 0 = none
+
 } // namespace
+
+void GamepadFocusOnPresent()
+{
+    const bool want = GetGamepadWithoutFocus();
+    if (!g_hookAddress || (!want && !g_focusOverrideSetOn))
+        return;
+    // Not Offset<>(): g_baseDelta is only resolved in MOHW.exe.
+    const uintptr_t delta = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr)) - MOHW_MP_BASE;
+    const uintptr_t pointerAddress = delta + (g_drivingExe ? MOHWD_CLIENTSETTINGS : OFFSET_CLIENTSETTINGS);
+    const uint32_t field =
+        g_drivingExe ? MOHWD_CLIENTSETTINGS_USEGLOBALGAMEPADINPUT : CLIENTSETTINGS_USEGLOBALGAMEPADINPUT;
+    uintptr_t object = 0;
+    uint8_t value = 0;
+    if (!ReadFocusOverride(pointerAddress, field, &object, &value))
+        return;
+    if (g_focusOverrideSetOn && g_focusOverrideSetOn != object)
+        g_focusOverrideSetOn = 0; // another object: what it holds is the game's own
+    if (want)
+    {
+        if (value != 0 || !WriteFocusOverride(object, field, 1))
+            return;
+        if (g_focusOverrideSetOn != object)
+            MOHW_LOG(kLogFile, "gamepad without window focus ON: ClientSettings %p + 0x%X = %p, 0 -> 1",
+                     reinterpret_cast<void*>(object), field, reinterpret_cast<void*>(object + field));
+        g_focusOverrideSetOn = object;
+    }
+    else if (g_focusOverrideSetOn && WriteFocusOverride(object, field, 0))
+    {
+        g_focusOverrideSetOn = 0;
+        MOHW_LOG(kLogFile, "gamepad without window focus OFF: ClientSettings %p + 0x%X back to 0",
+                 reinterpret_cast<void*>(object), field);
+    }
+}
 
 bool InstallXInputHook()
 {

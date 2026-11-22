@@ -1396,8 +1396,11 @@ bool ReadBatchFrameRows(const unsigned char* batch, float rows[3][3][3])
     return true;
 }
 
-bool ReadGunSocketInCamera(const unsigned char* batch, const Rigid& rigCamera, float out[3], float handCentre[3])
+bool ReadGunSocketInCamera(const unsigned char* batch, const Rigid& rigCamera, float out[3], float handCentre[3],
+                           Rigid* gunInCamera, bool* haveGun)
 {
+    if (haveGun)
+        *haveGun = false;
     float* bones = nullptr;
     int count = 0;
     if (!ReadBatchBones(batch, &bones, &count))
@@ -1405,6 +1408,8 @@ bool ReadGunSocketInCamera(const unsigned char* batch, const Rigid& rigCamera, f
     float slot[12];
     float bind[3];
     float centreWorld[3];
+    float gunSkin[12];
+    bool gunRead = false;
     {
         std::lock_guard<std::mutex> lock(g_skeletonMutex);
         const Skeleton& sk = g_skeleton;
@@ -1423,6 +1428,7 @@ bool ReadGunSocketInCamera(const unsigned char* batch, const Rigid& rigCamera, f
         memcpy(bind, sk.bind[bone].data(), sizeof(bind));
         if (!CopyFloats(slot, bones + bone * 12, 12) || !HandCentre(bones, sk, sk.arms[1], centreWorld))
             return false;
+        gunRead = sk.gunBone >= 0 && sk.gunBone < sk.boneCount && CopyFloats(gunSkin, BoneSlot(bones, sk.gunBone), 12);
     }
     float s[16], world[3];
     ReadBone(slot, s);
@@ -1430,6 +1436,16 @@ bool ReadGunSocketInCamera(const unsigned char* batch, const Rigid& rigCamera, f
     const Rigid inverse = Inverse(rigCamera);
     PointTimes(world, inverse, out);
     PointTimes(centreWorld, inverse, handCentre);
+    if (gunRead && gunInCamera && haveGun)
+    {
+        // The gun bone's skin matrix against the camera (HELD POSE: the gun drawn from its held pose).
+        float g[16], inverse4[16], k[16];
+        ReadBone(gunSkin, g);
+        ToMatrix4(inverse, inverse4);
+        Mul4(g, inverse4, k);
+        *gunInCamera = FromMatrix(k);
+        *haveGun = true;
+    }
     for (int k = 0; k < 3; ++k)
         if (!std::isfinite(out[k]) || !std::isfinite(handCentre[k]) || std::fabs(out[k]) >= 3.0f ||
             std::fabs(handCentre[k]) >= 3.0f)
@@ -1759,6 +1775,189 @@ void LogWeaponSockets(float* bones, const Skeleton& sk, const Rigid& rigCamera)
     }
 }
 
+namespace {
+
+// ---- HELD POSE (2026-11-21) ----
+// The user: "I'd like to cancel all weapon idle animations while player has control". The game keeps animating the
+// first-person rig under the controllers -- idle fidgets, the breathing and walking bob -- and three things carried it
+// into the headset: each hand's turn against the camera rides onto its controller (HandOnController keeps the animated
+// hand's rotation), the gun's place in the hand is the animated socket-to-hand offset and its turn against the camera
+// rides onto the controller too (hooks/camera_matrix_test_hook.cpp GripInCamera), and a two-handed off hand keeps the
+// animated grip on the gun. So once a weapon has settled -- a second after it came in, not zoomed, the right hand and the
+// gun still against the camera for ten solves (or after 8 s regardless) -- its pose is taken: every hand bone against the
+// camera, the animated left (support) hand's against the gun bone too, the gun bone against the camera, the socket and
+// the hand centre. With HoldHandPose on, ApplyArmIk (which only runs while the player has control) writes the hands back
+// to it before solving, and the gun is drawn from it (GetHeldGunPose). A new weapon, a checkpoint (a new weapon
+// generation) or another skeleton takes it again. Taken before the hands trade sides (MirrorHands), so it holds for the
+// gun in either hand.
+constexpr unsigned long long kHoldSettleMs = 1000, kHoldTakeAnywayMs = 8000;
+constexpr int kHoldStillSolves = 10;
+constexpr float kHoldStillMetres = 0.0015f;
+struct HeldPose
+{
+    unsigned generation = ~0u;
+    uintptr_t skeleton = 0;
+    unsigned long long since = 0;
+    bool taken = false;
+    int still = 0;
+    bool haveLast = false;
+    float lastHand[3] = {}, lastGun[3] = {};
+    std::vector<std::array<float, 16>> camRel[2]; // [arm][handBones entry]: the bone's skin matrix against the camera
+    std::vector<std::array<float, 16>> gunRel;    // the animated left arm's hand bones against the gun bone's
+    bool haveGun = false;                         // the gun, socket and centre below were taken
+    Rigid gunInCamera{};                          // the gun bone's skin matrix against the camera
+    float socket[3] = {}, centre[3] = {};         // IK_Joint_RightHand and the right hand's centre, camera frame
+};
+HeldPose g_held; // guarded by g_skeletonMutex
+
+bool ValidBone(const Skeleton& sk, int bone)
+{
+    return bone >= 0 && bone < sk.boneCount && bone < static_cast<int>(sk.bind.size());
+}
+
+// A bone's joint in the camera frame.
+void JointInCamera(float* bones, const Skeleton& sk, int bone, const Rigid& rigInverse, float out[3])
+{
+    float s[16], p[3];
+    ReadBone(BoneSlot(bones, bone), s);
+    PointThrough(sk.bind[bone].data(), s, p);
+    PointTimes(p, rigInverse, out);
+}
+
+// ApplyArmIk, the game's own pose (before anything moves it): follows the weapon and takes its pose once settled.
+void UpdateHeldPose(float* bones, const Skeleton& sk, const Rigid& rigCamera)
+{
+    HeldPose& h = g_held;
+    const unsigned generation = GetEquippedWeaponGeneration();
+    const unsigned long long now = GetTickCount64();
+    if (generation != h.generation || sk.object != h.skeleton)
+    {
+        h = HeldPose{};
+        h.generation = generation;
+        h.skeleton = sk.object;
+        h.since = now;
+    }
+    if (h.taken || now - h.since < kHoldSettleMs)
+        return;
+    bool magnifier = false;
+    int zoom = 0;
+    if (GetEquippedOpticState(&magnifier, &zoom) && zoom > 0)
+    {
+        h.still = 0; // the ADS pose isn't the one to hold
+        h.haveLast = false;
+        return;
+    }
+    const Rigid rigInverse = Inverse(rigCamera);
+    float centre[3], hand[3], gun[3] = {};
+    if (!HandCentre(bones, sk, sk.arms[1], centre))
+        return;
+    PointTimes(centre, rigInverse, hand);
+    const bool haveGunBone = ValidBone(sk, sk.gunBone);
+    if (haveGunBone)
+        JointInCamera(bones, sk, sk.gunBone, rigInverse, gun);
+    bool still = h.haveLast;
+    for (int k = 0; k < 3 && still; ++k)
+        still = std::fabs(hand[k] - h.lastHand[k]) < kHoldStillMetres && std::fabs(gun[k] - h.lastGun[k]) < kHoldStillMetres;
+    h.still = still ? h.still + 1 : 0;
+    memcpy(h.lastHand, hand, sizeof(hand));
+    memcpy(h.lastGun, gun, sizeof(gun));
+    h.haveLast = true;
+    const bool anyway = now - h.since >= kHoldTakeAnywayMs;
+    if (h.still < kHoldStillSolves && !anyway)
+        return;
+
+    float rigInverse4[16], s[16], m[16];
+    ToMatrix4(rigInverse, rigInverse4);
+    for (int a = 0; a < 2; ++a)
+    {
+        h.camRel[a].clear();
+        for (int b : sk.arms[a].handBones)
+        {
+            ReadBone(BoneSlot(bones, b), s);
+            Mul4(s, rigInverse4, m);
+            std::array<float, 16> entry;
+            memcpy(entry.data(), m, sizeof(m));
+            h.camRel[a].push_back(entry);
+        }
+    }
+    h.gunRel.clear();
+    if (haveGunBone)
+    {
+        float g[16], gInverse4[16], k[16];
+        ReadBone(BoneSlot(bones, sk.gunBone), g);
+        ToMatrix4(Inverse(FromMatrix(g)), gInverse4);
+        for (int b : sk.arms[0].handBones)
+        {
+            ReadBone(BoneSlot(bones, b), s);
+            Mul4(s, gInverse4, m);
+            std::array<float, 16> entry;
+            memcpy(entry.data(), m, sizeof(m));
+            h.gunRel.push_back(entry);
+        }
+        Mul4(g, rigInverse4, k);
+        h.gunInCamera = FromMatrix(k);
+        if (ValidBone(sk, sk.ikHand[1]))
+        {
+            JointInCamera(bones, sk, sk.ikHand[1], rigInverse, h.socket);
+            memcpy(h.centre, hand, sizeof(hand));
+            h.haveGun = true;
+        }
+    }
+    h.taken = true;
+    char key[160] = "", display[64] = "";
+    GetEquippedWeapon(key, sizeof(key), display, sizeof(display));
+    MOHW_LOG(kLogFile,
+             "held pose taken for %s, %.1f s after it came in (%s): %u + %u hand bones, the left hand %s on the gun; socket "
+             "(%.3f, %.3f, %.3f), hand centre (%.3f, %.3f, %.3f) in the camera%s",
+             display[0] ? display : "(unknown weapon)", static_cast<double>(now - h.since) / 1000.0,
+             still ? "still" : "never still for long: taken anyway", static_cast<unsigned>(h.camRel[0].size()),
+             static_cast<unsigned>(h.camRel[1].size()), h.gunRel.empty() ? "not" : "also held", h.socket[0], h.socket[1],
+             h.socket[2], h.centre[0], h.centre[1], h.centre[2], h.haveGun ? "" : " (no gun bone or socket: hands only)");
+}
+
+// Before the arm IK: every hand bone back in the held pose -- against the camera, or the support hand against the gun
+// bone while it rides the gun (supportOnGun).
+void ApplyHeldPose(float* bones, const Skeleton& sk, const Rigid& rigCamera, bool supportOnGun)
+{
+    const HeldPose& h = g_held;
+    if (!GetHoldHandPose() || !h.taken || h.generation != GetEquippedWeaponGeneration())
+        return;
+    float rig4[16], g[16], m[16];
+    ToMatrix4(rigCamera, rig4);
+    const bool onGun = supportOnGun && ValidBone(sk, sk.gunBone) && h.gunRel.size() == sk.arms[0].handBones.size();
+    if (onGun)
+        ReadBone(BoneSlot(bones, sk.gunBone), g);
+    for (int a = 0; a < 2; ++a)
+    {
+        const std::vector<int>& list = sk.arms[a].handBones;
+        const bool gunHeld = a == 0 && onGun;
+        const std::vector<std::array<float, 16>>& held = gunHeld ? h.gunRel : h.camRel[a];
+        if (held.size() != list.size())
+            continue;
+        for (size_t i = 0; i < list.size(); ++i)
+        {
+            Mul4(held[i].data(), gunHeld ? g : rig4, m);
+            WriteBone(BoneSlot(bones, list[i]), m);
+        }
+    }
+}
+
+} // namespace
+
+bool GetHeldGunPose(float socket[3], float centre[3], Rigid* gunInCamera)
+{
+    if (!GetHoldHandPose())
+        return false;
+    std::lock_guard<std::mutex> lock(g_skeletonMutex);
+    const HeldPose& h = g_held;
+    if (!h.taken || !h.haveGun || h.generation != GetEquippedWeaponGeneration())
+        return false;
+    memcpy(socket, h.socket, sizeof(h.socket));
+    memcpy(centre, h.centre, sizeof(h.centre));
+    *gunInCamera = h.gunInCamera;
+    return true;
+}
+
 bool ApplyArmIk(const unsigned char* batch, const Rigid& cam, const Rigid& rigCamera, const Rigid& drawn, const Rigid& gun,
                 const Rigid& weaponHand, const Rigid& offHand, bool haveOffHand, bool twoHanded, bool gunInLeftHand)
 {
@@ -1780,6 +1979,10 @@ bool ApplyArmIk(const unsigned char* batch, const Rigid& cam, const Rigid& rigCa
     if (IkAlreadyWritten(bones, BoneSlot(bones, sk.arms[1].hand)))
         return true;
     LogWeaponSockets(bones, sk, rigCamera); // the game's own pose, before anything below moves it
+    // HELD POSE: taken from the game's own pose once the weapon settles, then the hands put back in it (before the hands
+    // trade sides for the gun in the left hand). The support hand rides the gun when the off hand does (below).
+    UpdateHeldPose(bones, sk, rigCamera);
+    ApplyHeldPose(bones, sk, rigCamera, twoHanded || !haveOffHand);
 
     // A point P of this batch shows at P * drawn^-1 * cam; to show it at P * G it has to hold P * G * cam^-1 * drawn.
     const Rigid rigInverse = Inverse(rigCamera);

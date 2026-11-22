@@ -5,15 +5,18 @@
 //
 //   In the gun -> off-hand grip in the grab box -> on the path, the hand stuck to the magazine where it grabbed
 //   On the path, coming out: nothing moves until the magazine release is pressed (the platform's needsRelease; the
-//     SteamVR action "Magazine release", only while a magazine is gripped), then the controller pulls it along the
-//     platform's path (straight down an AR's magwell, an AK rocked forward on its front lug): it moves once the pull
-//     passes the platform's pull force, follows that far behind, and at the end of the path it's free -> held
-//   Held (it follows the hand, at the platform's in-hand offset; firing stops) -> grip released -> out: it waits at
-//     the pouch (a holster-style zone on the chest)
-//   Out -> off-hand grip in the pouch -> held, now a new magazine
-//   Held, its insertion point (the in-hand Wep_Mag point) near the path's far end -> it turns onto the path, then
-//     engages: on the path, going in, the hand stuck to it; pushing it along the path to the seat seats it -> in the gun
-// The hand comes back to its controller when the magazine leaves or seats, or when the controller gets more than
+//     SteamVR action "Magazine release", only while a magazine is gripped), then the controller pulls it straight down
+//     the magwell: it moves once the pull passes the platform's pull force, follows that far behind, and at the end of
+//     the path it's free -> held, staying where the hand had it
+//   Held (it follows the hand at the offset it was grabbed with; firing stops) -> grip released -> out: it waits at
+//     the pouch (a holster-style zone on the chest), turned by the pouch rotation
+//   Out -> off-hand grip in the pouch -> held, now a new magazine, kept where it sat relative to the hand
+//   Held, after it's been away from the gun, its insertion point (its Wep_Mag point) within the weapon profile's lock
+//     range of the seat and up to "seats within" below it -> in the gun. The drawing turns it onto the magwell's line
+//     from the profile's range and holds it on the line inside the lock range. (2026-11-18: going in is back to the
+//     first version, the user's "very smooth" one -- no path, no push against a pull force; the AK's hinge and the
+//     per-platform in-hand offsets are gone.)
+// The hand comes back to its controller when the magazine leaves the path, or when the controller gets more than
 // MagazineGripBreak from it (the grip lets go).
 //
 // A new magazine seating presses the game's own Reload and takes no time (its reload states 0xB / 0xC wait on a time
@@ -47,6 +50,8 @@ struct MagazineView
     // in the magazine's own frame, so it's at handInMag * PathDisplacement(s) in gun-local.
     float s = 0.0f;
     Rigid handInMag = RigidIdentity();
+    // Held: the magazine in the off hand, mag-local -> that controller's frame (the offset it was grabbed with).
+    Rigid magInHand = RigidIdentity();
     // A change that leaves the hand or the magazine somewhere else (it left the path, seated, the grip let go): both
     // glide from where they were, gun-local, over kMagazineBlendMs from blendStartMs.
     unsigned long long blendStartMs = 0;
@@ -79,7 +84,7 @@ void ManualReloadGripReleased(const HandInput& weapon, const HandInput& off);
 int GetMagazineGripHand();
 void SetMagazineReleaseInput(bool down);
 // The magazine's setup in tracking space, for the grab zone view. False while manual reload isn't running. inBox: the off
-// hand is in the grab box; handDistance: from the held magazine's insertion point to the path's far end (entry).
+// hand is in the grab box; handDistance: from the held magazine's insertion point to the seat; entry: the path's far end.
 struct MagazineDebug
 {
     Vec3 seat, aim, boxCentre, axes[3];

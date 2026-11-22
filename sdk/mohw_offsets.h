@@ -29,9 +29,54 @@
 // MOHWD.exe (in the game subfolder), the driving missions. Its hook addresses are hardcoded for this build
 // (hooks/driving_camera_hook.cpp, hooks/marker_projection_hook.cpp).
 #define MOHWD_SIZE 0x251B000u
+// MOHWD.exe'S VIEW LIST (2026-11-18, Ghidra project MOHWD, MOHWD_dump_fixed.exe), for the engine two-view stereo
+// (hooks/native_stereo.cpp). Static addresses (image base 0x400000), not OFFSET_* (g_baseDelta is MOHW.exe's).
+// The builder, FUN_0092c280: the same job and signature as MOHW.exe's FUN_00A6BDC0 -- __thiscall (ECX = the module, MOV
+// ECX,EBX at the one call 0x0092EC41 in FUN_0092ebc0), 3 stack args (view params, uint32* count, the view array), RET 0xC
+// at 0x0092CA26. Prologue 55 8B EC 83 E4 F0 81 EC D4 0E 00 00. The array is a stack buffer of the caller's with room
+// for two views (FUN_0092ebc0's local_23f0).
+#define MOHWD_VIEW_LIST_BUILD 0x0092C280u
+// The GameRenderer singleton pointer (DAT_02781840, vtable 0238B430); getSettings (vtable +0x3C, 0x00924360) is MOV
+// EAX,[ECX+0x10]; the builder takes min(settings +0x30, 2) views when it's over 1 (MOHW.exe: +0x44, its
+// SplitScreenTestViewCount), the second one in the right half.
+#define MOHWD_GAMERENDERER 0x02781840u
+#define MOHWD_GAMERENDERER_VTABLE 0x0238B430u
+#define MOHWD_GAMERENDERER_SETTINGS 0x10u
+#define MOHWD_GAMERENDERSETTINGS_VIEWCOUNT 0x30u
+// One view: 0x11F0 bytes (MOHW.exe 0xE80). +0x04 name, +0x10 viewport x/y/w/h (uint16 each), +0x18 depth range, +0x20
+// stereo eye, +0x30 the RenderView (0x4A0 bytes, 0x128 dwords), +0x4D0 a copy of it. +0x970 would be the previous
+// frame's RenderView (the builder reads +0x9A0 against +0x60 for a dead camera-cut test) but nothing writes it: the
+// array is on the caller's stack, so it is left alone. +0x1160: 16 floats from the view params +0x9D0, in the place of
+// MOHW.exe's raw camera (+0xE00, from params +0xDC0: both sit between the byte flag (+0x1152 / +0xDF0) and the depth
+// range pair (+0x11B0 / +0xE50)); unconfirmed, so only used while its position is the view's own (native_stereo.cpp).
+#define MOHWD_VIEWDESC_SIZE 0x11F0u
+#define MOHWD_VIEWDESC_VIEWPORT 0x10u
+#define MOHWD_VIEWDESC_RENDERVIEW 0x30u
+#define MOHWD_VIEWDESC_RENDERVIEW_COPY 0x4D0u
+#define MOHWD_VIEWDESC_RAW_CAMERA 0x1160u
+// MOHWD.exe's RenderView: four more floats after far (+0x54) than MOHW.exe's, so +0x10 on everything from the aspect
+// on -- the builder's own stereo eyes write separation +0x74 / convergence +0x78 and OR 9 into the dirty flags +0xA0
+// (MOHW.exe +0x64 / +0x68 / +0x90); hooks/driving_camera_hook.cpp found aspect 0x1A and viewport offset 0x1F (floats)
+// the same way. fovY +0x48 as in MOHW.exe.
+#define MOHWD_RENDERVIEW_ASPECT 0x68u
+#define MOHWD_RENDERVIEW_VIEWPORTOFFSET 0x7Cu
+#define MOHWD_RENDERVIEW_DIRTY 0xA0u
+// MOHWD.exe's ClientSettings (2026-11-22): the cached pointer DAT_02649D20 (type info 02837888, named "ClientSettings")
+// and UseGlobalGamePadInput (field record 0289466C: +0x9F). See OFFSET_CLIENTSETTINGS for what the field does; here the
+// gamepad poll tests it at 009AD608, its GetFocus is import 0280A118.
+#define MOHWD_CLIENTSETTINGS 0x02649D20u
+#define MOHWD_CLIENTSETTINGS_USEGLOBALGAMEPADINPUT 0x9Fu
 
 // --- Confirmed for this build ---
 #define OFFSET_MAIN 0x2A4D480u
+// THE GAMEPAD NEEDS WINDOW FOCUS (2026-11-22, Ghidra, from a player's logs: controllers dead until the window was
+// clicked). The input tick FUN_008E03C0 polls the gamepad (FUN_008DD220 -> XInputGetState) only while
+//   ClientSettings.UseGlobalGamePadInput (+0xB9) || GetFocus() (import 02B4D074)
+// so a game window without keyboard focus reads no pad at all. The byte's only other readers: the rumble setter
+// (0x008E0791, the same test) and the DirectInput joystick scan at startup (0x008EA7D2, background or foreground
+// cooperative level). The pointer is the game's cached ClientSettings (type info 02B7C34C), 0 until first used.
+#define OFFSET_CLIENTSETTINGS 0x2A4D4A4u
+#define CLIENTSETTINGS_USEGLOBALGAMEPADINPUT 0xB9u
 #define OFFSET_GAMECONTEXT 0x2AC5FE4u
 #define OFFSET_CLIENTGAMECONTEXT 0x2AC5FE4u // generator dump gives the same address for both -- unconfirmed whether that's intentional or a generator quirk
 #define OFFSET_DXRENDERER 0x2AC1E20u
@@ -191,10 +236,46 @@
 // +0x44), 1 stack arg (the list, 0 or 1), RET 4. FUN_00CBE3D0 calls it once, or with the engine's stereo on once per eye
 // (a stencil clear, then this, per eye).
 #define OFFSET_UI_LIST_REPLAY 0xCBB4E0u
+// THE BOAT SEATS (2026-11-22, Ghidra; hooks/boat_seat.h, docs/boat_sequence.md). Field offsets, all read, never called:
+//   ClientGameContext +0x10 the ClientLevel, whose +0x68 is the level's name (FUN_0092fc50 copies that string)
+//   an entity: +0x08 flags (bit 20: its transform is in a collection), +0x14 its data (vtable +0x1C returns it), +0x1C
+//     the transform, or the collection (then +0x10 + u8[+6] * 0x50; FUN_00908630, FUN_00851960)
+//   a controllable: +0x7C its entry components' vector, indexed by the player's entry id (FUN_00903c40)
+//   a component: +0x04 its data (vtable +0x1C returns it)
+//   VehicleEntityData +0x114 ControllableType (CString), PlayerEntryComponentData +0xB8 EntryOrderNumber (both from the
+//     game's own reflection records)
+//   the view params' raw camera at +0xDC0, the source of VIEWDESC_VIEWMODEL_CAMERA
+#define CLIENTGAMECONTEXT_LEVEL 0x10u
+#define CLIENTLEVEL_NAME 0x68u
+#define ENTITY_FLAGS 0x08u
+#define ENTITY_DATA 0x14u
+#define ENTITY_TRANSFORM 0x1Cu
+#define CONTROLLABLE_ENTRIES 0x7Cu
+#define COMPONENT_DATA 0x04u
+#define VEHICLEDATA_CONTROLLABLETYPE 0x114u
+#define ENTRYDATA_ORDERNUMBER 0xB8u
+#define VIEWPARAMS_RAW_CAMERA 0xDC0u
 // The UI's screen rectangle (2026-11-12): __thiscall(Scaleform state, int out[4] = x1 y1 x2 y2), RET 4. DxRenderer
 // +0x1A0 (u16 x y w h, the screen) inside the safe area (state +0x2344/+0x2348, the ScreenSafeAreaWidth/Height options).
 // Every UI movie's viewport comes from it (FUN_008fcfd0 -> FUN_008f4c70, FUN_00a75220). hooks/ui_pass.cpp.
 #define OFFSET_UI_LAYOUT_RECT 0xCB7480u
+// The state's "lay out again" byte (2026-11-22): FUN_008fcfd0 re-lays the UI out when the rectangle changed or this is
+// set, and clears it (0x008FD048 / 0x008FD05C).
+#define UI_STATE_RELAYOUT 0x234Cu
+// The UI movie wrapper's SetViewport (2026-11-22; vtable 027F63C4 +0x10): __thiscall(x, y, w, h), RET 0x10, the GFx movie
+// at +0xC. It gives GFx the backbuffer as the buffer size, and by w x h: under 1920x1080 scale mode 1 (show all), else
+// 0 (no scale) with the viewport's scale at 2/3 (DAT_02758850). The renderer's BeginDisplay (FUN_00cc5610) clips a
+// viewport to that buffer, so a rectangle larger than the screen loses its right and bottom.
+#define OFFSET_UI_MOVIE_SET_VIEWPORT 0xCBEA10u
+#define UI_MOVIE_GFX 0xCu
+// The GFx movie's own (vtable 028C5170 +0x64 and +0x6C): SetViewport(const viewport*), which copies the 13 dwords to
+// +0x40 (buffer w h, left, top, w, h, scissor x4, scale, aspect, flags), and SetViewScaleMode(mode). With mode 0 the
+// visible stage is w * scale by h * scale (FUN_01606ba0).
+#define OFFSET_GFX_SET_VIEWPORT 0x16126B0u
+#define OFFSET_GFX_SET_SCALE_MODE 0x1602CD0u
+#define GFX_VTABLE_SET_VIEWPORT 0x64u
+#define GFX_VTABLE_SET_SCALE_MODE 0x6Cu
+#define GFX_MOVIE_VIEWPORT 0x40u
 // The client world module's constructor (2026-11-12): run once per level load (from FUN_0086ce00), it builds the
 // level's world renderer and its targets. __thiscall, 4 stack args, RET 0x10; prologue PUSH EBP / MOV EBP,ESP /
 // AND ESP,-16. hooks/native_stereo.cpp records the render mode each level was built with.

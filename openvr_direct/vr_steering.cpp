@@ -2,8 +2,11 @@
 
 #include "vr_overlay.h"
 #include "../hooks/aiming_controller_hook.h"
+#include "../hooks/boat_seat.h"
 #include "../hooks/driving_camera_hook.h"
+#include "../hooks/input_restriction.h"
 #include "../sdk/logging.h"
+#include "../sdk/mohw_offsets.h"
 #include "../sdk/settings.h"
 
 #include <windows.h>
@@ -65,7 +68,10 @@ Vec3 MakeVec(float x, float y, float z)
 WheelFrame ComputeFrame()
 {
     float forwardM = 0.0f, downM = 0.0f, rightM = 0.0f, tiltDeg = 0.0f;
-    GetDrivingWheelPlacement(&forwardM, &downM, &rightM, &tiltDeg);
+    if (g_drivingExe)
+        GetDrivingWheelPlacement(&forwardM, &downM, &rightM, &tiltDeg);
+    else
+        GetBoatWheelPlacement(&forwardM, &downM, &rightM, &tiltDeg); // the Zodiac Sequence's own
     float s = sinf(g_ref.yaw), c = cosf(g_ref.yaw);
     Vec3 forward = MakeVec(-s, 0.0f, -c); // the heading's (0,0,-1)
     Vec3 right = MakeVec(c, 0.0f, -s);
@@ -113,7 +119,7 @@ void UpdateSteering(const HandInput hands[2], bool haveHead, const float headPos
                   headPos[1], headPos[2], g_ref.yaw / kDegToRad, frame.centre.x, frame.centre.y, frame.centre.z);
     }
 
-    bool enabled = GetDrivingSteeringWheel() && g_ref.valid;
+    bool enabled = (g_drivingExe ? GetDrivingSteeringWheel() : GetBoatWheel()) && g_ref.valid;
     WheelFrame frame{};
     if (enabled)
         frame = ComputeFrame(); // every update: the placement settings move the wheel live
@@ -166,7 +172,7 @@ void UpdateSteering(const HandInput hands[2], bool haveHead, const float headPos
     }
 
     // Full lock is a hard stop: turning on past it doesn't wind up a turn that has to be undone first.
-    float lock = GetDrivingWheelLockDeg() * kDegToRad;
+    float lock = (g_drivingExe ? GetDrivingWheelLockDeg() : GetBoatWheelLockDeg()) * kDegToRad;
     if (!(lock > 0.1f))
         lock = 90.0f * kDegToRad;
     if (fabsf(g_wheel) > lock)
@@ -184,8 +190,12 @@ void UpdateSteering(const HandInput hands[2], bool haveHead, const float headPos
 
     // Drawn while driving in stereo -- not over the menu (paused) or a loading screen / movie (the floating screen).
     float radius = 0.0f, thickness = 0.0f, opacity = 0.0f;
-    GetDrivingWheelLook(&radius, &thickness, &opacity);
-    bool drawn = enabled && DrivingStereoActive() && !DrivingSimulationPaused();
+    if (g_drivingExe)
+        GetDrivingWheelLook(&radius, &thickness, &opacity);
+    else
+        GetBoatWheelLook(&radius, &thickness, &opacity);
+    bool drawn = enabled && (g_drivingExe ? DrivingStereoActive() && !DrivingSimulationPaused()
+                                          : !IsBoatPaused() && !IsLookRestricted());
     UpdateWheelOverlay(drawn, frame.centre, frame.right, frame.up, g_wheel, radius, thickness, opacity);
 
     static unsigned long long nextLogMs = 0;
@@ -196,6 +206,21 @@ void UpdateSteering(const HandInput hands[2], bool haveHead, const float headPos
         MOHW_LOG(kLogFile, "wheel %.1f deg (stick %.2f), hands on it: left %d right %d", g_wheel / kDegToRad,
                   g_wheel / lock, contributing[kLeftHand] ? 1 : 0, contributing[kRightHand] ? 1 : 0);
     }
+}
+
+void StopSteering()
+{
+    g_ref.valid = false;
+    for (int h = 0; h < 2; ++h)
+    {
+        g_hands[h] = HandOnWheel{};
+        g_contributing[h] = false;
+    }
+    g_wheel = 0.0f;
+    g_anchorWheel = 0.0f;
+    g_active.store(false, std::memory_order_relaxed);
+    const Vec3 none = MakeVec(0.0f, 0.0f, 0.0f);
+    UpdateWheelOverlay(false, none, MakeVec(1.0f, 0.0f, 0.0f), MakeVec(0.0f, 1.0f, 0.0f), 0.0f, 0.0f, 0.0f, 0.0f);
 }
 
 bool GetSteeringWheelStick(float* x)

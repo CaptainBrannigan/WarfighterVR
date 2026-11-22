@@ -5,9 +5,11 @@
 #include "vr_reload.h"
 #include "../sdk/logging.h"
 #include "../sdk/settings.h"
+#include "../hooks/weapon_identity.h"
 
 #include <windows.h>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -325,6 +327,32 @@ bool OnBarrel(const HandInput& weapon, const HandInput& off, float* outAlong, fl
     return along >= 0.05f && along <= GetTwoHandReach() && perpDist <= GetTwoHandGrabRadius();
 }
 
+// PISTOLS (2026-11-21, the user: "For pistols, the secondary grip needs to ignore the second hand, just attach the ik and
+// use the main hand aim (no including mp7)"). A pistol held in both hands still aims with the weapon hand alone; the off
+// hand only goes onto the gun (the arm IK's two-handed hold). Told by the gun's blueprint path ("/PISTOL/"), not its
+// slot: the MP7 sits in the sidearm slot in some levels and keeps the two-handed aim.
+bool EquippedIsPistol()
+{
+    char key[160] = "";
+    if (!GetEquippedWeapon(key, sizeof(key), nullptr, 0))
+        return false;
+    for (char* c = key; *c; ++c)
+        *c = static_cast<char>(tolower(static_cast<unsigned char>(*c)));
+    return strstr(key, "/pistol/") != nullptr;
+}
+
+// Whether the off hand is on the gun: on the barrel line (OnBarrel); for a pistol also anywhere within TwoHandGrabRadius
+// of the weapon hand, since a pistol's support hand cups the grip rather than reaching along a barrel.
+bool OnGun(const HandInput& weapon, const HandInput& off, bool pistol, float* outAlong, float* outPerp)
+{
+    if (OnBarrel(weapon, off, outAlong, outPerp))
+        return true;
+    if (!pistol)
+        return false;
+    const Vec3 d = VecSub(OffHandPoint(off), Column(weapon.pose, 3));
+    return sqrtf(VecDot(d, d)) <= GetTwoHandGrabRadius();
+}
+
 // The weapon hand's orientation aimed at the off hand, keeping the weapon hand's up (so twisting it still rolls the
 // gun). False if the hands are too close to give a direction.
 // The gun's frame for a forward direction, keeping the weapon hand's up: right, up, back (unit). False if degenerate.
@@ -361,11 +389,13 @@ bool AimAtOffHand(const HandInput& weapon, const HandInput& off, Quat* out)
     // SECONDARY GRIP OFFSET (per weapon, 2026-10-15): the off hand rarely sits on the barrel line (a vertical foregrip
     // holds it below, a handguard grip beside), which tilted the aim. Aim at its point moved by the offset in the gun's
     // frame instead, then rebuild the frame for that line.
-    float offsetRight = 0.0f, offsetUp = 0.0f;
-    GetSecondaryGripOffset(&offsetRight, &offsetUp);
-    if (offsetRight != 0.0f || offsetUp != 0.0f)
+    // Forward (2026-11-21): along the barrel, back being the gun's -forward.
+    float offsetRight = 0.0f, offsetUp = 0.0f, offsetForward = 0.0f;
+    GetSecondaryGripOffset(&offsetRight, &offsetUp, &offsetForward);
+    if (offsetRight != 0.0f || offsetUp != 0.0f || offsetForward != 0.0f)
     {
         Vec3 anchor = VecAdd(offPoint, VecAdd(VecScale(rightAxis, offsetRight), VecScale(up, offsetUp)));
+        anchor = VecAdd(anchor, VecScale(back, -offsetForward));
         forward = VecSub(anchor, weaponPos);
         if (sqrtf(VecDot(forward, forward)) < 0.08f || !Normalize(&forward) ||
             !GunFrame(forward, weapon, &rightAxis, &up, &back))
@@ -474,10 +504,10 @@ void PublishGrabZones(const HandInput hands[2], bool haveHead, const float headP
                          VecScale(mag.axes[axis], sign), mag.boxHalf[a] * 2.0f, mag.boxHalf[b] * 2.0f, mag.inBox);
             }
         }
-        // A held magazine engages at the path's far end (vr_reload.h): the ranges are around that, lit by its
-        // insertion point (the in-hand Wep_Mag point).
-        SetPoint(shapes[kDebugTurnRange], mag.entry, mag.range * 2.0f, mag.handDistance <= mag.range);
-        SetPoint(shapes[kDebugLockRange], mag.entry, mag.lockRange * 2.0f, mag.handDistance <= mag.lockRange);
+        // A held magazine is judged at the seat again (2026-11-18, vr_reload.h): the ranges are around the seat, lit by
+        // its insertion point (its Wep_Mag point, where the grab put it in the hand).
+        SetPoint(shapes[kDebugTurnRange], mag.seat, mag.range * 2.0f, mag.handDistance <= mag.range);
+        SetPoint(shapes[kDebugLockRange], mag.seat, mag.lockRange * 2.0f, mag.handDistance <= mag.lockRange);
         SetPoint(shapes[kDebugSeat], mag.seat, 0.02f, false);
         SetPoint(shapes[kDebugAimPoint], mag.aim, 0.02f, false);
     }
@@ -515,6 +545,14 @@ bool g_haveLastLeftHanded = false;
 int g_grabbedBy = -1; // hand that took the weapon from a holster, for HolsterHoldToKeep
 bool g_twoHanded = false;
 bool g_prevGrip[2] = {false, false};
+// RE-GRIP (2026-11-21, the user: "I'm always holding left grip, could it be retriggering the grip button on release of
+// your double tap hold and my hand is near my chest?" -- grenades thrown after a left thumbrest double tap). The grip is
+// analog: down past 70 % pull, up under 55 % (30 % / 10 % since, vr_input.cpp). A held grip that dips under that for an instant -- the hand easing off as
+// the thumb taps the rest -- came back as a fresh press, and a fresh press outside the barrel line fires the holster
+// zone the hand is in: the chest's is the grenade. A press within kRegripMs of the same hand's release is the same hold
+// for the holsters and the weapon grip toggle (the two-handed grab and the magazine still take it).
+constexpr unsigned long long kRegripMs = 300;
+unsigned long long g_gripReleasedAt[2] = {0, 0};
 bool g_offGripIsTwoHand = false; // the off hand's current grip press is (or may become) a two-handed grip
 bool g_weaponGripToggled = false; // HandsResult::weaponGripped when not HolsterHoldToKeep
 std::atomic<bool> g_weaponHandLeft{false};
@@ -551,6 +589,13 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
         bool released = !hands[h].grip && g_prevGrip[h];
         g_prevGrip[h] = hands[h].grip;
         int off = 1 - g_weaponHand;
+        const unsigned long long nowMs = GetTickCount64();
+        const bool regrip = pressed && g_gripReleasedAt[h] != 0 && nowMs - g_gripReleasedAt[h] < kRegripMs;
+        if (released)
+            g_gripReleasedAt[h] = nowMs;
+        if (regrip)
+            MOHW_LOG(kLogFile, "%s hand grip back within %llu ms of its release: the same hold, no holster action",
+                     HandName(h), nowMs - g_gripReleasedAt[h]);
 
         // The magazine comes first: its grab is close to the gun, where the two-handed grab would also take the grip.
         if (pressed && h == off && ManualReloadGripPressed(hands[g_weaponHand], hands[h], pouchCentre, haveHead))
@@ -558,14 +603,20 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
         if (pressed && hands[h].tracked)
         {
             float along = 0.0f, perp = 0.0f;
-            if (h == off && hands[g_weaponHand].tracked && OnBarrel(hands[g_weaponHand], hands[h], &along, &perp))
+            if (h == off && hands[g_weaponHand].tracked &&
+                OnGun(hands[g_weaponHand], hands[h], EquippedIsPistol(), &along, &perp))
             {
                 g_offGripIsTwoHand = true; // engaged below
             }
             else
             {
-                const Zone* zone = haveHead ? FindZone(Column(hands[h].pose, 3), headPos) : nullptr;
-                if (zone)
+                const Zone* zone = haveHead && !regrip ? FindZone(Column(hands[h].pose, 3), headPos) : nullptr;
+                if (regrip)
+                {
+                    if (h == off)
+                        g_offGripIsTwoHand = true; // still the hold it was: sliding onto the barrel engages, as before
+                }
+                else if (zone)
                 {
                     std::string action = GetHolsterAction(zone->zone);
                     int dik = ScancodeForAction(action);
@@ -629,26 +680,29 @@ void UpdateHands(const HandInput hands[2], bool haveHead, const float headPos[3]
     }
 
     int off = 1 - g_weaponHand;
+    const bool pistol = EquippedIsPistol();
     if (g_offGripIsTwoHand && hands[off].grip && !g_twoHanded && hands[off].tracked && hands[g_weaponHand].tracked)
     {
         float along = 0.0f, perp = 0.0f;
-        if (OnBarrel(hands[g_weaponHand], hands[off], &along, &perp))
+        if (OnGun(hands[g_weaponHand], hands[off], pistol, &along, &perp))
         {
             g_twoHanded = true;
-            MOHW_LOG(kLogFile, "two-handed aim ON (%s hand on the weapon)", HandName(off));
+            MOHW_LOG(kLogFile, "two-handed %s (%s hand on the weapon)",
+                     pistol ? "hold ON: a pistol, so the aim stays the weapon hand's" : "aim ON", HandName(off));
         }
     }
     if (g_twoHanded && (!hands[off].tracked || !hands[g_weaponHand].tracked))
         g_twoHanded = false;
 
     out->weaponHand = g_weaponHand;
-    out->twoHanded = g_twoHanded && AimAtOffHand(hands[g_weaponHand], hands[off], &out->weaponOrientation);
+    // A pistol (PISTOLS): the off hand is on the gun (g_weaponTwoHanded below) but the aim stays the weapon hand's.
+    out->twoHanded = g_twoHanded && !pistol && AimAtOffHand(hands[g_weaponHand], hands[off], &out->weaponOrientation);
     UpdateManualReload(hands, g_weaponHand, haveHead, headPos, pouchCentre, bodyRight, g_bodyForward);
     out->fire = hands[g_weaponHand].trigger && !ManualReloadBlocksFire();
     out->ads = hands[off].trigger;
     out->weaponGripped = GetHolsterHoldToKeep() ? hands[g_weaponHand].grip : g_weaponGripToggled;
     g_weaponHandLeft.store(g_weaponHand == kLeftHand, std::memory_order_relaxed);
-    g_weaponTwoHanded.store(out->twoHanded, std::memory_order_relaxed);
+    g_weaponTwoHanded.store(out->twoHanded || (g_twoHanded && pistol), std::memory_order_relaxed);
     PublishGrabZones(hands, haveHead, headPos, g_weaponHand);
 }
 

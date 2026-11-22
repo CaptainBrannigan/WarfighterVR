@@ -36,4 +36,13 @@ bool DrivingSimulationPaused();
 // one of the presented eye (diagnosing flicker between stereo and a double image).
 void DrivingStereoOnPresent(bool presentedRightEye);
 
+// CUTSCENES (2026-11-21, the user: the cutscene at the end of the driving level "tries to remain in eyes"). It renders
+// through a normal 3D camera, so it was taken for play. What sets it apart, live (mohwvr_driving_present.log
+// 08:46:18): the game presents its cutscenes and loading screens with vsync (syncInterval 1, 30 fps) and play with
+// syncInterval 0. So a frame presented with a higher sync interval than the lowest seen in 3D play is a cutscene: no
+// head look, and the whole-frame floating screen like the rest of the game's cutscenes. With the game's own vsync on,
+// play and cutscenes present alike and nothing changes. Present hook, every frame (driving executable only).
+void DrivingNotePresentSync(unsigned syncInterval);
+bool DrivingCutsceneNow();
+
 } // namespace mohw

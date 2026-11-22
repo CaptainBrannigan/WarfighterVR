@@ -3,8 +3,9 @@
 #include "aiming_controller_hook.h"
 #include "alternating_eye.h"
 #include "companion_bridge.h"
+#include "laser_raycast.h"
 #include "render_pose_stamp.h"
-#include "../openvr_direct/vr_input.h"
+#include "weapon_identity.h"
 #include "../sdk/logging.h"
 #include "../sdk/settings.h"
 #include "../sdk/vr_math.h"
@@ -22,21 +23,18 @@ constexpr const char* kLogFile = "mohwvr_scope.log";
 constexpr float kMaxFovYRad = 3.05f;
 constexpr unsigned long long kRecentMs = 200; // the mask and the hidden eye only count from a frame this recent
 
-// The game's hip FOV: its view FOV while ADS isn't held, eased (it animates in and out of ADS).
-float g_hipFovY = 0.0f; // game thread
-
 std::mutex g_maskMutex;
 struct Mask
 {
     int eye = -1;
     float cx = 0.5f, cy = 0.5f, rx = 0.1f, ry = 0.1f;
     bool reticle = false;
+    float reticleX = 0.5f, reticleY = 0.5f; // the impact point, fractions of the half
     unsigned long long ms = 0;
 };
 Mask g_mask; // guarded by g_maskMutex
 std::atomic<int> g_hiddenEye{-1};
 std::atomic<unsigned long long> g_hiddenEyeMs{0};
-std::atomic<unsigned long long> g_gameReticleMs{0}; // NoteScopeGameReticle
 
 Vec3 V(float x, float y, float z)
 {
@@ -116,13 +114,17 @@ void ClearLens()
     g_lens[0].on = g_lens[1].on = false;
 }
 
-// Each eye but the scoped one: the lens disc (ScopeLensRadius, ScopeLensForward ahead of the hand on the sight line) in
-// its view, filled from the other eye's half around the sight line's vanishing point (x0, y0), angles divided by the
-// magnification. Both eyes share the head's axes, so (x0, y0) is the same tangent in both.
-//   this half: tangent x = tL + u (tR - tL), y = tU - v (tU - tD); source tangent = (x0, y0) + (x - lx, y - ly) / m
+// Each eye but the scoped one: the lens disc (ScopeLensRadius at lensPos: the gun profile's lens offset from the optic
+// zero) in its view, filled from the other eye's half around the laser's point as that eye sees it (x0, y0), angles
+// divided by the magnification, anchored where THIS eye sees the laser's point (ax, ay; holographic, 2026-11-17).
+//   this half: tangent x = tL + u (tR - tL), y = tU - v (tU - tD); source tangent = (x0, y0) + (x - ax, y - ay) / m
 //   source frame uv: u = ((xs - tLs) / (tRs - tLs) + src) / 2, v = (tUs - ys) / (tUs - tDs)
-void UpdateLensPictures(const ScopeSettings& s, const Quat& headQ, const Vec3& headP, float scale, const Vec3& origin,
-                        const Vec3& forward, float m, const float eyeTan[2][4], int scopedEye)
+// CENTRED ON THE LASER (2026-11-17, the user: the picture "was also not accurate to where the laser aim pointed"): the
+// laser's point is where the shots land (hooks/laser_raycast.h GetLaserAimPoint), so the picture's centre shows it, from
+// the source eye's own position (no parallax at any range). Without the laser running: the sight line's vanishing point,
+// the same tangent in both eyes (they share the head's axes). centre = the head-centre camera the views are built from.
+void UpdateLensPictures(const ScopeSettings& s, const Quat& headQ, const Vec3& headP, float scale, const Vec3& lensPos,
+                        const Vec3& forward, float m, const float eyeTan[2][4], int scopedEye, const float centre[16])
 {
     ScopeLensPicture pictures[2];
     const Quat inv = QuatConjugate(headQ);
@@ -130,8 +132,24 @@ void UpdateLensPictures(const ScopeSettings& s, const Quat& headQ, const Vec3& h
     // Not while an eye looks through the scope: its half is the scope's magnified view then, not a source for the other.
     if (s.lensPicture && scopedEye < 0 && dirInEye.z < -0.2f && m >= 1.0f)
     {
-        const float x0 = dirInEye.x / -dirInEye.z, y0 = dirInEye.y / -dirInEye.z;
-        const Vec3 lensPos = VecAdd(origin, VecScale(forward, s.lensForward));
+        float sourceX[2], sourceY[2]; // the picture's centre in each eye's view, as a tangent
+        sourceX[0] = sourceX[1] = dirInEye.x / -dirInEye.z;
+        sourceY[0] = sourceY[1] = dirInEye.y / -dirInEye.z;
+        float aim[3];
+        if (GetLaserAimPoint(aim))
+        {
+            // Into the head-centre camera's frame (rows right / up / back), then each eye is its offset along the right.
+            const float d[3] = {aim[0] - centre[12], aim[1] - centre[13], aim[2] - centre[14]};
+            const float right = d[0] * centre[0] + d[1] * centre[1] + d[2] * centre[2];
+            const float up = d[0] * centre[4] + d[1] * centre[5] + d[2] * centre[6];
+            const float back = d[0] * centre[8] + d[1] * centre[9] + d[2] * centre[10];
+            if (back < -0.05f)
+                for (int e = 0; e < 2; ++e)
+                {
+                    sourceX[e] = (right - GetEyeOffsetAlongRow0(e == 1)) / -back;
+                    sourceY[e] = up / -back;
+                }
+        }
         for (int e = 0; e < 2; ++e)
         {
             const int src = 1 - e;
@@ -146,21 +164,29 @@ void UpdateLensPictures(const ScopeSettings& s, const Quat& headQ, const Vec3& h
             if (!(tRd - tLd > 0.05f && tUd - tDd > 0.05f && tRs - tLs > 0.05f && tUs - tDs > 0.05f))
                 continue;
             ScopeLensPicture& pic = pictures[e];
+            // HOLOGRAPHIC (2026-11-17): magnified about the laser's point where THIS eye sees it (ax, ay), not about the
+            // lens's centre (lx, ly): source tangent = (x0, y0) + (x - ax, y - ay) / m.
+            const float x0 = sourceX[src], y0 = sourceY[src];
+            const float ax = sourceX[e], ay = sourceY[e];
             pic.map[0] = 0.5f * (tRd - tLd) / (m * (tRs - tLs));
-            pic.map[2] = 0.5f * ((x0 + (tLd - lx) / m - tLs) / (tRs - tLs) + static_cast<float>(src));
+            pic.map[2] = 0.5f * ((x0 + (tLd - ax) / m - tLs) / (tRs - tLs) + static_cast<float>(src));
             pic.map[1] = (tUd - tDd) / (m * (tUs - tDs));
-            pic.map[3] = (tUs - y0 - (tUd - ly) / m) / (tUs - tDs);
+            pic.map[3] = (tUs - y0 - (tUd - ay) / m) / (tUs - tDs);
             pic.circle[0] = (lx - tLd) / (tRd - tLd);
             pic.circle[1] = (tUd - ly) / (tUd - tDd);
             pic.circle[2] = lr / (tRd - tLd);
             pic.circle[3] = (tRd - tLd) / (tUd - tDd);
+            pic.reticle[0] = (ax - tLd) / (tRd - tLd);
+            pic.reticle[1] = (tUd - ay) / (tUd - tDd);
+            pic.reticle[3] = s.reticle ? 1.0f : 0.0f;
             pic.on = true;
         }
     }
     static bool lastOn = false;
     const bool on = pictures[0].on || pictures[1].on;
     if (on != lastOn)
-        MOHW_LOG(kLogFile, "lens picture %s (%.2fx, lens %.1f cm ahead of the hand, radius %.1f cm)", on ? "ON" : "off", m,
+        MOHW_LOG(kLogFile, "lens picture %s (%.2fx, lens %.1f cm right / %.1f cm up of the optic zero, %.1f cm ahead of the "
+                 "hand, radius %.1f cm)", on ? "ON" : "off", m, s.lensRight * 100.0f, s.lensUp * 100.0f,
                  s.lensForward * 100.0f, s.lensRadius * 100.0f);
     lastOn = on;
     std::lock_guard<std::mutex> lock(g_maskMutex);
@@ -181,24 +207,17 @@ bool GetScopeLensPictures(ScopeLensPicture out[2])
     return true;
 }
 
-bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float gameFovY, ScopeEyeView* out)
+bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], ScopeEyeView* out)
 {
     const ScopeSettings s = GetScopeSettings();
-    // The game's zoom: its FOV now against its hip FOV (learned while ADS isn't held).
-    openvr_direct::VrActionState vr{};
-    const bool haveVr = openvr_direct::GetVrActionState(&vr);
-    const bool ads = haveVr && vr.ads;
-    if (gameFovY > 0.05f && gameFovY < 3.0f)
-    {
-        if (g_hipFovY <= 0.0f)
-            g_hipFovY = gameFovY;
-        else if (!ads)
-            g_hipFovY += (gameFovY - g_hipFovY) * 0.2f;
-    }
-    float gameZoom = 1.0f;
-    if (g_hipFovY > 0.05f && gameFovY > 0.01f && gameFovY < g_hipFovY)
-        gameZoom = std::tan(g_hipFovY * 0.5f) / std::tan(gameFovY * 0.5f);
-    const float magnification = s.magnification > 0.0f ? s.magnification : (ads && gameZoom >= s.minZoom ? gameZoom : 0.0f);
+    // The gun's own scope (its profile; 2026-11-17: the game's ADS zoom no longer stands in for it, so it needs no ADS),
+    // for a red dot with a flip magnifier only while the game's magnifier is switched on (its state holds out of ADS).
+    float magnification = s.magnification;
+    bool magnifierOn = false;
+    const bool magnifierKnown = GetEquippedOpticState(&magnifierOn, nullptr);
+    const bool magnifierOff = s.needsMagnifier && !(magnifierKnown && magnifierOn);
+    if (magnifierOff)
+        magnification = 0.0f;
 
     static int lastEye = -2;
     static unsigned long long nextLogMs = 0;
@@ -214,11 +233,11 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
         GetPlayerAimDriveWeight() < 1.0f)
     {
         if (lastEye != -1)
-            MOHW_LOG(kLogFile, "scope off (%s; game FOV %.1f deg, hip %.1f deg, zoom %.2fx, ADS %d)",
+            MOHW_LOG(kLogFile, "scope off (%s)",
                      (!s.enabled && !s.lensPicture) ? "settings off"
-                     : magnification < 1.0f        ? "no scope magnification"
-                                                   : "gun not on the controller",
-                     gameFovY * 57.29578f, g_hipFovY * 57.29578f, gameZoom, ads ? 1 : 0);
+                     : magnifierOff                ? "the game's magnifier is off"
+                     : magnification < 1.0f        ? "this gun has no scope magnification"
+                                                   : "gun not on the controller");
         lastEye = -1;
         ClearScope();
         ClearLens();
@@ -244,7 +263,11 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
     const Vec3 origin = VecAdd(V(hand.positionX, hand.positionY, hand.positionZ), QuatRotateVector(handQ, V(windage, height, 0.0f)));
     const Vec3 forward = Normalized(QuatRotateVector(handQ, V(0.0f, 0.0f, -1.0f)));
 
-    // Which eye is behind it: the one nearest the line, within the eye box, behind the hand.
+    // Which eye is behind it: the one nearest the line, within the eye box, behind the hand. HYSTERESIS (2026-11-18, the
+    // user: standing still "caused the camera to flicker in and out until I moved"): the eye already behind the scope
+    // stays there until it's kStayFactor past the box, so a hand resting on the box's edge doesn't flip the view between
+    // the scope and the eye's own every few frames.
+    constexpr float kStayFactor = 1.25f;
     int eye = -1;
     float bestPerp = 1e9f, bestAlong = 0.0f;
     for (int e = 0; e < 2; ++e)
@@ -253,7 +276,8 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
         const Vec3 v = VecSub(eyePos, origin);
         const float along = VecDot(v, forward);
         const float perp = Length(VecSub(v, VecScale(forward, along)));
-        if (s.enabled && along <= 0.05f && along >= -s.relief && perp <= s.eyeBox && perp < bestPerp)
+        const float stay = e == lastEye ? kStayFactor : 1.0f;
+        if (s.enabled && along <= 0.05f * stay && along >= -s.relief * stay && perp <= s.eyeBox * stay && perp < bestPerp)
         {
             eye = e;
             bestPerp = perp;
@@ -263,14 +287,16 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
     if (eye != lastEye)
     {
         if (eye >= 0)
-            MOHW_LOG(kLogFile, "SCOPED EYE: %s eye behind the scope, %.1f cm off the sight line, %.1f cm behind the hand; %.2fx (%s)",
-                     eye == 0 ? "left" : "right", bestPerp * 100.0f, -bestAlong * 100.0f, magnification,
-                     s.magnification > 0.0f ? "the weapon's" : "the game's ADS zoom");
+            MOHW_LOG(kLogFile, "SCOPED EYE: %s eye behind the scope, %.1f cm off the sight line, %.1f cm behind the hand; %.2fx",
+                     eye == 0 ? "left" : "right", bestPerp * 100.0f, -bestAlong * 100.0f, magnification);
         else
             MOHW_LOG(kLogFile, "scoped eye: no eye behind the scope (%.2fx ready)", magnification);
         lastEye = eye;
     }
-    UpdateLensPictures(s, headQ, headP, scale, origin, forward, magnification, eyeTan, eye);
+    // The lens disc on this gun: from the optic zero, ScopeLensRight / ScopeLensUp in the hand's frame, and ScopeLensForward
+    // ahead of the hand (the gun's profile).
+    const Vec3 lensPos = VecAdd(origin, QuatRotateVector(handQ, V(s.lensRight, s.lensUp, -s.lensForward)));
+    UpdateLensPictures(s, headQ, headP, scale, lensPos, forward, magnification, eyeTan, eye, centre);
     if (eye < 0)
     {
         ClearScope();
@@ -311,9 +337,38 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
     }
     const float x0 = dirInEye.x / -dirInEye.z, y0 = dirInEye.y / -dirInEye.z;
     const float tL = eyeTan[eye][0], tR = eyeTan[eye][1], tU = eyeTan[eye][2], tD = eyeTan[eye][3];
+    // HOLOGRAPHIC (2026-11-17, the user: "wherever you see the reticle is the impact point"): the laser's point -- where
+    // the shots land -- as the scope camera sees it (ax, ay), shown where the EYE sees it (lx, ly): the magnified view is
+    // anchored on the impact point's true direction from this eye, which is also where the SteamVR laser dot overlay
+    // sits, and the crosshair goes there. So the reticle stays on the impact point whatever the eye's offset from the
+    // sight line (it moves a little inside the eyepiece instead), and the sight line's parallax from the bore is taken
+    // out at whatever range the laser hits. Without the laser running: the sight line (the eyepiece's centre).
+    float ax = 0.0f, ay = 0.0f, lx = x0, ly = y0;
+    float aim[3];
+    if (GetLaserAimPoint(aim))
+    {
+        const float d[3] = {aim[0] - m[12], aim[1] - m[13], aim[2] - m[14]};
+        const float cx = d[0] * m[0] + d[1] * m[1] + d[2] * m[2];
+        const float cy = d[0] * m[4] + d[1] * m[5] + d[2] * m[6];
+        const float cz = d[0] * m[8] + d[1] * m[9] + d[2] * m[10];
+        // The same point from the eye: the head-centre camera's frame (rows right / up / back), the eye along its right.
+        const float e[3] = {aim[0] - centre[12], aim[1] - centre[13], aim[2] - centre[14]};
+        const float er = e[0] * centre[0] + e[1] * centre[1] + e[2] * centre[2] - GetEyeOffsetAlongRow0(eye == 1);
+        const float eu = e[0] * centre[4] + e[1] * centre[5] + e[2] * centre[6];
+        const float eb = e[0] * centre[8] + e[1] * centre[9] + e[2] * centre[10];
+        constexpr float kMaxOffset = 0.25f; // ~14 deg: past that the laser is on something else, not the target
+        if (cz < -0.05f && eb < -0.05f && std::fabs(cx / cz) < kMaxOffset && std::fabs(cy / cz) < kMaxOffset &&
+            std::fabs(er / eb - x0) < kMaxOffset && std::fabs(eu / eb - y0) < kMaxOffset)
+        {
+            ax = cx / -cz;
+            ay = cy / -cz;
+            lx = er / -eb;
+            ly = eu / -eb;
+        }
+    }
     out->eye = eye;
-    if (!FrustumFromTangents((tL - x0) / magnification, (tR - x0) / magnification, (tU - y0) / magnification,
-                             (tD - y0) / magnification, out))
+    if (!FrustumFromTangents((tL - lx) / magnification + ax, (tR - lx) / magnification + ax,
+                             (tU - ly) / magnification + ay, (tD - ly) / magnification + ay, out))
     {
         ClearScope();
         return false;
@@ -330,6 +385,8 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
         g_mask.rx = r / (tR - tL);
         g_mask.ry = r / (tU - tD);
         g_mask.reticle = s.reticle;
+        g_mask.reticleX = (lx - tL) / (tR - tL);
+        g_mask.reticleY = (tU - ly) / (tU - tD);
         g_mask.ms = now;
     }
     g_hiddenEye.store(eye, std::memory_order_relaxed);
@@ -343,7 +400,8 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], float ga
     return true;
 }
 
-bool GetScopeMask(int* eye, float* cx, float* cy, float* radiusX, float* radiusY, bool* reticle)
+bool GetScopeMask(int* eye, float* cx, float* cy, float* radiusX, float* radiusY, bool* reticle, float* reticleX,
+                  float* reticleY)
 {
     std::lock_guard<std::mutex> lock(g_maskMutex);
     if (g_mask.eye < 0 || GetTickCount64() - g_mask.ms > kRecentMs)
@@ -353,8 +411,9 @@ bool GetScopeMask(int* eye, float* cx, float* cy, float* radiusX, float* radiusY
     *cy = g_mask.cy;
     *radiusX = g_mask.rx;
     *radiusY = g_mask.ry;
-    // The game's own reticle in the view (its zoom optic): no drawn one over it.
-    *reticle = g_mask.reticle && GetTickCount64() - g_gameReticleMs.load(std::memory_order_relaxed) > kRecentMs;
+    *reticle = g_mask.reticle;
+    *reticleX = g_mask.reticleX;
+    *reticleY = g_mask.reticleY;
     return true;
 }
 
@@ -363,13 +422,6 @@ int GetScopeHiddenEye()
     if (GetTickCount64() - g_hiddenEyeMs.load(std::memory_order_relaxed) > kRecentMs)
         return -1;
     return g_hiddenEye.load(std::memory_order_relaxed);
-}
-
-void NoteScopeGameReticle()
-{
-    const unsigned long long now = GetTickCount64();
-    if (now - g_gameReticleMs.exchange(now, std::memory_order_relaxed) > 2000)
-        MOHW_LOG(kLogFile, "the game's zoom optic (its reticle) is drawn in the scoped eye: the crosshair stands aside");
 }
 
 } // namespace mohw

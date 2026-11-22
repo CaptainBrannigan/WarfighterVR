@@ -11,9 +11,12 @@
 #include "../sdk/settings.h"
 #include "fov_scale_hook.h"
 #include "aiming_controller_hook.h"
+#include "boat_seat.h"
 #include "first_person_rig.h"
 #include "render_pose_stamp.h"
 #include "native_stereo.h"
+#include "holster_probe.h"
+#include "perf_probe.h"
 #include "scope_view.h"
 #include "weapon_identity.h"
 #include "../sdk/rigid.h"
@@ -215,14 +218,29 @@ constexpr float kFallbackSocket[2][3] = {{0.135f, -0.177f, -0.129f}, {0.104f, -0
 std::mutex g_socketMutex;
 float g_socket[2][3] = {};          // guarded by g_socketMutex
 unsigned long long g_socketMs = 0;  // likewise
+Rigid g_gunNow{};                   // likewise: the gun bone against the camera, same reading (HELD POSE)
+bool g_haveGunNow = false;          // likewise
 
-void NoteGunSocket(const float s[3], const float hand[3])
+void NoteGunSocket(const float s[3], const float hand[3], const Rigid* gun)
 {
     const unsigned long long now = GetTickCount64();
     std::lock_guard<std::mutex> lock(g_socketMutex);
     memcpy(g_socket[0], s, sizeof(g_socket[0]));
     memcpy(g_socket[1], hand, sizeof(g_socket[1]));
     g_socketMs = now;
+    g_haveGunNow = gun != nullptr;
+    if (gun)
+        g_gunNow = *gun;
+}
+
+// The latest reading's gun bone against the camera. False without one.
+bool CurrentGunBone(Rigid* out)
+{
+    std::lock_guard<std::mutex> lock(g_socketMutex);
+    if (!g_haveGunNow)
+        return false;
+    *out = g_gunNow;
+    return true;
 }
 
 // Once per equipped weapon: the socket, the game's hand centre it's measured from (the game's own pose: the same in
@@ -314,6 +332,18 @@ Rigid GripInCamera()
     // gun. With the gun in the left hand the offsets and the socket's side of the hand are mirrored.
     float s[3], h[3];
     const bool read = CurrentGunSocket(s, h);
+    // HELD POSE (2026-11-21, first_person_rig.h GetHeldGunPose): while the player has control, the gun is placed from the
+    // pose its weapon settled in -- that socket and hand centre -- and then carried from that pose to the gun's
+    // animated one now (heldGun^-1 * gunNow), so nothing the game animates on the gun moves it in the hand.
+    float heldSocket[3], heldCentre[3];
+    Rigid heldGun{}, gunNow{};
+    const bool held = GetPlayerAimDriveWeight() >= 1.0f && GetHeldGunPose(heldSocket, heldCentre, &heldGun) &&
+                      CurrentGunBone(&gunNow);
+    if (held)
+    {
+        memcpy(s, heldSocket, sizeof(s));
+        memcpy(h, heldCentre, sizeof(h));
+    }
     const ArmIkSettings arm = GetArmIkSettings();
     float handDeg[3] = {arm.rightHandDeg[0], arm.rightHandDeg[1], arm.rightHandDeg[2]};
     float off[3] = {arm.rightHandPos[0], arm.rightHandPos[1], -arm.rightHandPos[2]};
@@ -337,6 +367,10 @@ Rigid GripInCamera()
         j.t[k] = s[k] - (o[0] * j.R[0][k] + o[1] * j.R[1][k] + o[2] * j.R[2][k]);
     if (read)
         LogSocketGripIfNew(s, h, j.t);
+    // A gun point p of the animated pose (p = q * gunNow) is drawn at p * J'^-1 in the controller's frame; with
+    // J' = J * heldGun^-1 * gunNow that is q * heldGun * J^-1: where the held pose's point goes with J.
+    if (held)
+        j = Compose(Compose(j, Inverse(heldGun)), gunNow);
     return j;
 }
 
@@ -349,6 +383,15 @@ Rigid GripInCamera()
 // correction into its controller frame instead (ControllerFrame subtracts the eye offset).
 void AnchorRigToHead(float m[16], const Rigid& rigCamera, bool addRoll)
 {
+    // A boat seat (hooks/boat_seat.h): every batch drawn from the head's camera, so the game's pose stays in the boat.
+    Rigid head{};
+    if (GetBoatHeadDelta(&head))
+    {
+        Rigid shift = RigidIdentity();
+        shift.t[0] = GetActiveEyeOffsetAlongRow0();
+        ToMatrix(Compose(Compose(shift, head), rigCamera), m);
+        return;
+    }
     Rigid shiftAndRoll{};
     for (int i = 0; i < 3; ++i)
         shiftAndRoll.R[i][i] = 1.0f;
@@ -468,12 +511,21 @@ float BlendProgress(const openvr_direct::MagazineView& view)
 // MANUAL RELOAD (2026-10-31, openvr_direct/vr_reload.h): a magazine part's batch, drawn where the magazine is now. Any
 // part drawn with M' = M * W^-1 shows at P * W, so W is "the move this part takes". The magazine's own frame
 // (mag-local) is the gun's at its seat, so W = (batch -> mag-local) * (mag-local -> view), the second being:
-//   on the path (2026-11-14): PathDisplacement(s) * the gun at the seat -- s = 0 is the gun's own move;
-//   held: the platform's in-hand place (MagazineHold) on the off hand's controller, turned onto the path's far end
-//     (the entry) as its insertion point closes in on it, by alpha 0 at the weapon profile's range and 1 at its lock
-//     range, where the state machine engages it; and just off the path, gliding from where the path left it;
-//   out: the pouch.
+//   on the path, coming out (2026-11-14): PathDisplacement(s) * the gun at the seat -- s = 0 is the gun's own move;
+//   held: on the off hand's controller at the offset it was grabbed with (MagazineView::magInHand, 2026-11-18), turned
+//     onto the magwell's line and held on it near the seat (the first version's going in, back 2026-11-18); just off
+//     the path, gliding from where the path left it;
+//   out: the pouch, turned by the pouch rotation.
 // False = draw it with the gun.
+constexpr float kLockEaseMetres = 0.03f;
+
+float BlendStep(float from, float to, float x)
+{
+    float t = (x - from) / (to - from);
+    t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+    return t * t * (3.0f - 2.0f * t);
+}
+
 bool DriveMagazine(float m[16], const Rigid& rigCamera)
 {
     if (!GetManualReloadEnabled() || !GetWeaponDriveEnabled())
@@ -525,14 +577,59 @@ bool DriveMagazine(float m[16], const Rigid& rigCamera)
         Rigid off{};
         if (!ControllerFrame(m, true, &off))
             return false;
-        frame = Compose(openvr_direct::MagazineHold(GetMagazinePlatform(), openvr_direct::IsWeaponHandLeft()), off);
-        const Rigid entry = Compose(openvr_direct::PathDisplacement(path, 1.0f), gunInView);
-        const float d[3] = {frame.t[0] - entry.t[0], frame.t[1] - entry.t[1], frame.t[2] - entry.t[2]};
+        frame = Compose(view.magInHand, off); // where the grab put it in the hand (2026-11-18: no snap)
+        // GOING IN (the first version's, 2026-11-01; back 2026-11-18): within the weapon profile's range of the seat, its
+        // insertion point stays where the hand has it and it turns to point at the aim point, by alpha 0 at the range's
+        // edge and 1 at the lock range; at the lock range it's held on the seat -> aim line, not past the seat, eased in
+        // over kLockEaseMetres so reaching the lock doesn't jump. The state machine seats it from there.
+        float aimPoint[3], fromSeat[3], axis[3];
+        PointTimes(aimOffset, gunInView, aimPoint); // the aim point is aimOffset gun-local
+        for (int k = 0; k < 3; ++k)
+        {
+            fromSeat[k] = frame.t[k] - gunInView.t[k];
+            axis[k] = aimPoint[k] - gunInView.t[k];
+        }
+        const float axisLength = Length3(axis);
+        const float d = Length3(fromSeat);
         const float span = profile.range - profile.lockRange;
-        const float alpha =
-            span > 1e-4f ? openvr_direct::SmoothStep01((profile.range - Length3(d)) / span) : (Length3(d) <= profile.range ? 1.0f : 0.0f);
-        if (alpha > 0.0f)
-            frame = openvr_direct::BlendRigid(frame, entry, alpha);
+        float alpha = span > 1e-4f ? (profile.range - d) / span : (d <= profile.range ? 1.0f : 0.0f);
+        alpha = alpha < 0.0f ? 0.0f : alpha > 1.0f ? 1.0f : alpha;
+        if (alpha > 0.0f && axisLength > 1e-3f)
+        {
+            float along = 0.0f;
+            for (int k = 0; k < 3; ++k)
+            {
+                axis[k] /= axisLength;
+                along += fromSeat[k] * axis[k];
+            }
+            along = along > 0.0f ? 0.0f : along;
+            const float lock = BlendStep(profile.lockRange + kLockEaseMetres, profile.lockRange, d);
+            float position[3], toAim[3], turn[3][3];
+            for (int k = 0; k < 3; ++k)
+            {
+                position[k] = frame.t[k] + (gunInView.t[k] + axis[k] * along - frame.t[k]) * lock;
+                toAim[k] = aimPoint[k] - position[k];
+            }
+            const float toAimLength = Length3(toAim);
+            Rigid pointed = gunInView;
+            if (toAimLength > 1e-3f)
+            {
+                for (int k = 0; k < 3; ++k)
+                    toAim[k] /= toAimLength;
+                if (RotationBetween(axis, toAim, turn))
+                    for (int i = 0; i < 3; ++i)
+                        for (int j = 0; j < 3; ++j)
+                            pointed.R[i][j] = gunInView.R[i][0] * turn[0][j] + gunInView.R[i][1] * turn[1][j] +
+                                              gunInView.R[i][2] * turn[2][j];
+            }
+            float blended[3][3];
+            BlendRotation(frame.R, pointed.R, alpha, blended);
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    frame.R[i][j] = blended[i][j];
+            for (int k = 0; k < 3; ++k)
+                frame.t[k] = position[k]; // the insertion point is mag-local's origin
+        }
         if (view.blendMag)
         {
             const float u = BlendProgress(view);
@@ -540,7 +637,11 @@ bool DriveMagazine(float m[16], const Rigid& rigCamera)
                 frame = openvr_direct::BlendRigid(Compose(view.blendMagFromGun, gunInView), frame, u);
         }
     }
-    else if (!PouchFrame(m, view, &frame))
+    else if (PouchFrame(m, view, &frame))
+    {
+        frame = openvr_direct::PouchMagazine(frame); // turned by the pouch rotation (2026-11-18)
+    }
+    else
     {
         return false;
     }
@@ -840,83 +941,13 @@ void ProbeNames(uintptr_t obj, int depth, char* out, size_t outSize, int* found)
     }
 }
 
-// A first-person mesh's asset name, SEH-safe: as the batch log found them, a pointer among the mesh object's first dwords
-// leads to an object whose +0x58 is the name ("mohw/weapons/attachments/optics/opt_aimpoint_cs/opt_aimpoint_cs_1pzoom_1p_Mesh").
-bool ContainsNoCase(const char* s, const char* what)
-{
-    for (; *s; ++s)
-    {
-        const char* a = s;
-        const char* b = what;
-        while (*a && *b && (*a | 0x20) == (*b | 0x20))
-            ++a, ++b;
-        if (!*b)
-            return true;
-    }
-    return false;
-}
-
-bool MeshAssetName(uintptr_t mesh, char* out, int size)
-{
-    if (mesh < 0x10000 || mesh > 0xFFFF0000u)
-        return false;
-    for (int i = 0; i < 32; ++i)
-    {
-        uintptr_t string = 0;
-        __try
-        {
-            const uintptr_t v = reinterpret_cast<const uintptr_t*>(mesh)[i];
-            if (v >= 0x10000 && v < 0xFFFF0000u)
-                string = *reinterpret_cast<const uintptr_t*>(v + 0x58);
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER)
-        {
-            continue;
-        }
-        if (ReadPrintableString(string, out, size) && ContainsNoCase(out, "_1p_Mesh"))
-            return true;
-    }
-    return false;
-}
-
 // THE GAME'S OWN RETICLE (2026-11-14): every optic ships as two meshes, opt_<name>_1p_mesh and opt_<name>_1pzoom_1p_mesh
 // (Weapons.sb), and the game draws the "1pzoom" one, which carries the reticle (the mohw_weapons_reticle shaders), only
-// while zoomed. A batch with such a mesh stays in the scoped eye's view (hooks/scope_view.h): its reticle on the sight
-// line. Per mesh, cached for the equipped weapon.
-std::mutex g_zoomMeshMutex;
-uintptr_t g_zoomMeshSeen[64] = {}; // guarded by g_zoomMeshMutex
-bool g_zoomMeshIs[64] = {};
-int g_zoomMeshCount = 0;
-unsigned g_zoomMeshGeneration = ~0u;
-
-bool IsZoomOpticMesh(uintptr_t mesh)
-{
-    const unsigned generation = GetEquippedWeaponGeneration();
-    {
-        std::lock_guard<std::mutex> lock(g_zoomMeshMutex);
-        if (generation != g_zoomMeshGeneration)
-        {
-            g_zoomMeshGeneration = generation;
-            g_zoomMeshCount = 0;
-        }
-        for (int i = 0; i < g_zoomMeshCount; ++i)
-            if (g_zoomMeshSeen[i] == mesh)
-                return g_zoomMeshIs[i];
-    }
-    char name[128] = "";
-    const bool zoom = MeshAssetName(mesh, name, sizeof(name)) && ContainsNoCase(name, "1pzoom");
-    std::lock_guard<std::mutex> lock(g_zoomMeshMutex);
-    if (g_zoomMeshCount < 64)
-    {
-        g_zoomMeshSeen[g_zoomMeshCount] = mesh;
-        g_zoomMeshIs[g_zoomMeshCount] = zoom;
-        ++g_zoomMeshCount;
-        if (zoom)
-            MOHW_LOG(kLogFile, "zoom optic mesh %p: %s (kept in the scoped eye: the game's reticle)",
-                     reinterpret_cast<void*>(mesh), name);
-    }
-    return zoom;
-}
+// while zoomed -- and while zoomed it draws only the gun's body and that optic, not the other attachments (mohwvr_
+// holsterprobe.log, 2026-11-17). It was kept in the scoped eye for its reticle until 2026-11-17: seen from the real eye
+// through the magnified view it had parallax times the magnification, so the scoped eye draws its own holographic
+// crosshair instead (hooks/scope_view.h GetScopeMask). The mesh names were read through a pointer among the mesh
+// object's first dwords to an object whose +0x58 is the name (hooks/holster_probe.cpp ReadName does the same).
 
 // SEH-safe: the mesh pair of instance i (mesh ptr, second ptr) and the mesh object's first dword (vtable).
 bool ReadInstance(const unsigned char* b, uint32_t i, uintptr_t* mesh, uintptr_t* second, uintptr_t* vtable)
@@ -941,6 +972,8 @@ int g_seenBatchCount = 0;
 
 void LogBatchIfNew(const unsigned char* b, uint32_t count, bool classifiedBody)
 {
+    if (!LogsEnabled())
+        return; // only a log (its seen-list costs a lock and a scan per batch change)
     uintptr_t mesh0 = 0, second0 = 0, vt0 = 0;
     if (count == 0 || count > 256 || !ReadInstance(b, 0, &mesh0, &second0, &vt0))
         return;
@@ -977,6 +1010,7 @@ void LogBatchIfNew(const unsigned char* b, uint32_t count, bool classifiedBody)
 
 void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr_t ret)
 {
+    PerfScope perf(kPerfBatches); // hooks/perf_probe.h
     if (matrix != nullptr && ret == reinterpret_cast<uintptr_t>(Offset<void*>(OFFSET_CAMERAMATRIX_CALLER_VIEWSTATE)))
     {
         memcpy(t_viewStatePos, matrix + 12, sizeof(t_viewStatePos));
@@ -1012,6 +1046,9 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     uint32_t count = *reinterpret_cast<const uint32_t*>(b + 0x7C);
     const float* transl = reinterpret_cast<const float*>(b + 0x40);
     bool isBody = IsBodyBatch(b);
+    // HOLSTER PROBE (hooks/holster_probe.h): the weapon's batches, once per frame (the left view in two-view).
+    if (!isBody && (eye == 0 || (eye < 0 && !IsNativeStereoActive())))
+        HolsterProbeOnBatch(b);
 
     uintptr_t batchAddr = reinterpret_cast<uintptr_t>(batch);
     if (batchAddr != t_lastBatch)
@@ -1061,7 +1098,10 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
         patchThis = (sel == kSelectAll) || (t_seq == sel);
     if (roleMode != 0)
         sel = 1000 + roleMode; // for the once-per-change PATCHING log below
-    float m[16];
+    // 16-byte aligned: the original reads it with aligned SSE loads (movaps at 0x006FC2B2). Unaligned it only worked while
+    // this frame's layout happened to put it on a 16-byte boundary; one that didn't crashed on the first gun batch of a
+    // level (live 2026-11-14, a read of -1).
+    alignas(16) float m[16];
     memcpy(m, matrix, sizeof(m));
     // Weapon batches follow the controller when the drive is on (parallax included). Everything else in the rig is
     // anchored to the head centre: the body+hands batch without the head's roll, the weapon with the drive off with
@@ -1098,8 +1138,10 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
     if (isBody)
     {
         float socket[3], hand[3];
-        if (ReadGunSocketInCamera(b, rigCamera, socket, hand))
-            NoteGunSocket(socket, hand);
+        Rigid gunNow{};
+        bool haveGun = false;
+        if (ReadGunSocketInCamera(b, rigCamera, socket, hand, &gunNow, &haveGun))
+            NoteGunSocket(socket, hand, haveGun ? &gunNow : nullptr);
     }
     // The weapon socket view, from the same pose (and the grip just noted), before the arm IK too.
     if (isBody && eye <= 0)
@@ -1136,21 +1178,13 @@ void __stdcall HookImpl(void* thisPtr, void* batch, const float* matrix, uintptr
 
     // SCOPED EYE (2026-11-14, hooks/scope_view.h): this eye's view is the scope's, its camera inside the gun's optic, so
     // the first-person batches (gun, magazine, arms) go 50 m behind the eye instead: moving the batch camera forward by d
-    // moves what it draws back by d. Except the game's zoom optic (its reticle, IsZoomOpticMesh), drawn while zoomed.
+    // moves what it draws back by d. The game's zoom optic too (2026-11-17; it was kept for its reticle): a mesh on the
+    // gun seen from the real eye, so the eye's offset from the sight line came out multiplied by the magnification --
+    // the reticle wasn't on the impact point unless the eye was exactly on the line. The drawn holographic crosshair
+    // marks the impact point instead (hooks/scope_view.h GetScopeMask).
     if (eye >= 0 && eye == GetScopeHiddenEye())
-    {
-        bool zoomOptic = false;
-        for (uint32_t i = 0; !isBody && i < count && i < 16 && !zoomOptic; ++i)
-        {
-            uintptr_t mesh = 0, second = 0, vt = 0;
-            zoomOptic = ReadInstance(b, i, &mesh, &second, &vt) && mesh && IsZoomOpticMesh(mesh);
-        }
-        if (!zoomOptic)
-            for (int k = 0; k < 3; ++k)
-                m[12 + k] -= m[8 + k] * 50.0f;
-        else
-            NoteScopeGameReticle(); // the drawn crosshair stands aside for it
-    }
+        for (int k = 0; k < 3; ++k)
+            m[12 + k] -= m[8 + k] * 50.0f;
 
     ++g_patched;
     int lastLogged = g_lastLoggedSelected.load();

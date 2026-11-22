@@ -2,6 +2,7 @@
 
 #include "aiming_controller_hook.h"
 #include "alternating_eye.h"
+#include "boat_seat.h"
 #include "companion_bridge.h"
 #include "fov_scale_hook.h"
 #include "head_position.h"
@@ -168,6 +169,9 @@ void ComputeRenderPoseStamp(void* transformPtr)
 
     float headPos[3] = {0, 0, 0};
     bool posValid = GetLastAppliedHeadPosition(headPos); // the head position the camera translation was actually built from this frame
+    // A boat seat's frame was built straight from a head pose (hooks/boat_seat.h): that pose, as it is.
+    if (GetBoatRenderPose(outQuat, headPos))
+        valid = posValid = true;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         g_pendingValid = valid;

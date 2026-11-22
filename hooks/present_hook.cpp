@@ -1,4 +1,5 @@
 #include "present_hook.h"
+#include "boat_seat.h"
 
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/logging.h"
@@ -24,7 +25,10 @@
 #include "eye_matched_fov.h"
 #include "native_stereo.h"
 #include "input_restriction.h"
+#include "perf_probe.h"
+#include "weapon_state_probe.h"
 #include "player_control.h"
+#include "xinput_hook.h"
 #include "../openvr_direct/openvr_direct.h"
 #include "../sdk/d3d_util.h"
 #include "../sdk/settings.h"
@@ -250,7 +254,7 @@ bool EnsureLensResources(ID3D11Device* device, ID3D11Texture2D* frame)
         ReleaseLensResources();
         g_lens.device = device;
         D3D11_BUFFER_DESC cb{};
-        cb.ByteWidth = 32;
+        cb.ByteWidth = 48; // Map, Circle, Reticle (shaders/scope_lens.hlsl)
         cb.Usage = D3D11_USAGE_DEFAULT;
         cb.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         D3D11_SAMPLER_DESC sd{};
@@ -376,9 +380,10 @@ void DrawLensPictures(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11
         D3D11_TEXTURE2D_DESC desc{};
         g_nativeHalves[eye]->GetDesc(&desc);
         D3D11_VIEWPORT viewport{0.0f, 0.0f, static_cast<float>(desc.Width), static_cast<float>(desc.Height), 0.0f, 1.0f};
-        float constants[8];
+        float constants[12];
         memcpy(constants, pictures[eye].map, sizeof(pictures[eye].map));
         memcpy(constants + 4, pictures[eye].circle, sizeof(pictures[eye].circle));
+        memcpy(constants + 8, pictures[eye].reticle, sizeof(pictures[eye].reticle));
         context->UpdateSubresource(g_lens.constants, 0, nullptr, constants, 0, 0);
         context->OMSetRenderTargets(1, &rtv, nullptr);
         context->RSSetViewports(1, &viewport);
@@ -399,9 +404,10 @@ constexpr int kScopeBands = 64;
 void MaskScopedHalf(ID3D11Device* device, ID3D11DeviceContext* context)
 {
     int eye = -1;
-    float cx = 0.0f, cy = 0.0f, rx = 0.0f, ry = 0.0f;
+    float cx = 0.0f, cy = 0.0f, rx = 0.0f, ry = 0.0f, reticleX = 0.5f, reticleY = 0.5f;
     bool reticle = false;
-    if (!GetScopeMask(&eye, &cx, &cy, &rx, &ry, &reticle) || eye < 0 || eye > 1 || !g_nativeHalves[eye])
+    if (!GetScopeMask(&eye, &cx, &cy, &rx, &ry, &reticle, &reticleX, &reticleY) || eye < 0 || eye > 1 ||
+        !g_nativeHalves[eye])
         return;
     ID3D11Texture2D* texture = g_nativeHalves[eye];
     if (!NativeHalfRtv(device, eye))
@@ -450,16 +456,20 @@ void MaskScopedHalf(ID3D11Device* device, ID3D11DeviceContext* context)
     context1->ClearView(g_nativeHalfRtv[eye], black, rects, static_cast<UINT>(n));
     if (reticle)
     {
-        // A duplex crosshair: fine lines through the centre, heavy posts from the edge to 40% in.
+        // A duplex crosshair on the impact point (holographic: where the eye sees the laser's point, which can sit a
+        // little off the eyepiece's centre): fine lines through it, heavy posts from 40% of the eyepiece's radius out.
+        // Lines running past the eyepiece land on its black surround.
+        const float qx = reticleX * w, qy = reticleY * h;
+        const float spanX = prx + fabsf(qx - pcx), spanY = pry + fabsf(qy - pcy);
         const float fine = pry * 0.004f > 1.0f ? pry * 0.004f : 1.0f;
         const float heavy = pry * 0.02f > 2.0f ? pry * 0.02f : 2.0f;
         n = 0;
-        add(pcx - prx, pcy - fine, pcx + prx, pcy + fine);
-        add(pcx - fine, pcy - pry, pcx + fine, pcy + pry);
-        add(pcx - prx, pcy - heavy, pcx - prx * 0.4f, pcy + heavy);
-        add(pcx + prx * 0.4f, pcy - heavy, pcx + prx, pcy + heavy);
-        add(pcx - heavy, pcy + pry * 0.4f, pcx + heavy, pcy + pry);
-        add(pcx - heavy, pcy - pry, pcx + heavy, pcy - pry * 0.4f);
+        add(qx - spanX, qy - fine, qx + spanX, qy + fine);
+        add(qx - fine, qy - spanY, qx + fine, qy + spanY);
+        add(qx - spanX, qy - heavy, qx - prx * 0.4f, qy + heavy);
+        add(qx + prx * 0.4f, qy - heavy, qx + spanX, qy + heavy);
+        add(qx - heavy, qy + pry * 0.4f, qx + heavy, qy + spanY);
+        add(qx - heavy, qy - spanY, qx + heavy, qy - pry * 0.4f);
         context1->ClearView(g_nativeHalfRtv[eye], black, rects, static_cast<UINT>(n));
     }
     context1->Release();
@@ -549,7 +559,8 @@ void MaybeDumpNativeFrame(ID3D11Device* device, ID3D11DeviceContext* ctx, ID3D11
 {
     static bool menuSaved = false, playSaved = false;
     static unsigned long long menuSince = 0, playSince = 0;
-    if (menuSaved && playSaved)
+    // A GPU readback and a 23 MB file from the render thread: only with the log files on (sdk/logging.h).
+    if ((menuSaved && playSaved) || !LogsEnabled())
         return;
     const unsigned long long now = GetTickCount64();
     const bool skeleton = IsPlayerSkeletonLoaded();
@@ -758,13 +769,39 @@ void LogFrameTiming(IDXGISwapChain* self, UINT syncInterval)
     sumMs = worstMs = 0.0;
 }
 
+// PERF PROBE (hooks/perf_probe.h): the game's own Present (its flip, and any wait in it), timed apart from ours.
+long long g_originalPresentTicks = 0; // game thread
+HRESULT CallOriginalPresent(IDXGISwapChain* self, UINT syncInterval, UINT flags)
+{
+    const long long start = PerfNow();
+    const HRESULT hr = g_originalPresent(self, syncInterval, flags);
+    g_originalPresentTicks += PerfNow() - start;
+    return hr;
+}
+
+HRESULT PresentInner(IDXGISwapChain* self, UINT syncInterval, UINT flags);
+
 HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT flags)
 {
+    g_originalPresentTicks = 0;
+    const long long start = PerfNow();
+    const HRESULT hr = PresentInner(self, syncInterval, flags);
+    PerfAdd(kPerfPresentOurs, PerfNow() - start - g_originalPresentTicks);
+    PerfOnPresent();
+    return hr;
+}
+
+HRESULT PresentInner(IDXGISwapChain* self, UINT syncInterval, UINT flags)
+{
     LogFrameTiming(self, syncInterval);
+    DrivingNotePresentSync(syncInterval); // driving missions: cutscenes present with vsync (hooks/driving_camera_hook.h)
     // One frame per display frame when the engine renders both eyes at once (hooks/native_stereo.h), two otherwise.
     NativeStereoOnPresent();
     PlayerControlOnPresent(); // logs every change of what the player controls (hooks/player_control.h)
+    BoatSeatOnPresent();      // the Basilan RHIB's wheel and Mk19 (hooks/boat_seat.h)
     InputRestrictionOnPresent(); // the game's input locks: scripted scenes (hooks/input_restriction.h)
+    WeaponStateProbeOnPresent(); // the magnifier toggle and the weapon slots (hooks/weapon_state_probe.h)
+    GamepadFocusOnPresent();     // setting GamepadWithoutFocus: the pad read without window focus (hooks/xinput_hook.h)
     PaceToDisplayFrequency(IsNativeStereoActive() ? 1.0 : 2.0);
 
     long long n = ++g_presentCalls;
@@ -885,9 +922,15 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
                     D3D11_BOX right{half, 0, 0, half * 2, backbufferDesc.Height, 1};
                     immediateContext->CopySubresourceRegion(g_nativeHalves[0], 0, 0, 0, 0, leftEye, 0, &left);
                     immediateContext->CopySubresourceRegion(g_nativeHalves[1], 0, 0, 0, 0, leftEye, 0, &right);
-                    DrawLensPictures(device, immediateContext, leftEye); // from the unchanged side-by-side capture
-                    MaskScopedHalf(device, immediateContext);
-                    mohw::openvr_direct::UpdateOpenVrDirectPair(device, g_nativeHalves[0], g_nativeHalves[1], stamp);
+                    {
+                        PerfScope perf(kPerfScopeDraw);
+                        DrawLensPictures(device, immediateContext, leftEye); // from the unchanged side-by-side capture
+                        MaskScopedHalf(device, immediateContext);
+                    }
+                    {
+                        PerfScope perf(kPerfPairCopy);
+                        mohw::openvr_direct::UpdateOpenVrDirectPair(device, g_nativeHalves[0], g_nativeHalves[1], stamp);
+                    }
                     MaybeDumpNativeFrame(device, immediateContext, leftEye);
                 }
                 g_pairLeftStaged = false;
@@ -895,7 +938,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
                     immediateContext->Release();
                 backbuffer->Release();
                 device->Release();
-                HRESULT hr = g_originalPresent(self, syncInterval, flags);
+                HRESULT hr = CallOriginalPresent(self, syncInterval, flags);
                 LogD3DFailure(self, "Present", hr);
                 return hr;
             }
@@ -929,6 +972,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
                 {
                     mohw::openvr_direct::PairStamp stamp{};
                     stamp.valid = GetPendingRenderPoseStamp(true, stamp.quat, stamp.pos, &stamp.posValid);
+                    PerfScope perf(kPerfPairCopy);
                     mohw::openvr_direct::UpdateOpenVrDirectPair(device, g_pairLeftTexture, leftEye, stamp);
                     g_pairLeftStaged = false;
                 }
@@ -959,7 +1003,7 @@ HRESULT __stdcall Hooked_Present(IDXGISwapChain* self, UINT syncInterval, UINT f
     // work rides on it.
     if (presentedFrameWasLeftEye)
     {
-        HRESULT hr = g_originalPresent(self, syncInterval, flags);
+        HRESULT hr = CallOriginalPresent(self, syncInterval, flags);
         LogD3DFailure(self, "Present", hr);
         return hr;
     }

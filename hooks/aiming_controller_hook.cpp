@@ -1,4 +1,5 @@
 #include "aiming_controller_hook.h"
+#include "boat_seat.h"
 
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/logging.h"
@@ -376,6 +377,22 @@ void ApplyHeadAim(void* aimingController)
 
     // currentYaw is the game's own yaw after this tick's update, mouse/stick turning included (see the HEAD LOOK
     // MODEL comment above).
+    // LOOK GIVEN BACK (2026-11-21, the user: "after control is returned the camera is spun around ... to the original
+    // centering forward view ... the current forward at return to player control should be the new forward"). While the
+    // game has look, its camera is shown as it is, with no head yaw in it; picking the head offset up again from the old
+    // zero turned the view by however far the head was from it. So where the head faces when look comes back becomes
+    // straight ahead: the view carries on from the scene's last camera.
+    // A boat seat counts as look taken (hooks/boat_seat.h): its head look isn't the soldier's, and getting up is look
+    // given back.
+    const bool lookLocked = IsLookRestricted() || GetBoatSeat() != BoatSeat::None;
+    if (!lookLocked && g_lookTakenLogged.load(std::memory_order_relaxed))
+    {
+        const float before = WrapAngleSigned(headYaw - g_zeroHeadYaw.load(std::memory_order_relaxed));
+        g_zeroHeadYaw.store(headYaw, std::memory_order_relaxed);
+        MOHW_LOG(kLogFile, "look given back: head yaw re-zeroed where it faces now (it was %.1f deg from the old zero)",
+                 before / kDegToRad);
+    }
+
     float sensitivity = GetHeadAimSensitivity();
     float yawOffset = WrapAngleSigned(headYaw - g_zeroHeadYaw.load(std::memory_order_relaxed)) * sensitivity;
     float pitchDelta = headPitch * sensitivity;
@@ -389,8 +406,7 @@ void ApplyHeadAim(void* aimingController)
 
     // The game has taken look away (a scripted scene): the aim is the game's, and head look stands aside
     // (IsHeadDrivingSoldier). The baseline and offset above are still kept, so the aim picks up cleanly when look comes
-    // back. Logged on each change.
-    const bool lookLocked = IsLookRestricted();
+    // back (with the head yaw re-zeroed above). Logged on each change.
     if (lookLocked != g_lookTakenLogged.load(std::memory_order_relaxed))
     {
         g_lookTakenLogged.store(lookLocked, std::memory_order_relaxed);
@@ -511,7 +527,7 @@ struct ThisCallTrampoline
         // untouched. The game is placing and turning the player itself, and the guard would put each of its turns back;
         // skipping it also breaks the guard's continuity, so whatever heading the scene ends on is accepted as the
         // game's. ApplyHeadAim below keeps its bookkeeping but writes nothing.
-        bool headAimOn = GetHeadAimEnabled() && !IsLookRestricted();
+        bool headAimOn = GetHeadAimEnabled() && !IsLookRestricted() && GetBoatSeat() == BoatSeat::None;
         if (headAimOn)
         {
             GuardStoredHeading(self);
@@ -728,6 +744,11 @@ bool GetLastAppliedYawPitch(float* outYaw, float* outPitch)
 
 std::atomic<unsigned> g_recenterGeneration{0}; // GetRecenterGeneration
 
+void NoteLookTaken()
+{
+    g_lookTakenLogged.store(true, std::memory_order_relaxed);
+}
+
 unsigned GetRecenterGeneration()
 {
     return g_recenterGeneration.load(std::memory_order_relaxed);
@@ -763,7 +784,7 @@ bool GetHeadAimMapping(float* zeroHeadYaw, float* zeroHeadPitch, float* baseline
 
 bool IsHeadDrivingSoldier()
 {
-    return IsPlayerAimActive() && !IsLookRestricted();
+    return IsPlayerAimActive() && !IsLookRestricted() && GetBoatSeat() == BoatSeat::None;
 }
 
 unsigned long long GetLastAimingUpdateMs()
@@ -784,6 +805,9 @@ float AimRunningDriveWeight();
 
 float GetPlayerAimDriveWeight()
 {
+    // In a boat seat the hands are the game's, on the wheel or the gun (hooks/boat_seat.h).
+    if (GetBoatSeat() != BoatSeat::None)
+        return 0.0f;
     // The aim stopping, or the game's own input locks (look or fire taken: hooks/input_restriction.h), whichever has
     // the rig further back with the game.
     const float aim = AimRunningDriveWeight();

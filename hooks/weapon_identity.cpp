@@ -23,6 +23,12 @@ constexpr uint32_t kOwnerFieldTarget = 0x7C;
 constexpr uint32_t kOwnerController = 0x430;       // ClientSoldierWeapon -> its AimingController
 constexpr uint32_t kUnlockWeapon = 0x24;           // SoldierWeaponUnlockAsset.Weapon (SoldierWeaponBlueprint)
 constexpr uint32_t kAssetName = 0x08;              // Asset.Name (CString)
+// The AimingController's zoom state (mohwvr_weaponstate.log, 2026-11-17, the OBR's flip magnifier toggled with the
+// right stick while ADS): +0x160 the zoom level now (0 hip, 1 ADS, 2 ADS through the magnifier; +0x170 / +0x174 and
+// ClientWeapon+0x1C8 follow it, +0x184 holds the previous one), +0x194 the magnifier switch -- 0 -> 1 on the toggle,
+// kept at 1 out of ADS (the next ADS went straight to level 2), 1 -> 0 on the toggle back.
+constexpr uint32_t kControllerZoomLevel = 0x160;
+constexpr uint32_t kControllerMagnifier = 0x194;
 
 std::atomic<void*> g_active{nullptr};
 std::atomic<unsigned> g_generation{0};
@@ -131,6 +137,28 @@ void DisplayName(const char* key, char* out, size_t size)
 
 std::atomic<uintptr_t> g_owner{0}; // the active controller's ClientSoldierWeapon, from Resolve
 
+// A ClientSoldierWeapon's blueprint name (or its unlock asset's): the SoldierWeaponUnlockAsset nearest before the
+// controller field.
+bool SoldierWeaponKey(uintptr_t owner, char* key, size_t keySize)
+{
+    for (uint32_t off = kOwnerController - 4; off >= 4; off -= 4)
+    {
+        uint32_t unlock = 0, blueprint = 0;
+        if (!ReadU32(owner + off, &unlock) || !IsTypeNamed(unlock, "SoldierWeaponUnlockAsset"))
+            continue;
+        if (ReadU32(unlock + kUnlockWeapon, &blueprint) && Plausible(blueprint))
+        {
+            uint32_t name = 0;
+            if (ReadU32(blueprint + kAssetName, &name) && ReadCString(name, key, keySize))
+                return true;
+        }
+        uint32_t name = 0; // no blueprint: the unlock's own name
+        if (ReadU32(unlock + kAssetName, &name) && ReadCString(name, key, keySize))
+            return true;
+    }
+    return false;
+}
+
 // The controller's weapon, by the chain in the header. *why = the step that failed.
 bool Resolve(uintptr_t controller, char* key, size_t keySize, const char** why)
 {
@@ -153,22 +181,8 @@ bool Resolve(uintptr_t controller, char* key, size_t keySize, const char** why)
         return false;
     }
     g_owner.store(owner, std::memory_order_relaxed);
-    // The unlock asset: the nearest before the controller field.
-    for (uint32_t off = kOwnerController - 4; off >= 4; off -= 4)
-    {
-        uint32_t unlock = 0, blueprint = 0;
-        if (!ReadU32(owner + off, &unlock) || !IsTypeNamed(unlock, "SoldierWeaponUnlockAsset"))
-            continue;
-        if (ReadU32(unlock + kUnlockWeapon, &blueprint) && Plausible(blueprint))
-        {
-            uint32_t name = 0;
-            if (ReadU32(blueprint + kAssetName, &name) && ReadCString(name, key, keySize))
-                return true;
-        }
-        uint32_t name = 0; // no blueprint: the unlock's own name
-        if (ReadU32(unlock + kAssetName, &name) && ReadCString(name, key, keySize))
-            return true;
-    }
+    if (SoldierWeaponKey(owner, key, keySize))
+        return true;
     *why = "no SoldierWeaponUnlockAsset in the ClientSoldierWeapon";
     return false;
 }
@@ -219,6 +233,32 @@ unsigned GetEquippedWeaponGeneration()
 bool GetReflectedTypeName(uintptr_t object, char* out, size_t size)
 {
     return TypeName(object, out, size);
+}
+
+bool GetEquippedOpticState(bool* magnifierOn, int* zoomLevel)
+{
+    const uintptr_t controller = reinterpret_cast<uintptr_t>(g_active.load(std::memory_order_relaxed));
+    uint32_t magnifier = 0, zoom = 0;
+    if (!controller || !ReadU32(controller + kControllerMagnifier, &magnifier) ||
+        !ReadU32(controller + kControllerZoomLevel, &zoom) || magnifier > 1 || zoom > 8)
+        return false; // not the layout seen live: don't guess
+    if (magnifierOn)
+        *magnifierOn = magnifier != 0;
+    if (zoomLevel)
+        *zoomLevel = static_cast<int>(zoom);
+    return true;
+}
+
+bool GetSoldierWeaponName(uintptr_t soldierWeapon, char* key, size_t keySize, char* display, size_t displaySize)
+{
+    char k[160] = "";
+    if (!IsTypeNamed(soldierWeapon, "ClientSoldierWeapon") || !SoldierWeaponKey(soldierWeapon, k, sizeof(k)))
+        return false;
+    if (key && keySize)
+        snprintf(key, keySize, "%s", k);
+    if (display && displaySize)
+        DisplayName(k, display, displaySize);
+    return true;
 }
 
 uintptr_t GetEquippedSoldierWeapon()

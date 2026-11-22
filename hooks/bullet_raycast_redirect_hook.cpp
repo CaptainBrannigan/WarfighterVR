@@ -244,7 +244,7 @@ struct ThisCallTrampoline
         // not 11.7, and every one was sent back to the hand, holding each bullet there until the game's time came back
         // (live 2026-11-01: hundreds of casts a second from the hand, no hits until the slow motion ended).
         constexpr float kFirstSegmentMetres = 3.0f;
-        Vec3 movedStart = origin;
+        alignas(16) Vec3 movedStart = origin; // the game's own vectors are 16-byte aligned (hooks/laser_raycast.cpp)
         Vec3* castStart = start;
         float laserStart[3];
         if (!ContinuesASegment(origin) && GetLaserShotStart(laserStart))

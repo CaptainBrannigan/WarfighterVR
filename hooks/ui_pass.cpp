@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 
 namespace mohw {
 namespace {
@@ -28,40 +29,143 @@ using ReplayFn = void(__fastcall*)(void* state, void* edx, int list);
 ReplayFn g_originalReplay = nullptr;
 void* g_replayAddress = nullptr;
 
-// UI LAYOUT SIZE (2026-11-12, setting UiLayoutScale). FUN_00CB7480 (OFFSET_UI_LAYOUT_RECT): __thiscall(Scaleform state,
-// int out[4]) -> out, RET 4: the screen rectangle the UI lays its movies out in -- DxRenderer +0x1A0 (the screen, x y w
-// h) inside the safe area (+0x2344/+0x2348 of the state). Every movie's viewport comes from it: the UI manager's update
-// (FUN_008fcfd0 -> FUN_008f4c70, re-laid out whenever it changes) and each movie's constructor (FUN_00a75220). The
-// menus are laid out in pixels, so with the backbuffer at SteamVR's eye size they came out smaller the higher the
-// resolution (the user, 2026-11-12: "the menu gets smaller and smaller"). Dividing the rectangle by the setting lays
-// the UI out as on a screen that much smaller: menus that much bigger, still drawn at the full resolution, since the
-// mod's placement sets the viewport the UI is drawn into (draw_trace_diag.cpp). Markers stay right: their caller
-// (FUN_016ab1c0) maps a fraction of the screen into the HUD movie's own visible rectangle. Only with the HUD placement
-// on (without it the UI would draw into the top-left part of the frame).
+// UI LAYOUT SIZE (2026-11-12; from the resolution since 2026-11-22, settings.h GetUiLayoutScale). FUN_00CB7480
+// (OFFSET_UI_LAYOUT_RECT): __thiscall(Scaleform state, int out[4]) -> out, RET 4: the screen rectangle the UI lays its
+// movies out in -- DxRenderer +0x1A0 (the screen, x y w h) inside the safe area (+0x2344/+0x2348 of the state). Every
+// movie's viewport comes from it: the UI manager's update (FUN_008fcfd0 -> FUN_008f4c70, re-laid out whenever it changes)
+// and each movie's constructor (FUN_00a75220, FUN_00cba390, FUN_00ec1840). The menus are laid out in pixels, so with the
+// backbuffer at SteamVR's eye size they came out smaller the higher the resolution (the user, 2026-11-12: "the menu gets
+// smaller and smaller"). So the UI is laid out as on a screen `scale` times smaller:
+// - ABOVE 1 the rectangle is divided by it: menus that much bigger, still drawn at the full resolution, since the mod's
+//   placement sets the viewport the UI is drawn into (draw_trace_diag.cpp).
+// - BELOW 1 (a screen under about 3883 wide) that rectangle would reach past the backbuffer, and the game's renderer
+//   clips what does (OFFSET_UI_MOVIE_SET_VIEWPORT). So it stays the screen's, and each movie gets the same visible stage
+//   through GFx's viewport scale instead (HookedMovieViewport). The rectangle then doesn't change with the scale, so
+//   the state's re-layout byte is set when the scale does.
+// Markers stay right: their caller (FUN_016ab1c0) maps a fraction of the screen into the HUD movie's own visible
+// rectangle. Only with the HUD placement on (without it the UI would draw into the top-left part of the frame).
 using LayoutRectFn = int*(__fastcall*)(void* state, void* edx, int* out);
 LayoutRectFn g_originalLayoutRect = nullptr;
 void* g_layoutRectAddress = nullptr;
+using MovieViewportFn = void(__fastcall*)(void* self, void* edx, int x, int y, int w, int h);
+MovieViewportFn g_originalMovieViewport = nullptr;
+void* g_movieViewportAddress = nullptr;
+
+// The last rectangle handed out, with its scale: the game passes it straight on to the movies' SetViewport. Guarded by
+// g_layoutMutex.
+struct Layout
+{
+    int x, y, w, h;
+    float scale;
+};
+std::mutex g_layoutMutex;
+Layout g_layout = {0, 0, 0, 0, 1.0f};
+
+void RequestRelayout(void* state)
+{
+    __try
+    {
+        static_cast<uint8_t*>(state)[UI_STATE_RELAYOUT] = 1;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+}
 
 int* __fastcall HookedLayoutRect(void* state, void* edx, int* out)
 {
     int* result = g_originalLayoutRect(state, edx, out);
-    const float scale = GetUiLayoutScale();
-    if (!out || !GetHudPlacementEnabled() || !(scale >= 0.25f && scale <= 8.0f) || fabsf(scale - 1.0f) < 0.001f)
+    if (!out)
         return result;
     int before[4];
     memcpy(before, out, sizeof(before));
-    for (int i = 0; i < 4; ++i)
-        out[i] = static_cast<int>(floorf(static_cast<float>(out[i]) / scale + 0.5f));
-    static float lastScale = 0.0f; // render thread
-    static int lastBefore[4] = {};
-    if (scale != lastScale || memcmp(before, lastBefore, sizeof(before)) != 0)
+    float scale = GetHudPlacementEnabled() ? GetUiLayoutScale(before[2] - before[0]) : 1.0f;
+    if (!(scale >= 0.05f && scale <= 8.0f) || fabsf(scale - 1.0f) < 0.001f || (scale < 1.0f && !g_movieViewportAddress))
+        scale = 1.0f;
+    if (scale > 1.0f)
+        for (int i = 0; i < 4; ++i)
+            out[i] = static_cast<int>(floorf(static_cast<float>(out[i]) / scale + 0.5f));
+
+    std::lock_guard<std::mutex> lock(g_layoutMutex);
+    const Layout now = {out[0], out[1], out[2] - out[0], out[3] - out[1], scale};
+    if (memcmp(&now, &g_layout, sizeof(now)) != 0)
     {
-        lastScale = scale;
-        memcpy(lastBefore, before, sizeof(before));
-        MOHW_LOG(kLogFile, "HUD element scale %.2f: the UI's screen rectangle (%d,%d)-(%d,%d) -> (%d,%d)-(%d,%d)", scale,
-                 before[0], before[1], before[2], before[3], out[0], out[1], out[2], out[3]);
+        if (scale != g_layout.scale)
+            RequestRelayout(state);
+        g_layout = now;
+        MOHW_LOG(kLogFile, "HUD element scale %.3f: the UI's screen rectangle (%d,%d)-(%d,%d) -> (%d,%d)-(%d,%d)%s", scale,
+                 before[0], before[1], before[2], before[3], out[0], out[1], out[2], out[3],
+                 scale < 1.0f ? ", the movies scaled down by their viewports" : "");
     }
     return result;
+}
+
+// Below 1: the stage a screen 1 / scale times larger would show, in this screen's own viewport. The game has just set
+// the movie up for this screen; only the viewport's scale and, under 1920x1080, the scale mode differ. A layout that is
+// itself under 1920x1080 needs neither: the game shows its whole stage at any size there.
+bool ScaleMovieDown(void* self, int w, int h, float scale)
+{
+    constexpr int kNoScaleWidth = 1920, kNoScaleHeight = 1080; // FUN_00cbea10's
+    constexpr float kNoScaleViewportScale = 2.0f / 3.0f;       // DAT_02758850
+    constexpr int kViewportDwords = 13, kViewportScaleAt = 10;
+    if (floorf(static_cast<float>(w) / scale + 0.5f) < kNoScaleWidth ||
+        floorf(static_cast<float>(h) / scale + 0.5f) < kNoScaleHeight)
+        return false;
+    __try
+    {
+        uint8_t* movie = *reinterpret_cast<uint8_t**>(static_cast<uint8_t*>(self) + UI_MOVIE_GFX);
+        if (!movie)
+            return false;
+        void* const* vtable = *reinterpret_cast<void* const* const*>(movie);
+        void* const setViewport = vtable[GFX_VTABLE_SET_VIEWPORT / 4];
+        void* const setMode = vtable[GFX_VTABLE_SET_SCALE_MODE / 4];
+        if (setViewport != Offset<void*>(OFFSET_GFX_SET_VIEWPORT) || setMode != Offset<void*>(OFFSET_GFX_SET_SCALE_MODE))
+            return false; // not the movie class these offsets are for
+        uint32_t viewport[kViewportDwords];
+        memcpy(viewport, movie + GFX_MOVIE_VIEWPORT, sizeof(viewport));
+        const float viewportScale = kNoScaleViewportScale / scale;
+        memcpy(&viewport[kViewportScaleAt], &viewportScale, sizeof(viewportScale));
+        using SetFn = void(__fastcall*)(void* movie, void* edx, uintptr_t arg);
+        reinterpret_cast<SetFn>(setMode)(movie, nullptr, 0); // no scale
+        reinterpret_cast<SetFn>(setViewport)(movie, nullptr, reinterpret_cast<uintptr_t>(viewport));
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
+}
+
+void __fastcall HookedMovieViewport(void* self, void* edx, int x, int y, int w, int h)
+{
+    g_originalMovieViewport(self, edx, x, y, w, h);
+    float scale = 1.0f;
+    {
+        std::lock_guard<std::mutex> lock(g_layoutMutex);
+        if (x == g_layout.x && y == g_layout.y && w == g_layout.w && h == g_layout.h)
+            scale = g_layout.scale;
+    }
+    if (scale >= 1.0f || w <= 0 || h <= 0)
+        return;
+    const bool scaled = ScaleMovieDown(self, w, h, scale);
+    static std::atomic<int> lines{0};
+    if (lines.fetch_add(1, std::memory_order_relaxed) < 12)
+        MOHW_LOG(kLogFile, "UI movie %p at %dx%d, scale %.3f: %s", self, w, h, scale,
+                 scaled ? "scaled down by its viewport" : "left as the game set it");
+}
+
+bool MovieViewportPrologueMatches(const void* address)
+{
+    __try
+    {
+        // sub esp,0x44; mov eax,[esp+0x48] (Ghidra, MOHW_dump_SCY.exe)
+        static const uint8_t expected[] = {0x83, 0xEC, 0x44, 0x8B, 0x44, 0x24, 0x48};
+        return memcmp(address, expected, sizeof(expected)) == 0;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        return false;
+    }
 }
 
 // The UI render interface's clear (OFFSET_UI_RENDER_INTERFACE, vtable +0x08): __thiscall(self, flags, const float
@@ -304,12 +408,34 @@ bool InstallUiPassHook()
     else
     {
         MOHW_LOG(kLogFile, "UI layout rectangle hook installed (FUN_00CB7480 @ %p)", g_layoutRectAddress);
+
+        // Without it the scale stops at 1 (the game's own size) on smaller screens, rather than clipping.
+        void* movieViewport = Offset<void*>(OFFSET_UI_MOVIE_SET_VIEWPORT);
+        if (MovieViewportPrologueMatches(movieViewport) &&
+            MH_CreateHook(movieViewport, reinterpret_cast<void*>(&HookedMovieViewport),
+                          reinterpret_cast<void**>(&g_originalMovieViewport)) == MH_OK &&
+            MH_EnableHook(movieViewport) == MH_OK)
+        {
+            g_movieViewportAddress = movieViewport;
+            MOHW_LOG(kLogFile, "UI movie viewport hook installed (FUN_00CBEA10 @ %p)", movieViewport);
+        }
+        else
+        {
+            MOHW_LOG(kLogFile, "UI movie viewport hook (FUN_00CBEA10 @ %p) FAILED -- no HUD element scale below 1",
+                     movieViewport);
+        }
     }
     return true;
 }
 
 void RemoveUiPassHook()
 {
+    if (g_movieViewportAddress)
+    {
+        MH_DisableHook(g_movieViewportAddress);
+        MH_RemoveHook(g_movieViewportAddress);
+        g_movieViewportAddress = nullptr;
+    }
     if (g_layoutRectAddress)
     {
         MH_DisableHook(g_layoutRectAddress);

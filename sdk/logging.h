@@ -18,14 +18,34 @@
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
+#include <atomic>
 #include <cstdio>
 #include <cstdarg>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
 
 namespace mohw {
+
+// LOG FILES SWITCH (2026-11-14, the user: "for now turn off all of our logs", after a level start spent seconds writing
+// thousands of lines from the render thread). Every log line, and the diagnostic dumps (frame and UI snapshots, memory
+// dumps, the HUD pass capture), only while it's on: the dashboard's Diagnostics > "Write log files", WriteLogFiles in
+// the ini, default off (sdk/settings.cpp). Off, MOHW_LOG doesn't evaluate its arguments either. Lines from before the
+// settings load are dropped. Not affected: the SteamVR action manifest and bindings, and the settings file.
+inline std::atomic<bool> g_logsEnabled{false};
+
+// THE DRIVING MISSIONS' LOGS (2026-11-18, bringing engine two-view to game\MOHWD.exe after a run that went black with no
+// logs to say why): set by proxy_dll/dllmain.cpp in MOHWD.exe. Its logs are written whatever the switch says, and named
+// mohwvr_driving_*.log -- it writes to MOHW.exe's folder, and MOHW.exe's next launch used to move its files to
+// .previous (and the launch after that lost them).
+inline std::atomic<bool> g_drivingLogs{false};
+
+inline bool LogsEnabled()
+{
+    return g_logsEnabled.load(std::memory_order_relaxed) || g_drivingLogs.load(std::memory_order_relaxed);
+}
 
 // Log files truncated at first-open-this-session (see Log()'s comment)
 // are the default -- these are all live-debugging aids tied to whatever's
@@ -103,6 +123,16 @@ inline std::string LogFilePath(const char* fileName)
     return DataFolder() + fileName;
 }
 
+// A log file's path: the driving missions' logs as mohwvr_driving_*.log (g_drivingLogs). Logs only -- the settings and
+// SteamVR files go through LogFilePath, shared by both executables.
+inline std::string LogTargetPath(const char* fileName)
+{
+    if (g_drivingLogs.load(std::memory_order_relaxed) && strncmp(fileName, "mohwvr_", 7) == 0 &&
+        strstr(fileName, "driving") == nullptr)
+        return DataFolder() + "mohwvr_driving_" + (fileName + 7);
+    return DataFolder() + fileName;
+}
+
 // Function-local statics in an inline function are merged across every TU
 // that includes this header (guaranteed since C++17, which this project
 // already targets) -- so this is the one shared handle cache/mutex for the
@@ -130,7 +160,7 @@ inline std::unordered_map<std::string, long long>& LogFileSizes()
     return sizes;
 }
 
-inline void Log(const char* fileName, const char* fmt, ...)
+inline void LogV(const char* fileName, const char* fmt, va_list args)
 {
     std::lock_guard<std::mutex> lock(LogMutex());
 
@@ -156,7 +186,7 @@ inline void Log(const char* fileName, const char* fmt, ...)
         // lines / 63% of it a single throttling bug's output from one
         // 21-second window -- see constantbuffer_hook.cpp's
         // LogPoseTableIfLockedEntity history).
-        std::string path = LogFilePath(fileName);
+        std::string path = LogTargetPath(fileName);
         bool preserveHistory = PreserveHistoryLogFiles().count(fileName) != 0;
         // The previous session's file is kept as <name>.previous.log (2026-09-30): a crash followed by a relaunch
         // used to truncate the crashed session's logs before they could be read.
@@ -189,12 +219,7 @@ inline void Log(const char* fileName, const char* fmt, ...)
     SYSTEMTIME st;
     GetLocalTime(&st);
     int written = fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-
-    va_list args;
-    va_start(args, fmt);
     written += vfprintf(f, fmt, args);
-    va_end(args);
-
     fprintf(f, "\n");
     fflush(f); // keep durable for crash forensics without paying open/close cost per call
 
@@ -205,13 +230,36 @@ inline void Log(const char* fileName, const char* fmt, ...)
         fclose(f);
         handles.erase(fileName);
         size = 0;
-        std::string path = LogFilePath(fileName);
+        std::string path = LogTargetPath(fileName);
         size_t dot = path.find_last_of('.');
         std::string older = (dot == std::string::npos ? path : path.substr(0, dot)) + ".older.log";
         MoveFileExA(path.c_str(), older.c_str(), MOVEFILE_REPLACE_EXISTING); // the next line opens a new one
     }
 }
 
+inline void Log(const char* fileName, const char* fmt, ...)
+{
+    if (!LogsEnabled())
+        return;
+    va_list args;
+    va_start(args, fmt);
+    LogV(fileName, fmt, args);
+    va_end(args);
+}
+
+// Written whatever the switch says (2026-11-17, the user: "turn on logs for that specifically"): only the probes the user
+// asked to keep on (hooks/perf_probe.h, hooks/holster_probe.h), each a line a second or less.
+inline void LogAlways(const char* fileName, const char* fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    LogV(fileName, fmt, args);
+    va_end(args);
+}
+
 } // namespace mohw
 
-#define MOHW_LOG(file, ...) ::mohw::Log(file, __VA_ARGS__)
+// An expression, usable wherever a call is; with the logs off the arguments aren't evaluated (two calls reset
+// logging-only counters in theirs, which then just keep counting).
+#define MOHW_LOG(file, ...) (::mohw::LogsEnabled() ? ::mohw::Log(file, __VA_ARGS__) : (void)0)
+#define MOHW_LOG_ALWAYS(file, ...) ::mohw::LogAlways(file, __VA_ARGS__)

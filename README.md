@@ -32,9 +32,11 @@ separate executable; with the copy there, those missions get stereo and head loo
 
 Start SteamVR, then launch the game normally. The mod creates `mohwvr_settings.ini` and its SteamVR action and
 binding files next to the DLL on first launch. The settings start from the author's own tuned values (including the
-weapon profiles made so far, see [Weapon profiles](#motion-controllers)); an existing `mohwvr_settings.ini` is kept, and
-only gains the built-in weapon profiles for weapons it has none for. Settings are changed from inside the headset
-(see [Settings menu](#settings-menu)).
+weapon profiles made so far, see [Weapon profiles](#motion-controllers)), with no grip roll on any gun; an existing
+`mohwvr_settings.ini` is kept, and only gains the built-in weapon profiles for weapons it has none for (delete it to
+start from the current defaults). Two things in an older one change by themselves: the -10 degree grip roll earlier
+versions started with becomes 0, and "Hud Element Scale" starts again at 1, which is automatic. Settings are changed
+from inside the headset (see [Settings menu](#settings-menu)).
 
 **No headset, no mod:** the mod only switches on once it has connected to a headset through SteamVR. Without one the
 game runs completely unmodified (nothing is hooked), so you can leave the DLL installed and play flat. The mod never
@@ -64,16 +66,16 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
 - Pre-rendered movies, menus and loading screens are shown as a floating screen (see [Known issues](#known-issues)).
 - **Two render modes in one DLL** (View > "Render mode", the first row):
   - **Alternating eye** (the original): one eye per frame.
-  - **Engine two-view:** in play, the game renders both eyes in one frame through its own two-view path. Movies,
+  - **Engine two-view** (the default): in play, the game renders both eyes in one frame through its own two-view path. Movies,
     menus, loading screens and cutscenes before you have control stay on the floating screen. The first-person weapon
-    and the HUD are drawn per eye, the in-world markers in the right direction at the HUD's depth, and the desktop
+    and the HUD are drawn per eye, the in-world markers in the right direction at the HUD's depth (5 m: HUD IPD is 0.02 here by default), and the desktop
     window shows both eyes side by side. The ocean water's per-view jobs are kept in order, which fixed the crashes
     in levels with open water.
 
   A change applies fully at the next level load: while the level in play was loaded in the other mode, a note under
   the setting says so ("Changed: reload the level to apply"). The menu shows only the selected mode's settings. The
   HUD's numbers (menu/movie screen size and distance, Hud Element Scale, HUD scale, depth, IPD and offsets) are kept
-  per mode, so each mode keeps its own tuning; the driving missions always use the alternating-eye values. Details:
+  per mode, so each mode keeps its own tuning; the driving missions use the selected mode's too. Details:
   [docs/native_stereo_render_path.md](docs/native_stereo_render_path.md).
 - **The sky is drawn with exact view rays** (View > "Exact sky rays", on by default). The game's own rays warp the
   clouds differently in each eye with a headset's wide, off-centre view.
@@ -84,16 +86,17 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   two-view only): the game's depth of field blurs the whole side-by-side frame, so each eye got a faint copy of both
   eyes' images (seen in cutscenes once the camera is on the player). Turned off while two views render, including the
   ADS blur.
-- **Experimental, off by default: backbuffer at SteamVR's eye size** (View > "Backbuffer at SteamVR eye size", engine
+- **Experimental, on by default: backbuffer at SteamVR's eye size** (View > "Backbuffer at SteamVR eye size", engine
   two-view only). In two-view each eye is only half the game's resolution; this asks the game for SteamVR's recommended
   eye size, two side by side (e.g. 5824x3112), through its own resize path, so the world and the HUD reach the headset
   at SteamVR's resolution. Needs "Keep game out of exclusive fullscreen". Switched on mid-level, it shows fully after
   a level reload. Details: [docs/native_stereo_render_path.md](docs/native_stereo_render_path.md).
-- **HUD element scale** (HUD > "Hud Element Scale", 1 = the game's own): the game lays its menus out in pixels, so at
-  a high resolution they come out small. Above 1 lays the UI out as on a screen that much smaller, so the menus are
-  bigger again and still drawn at the full resolution. Applies live. The HUD section sits under View, in the first
-  column of the settings.
-- The floating screen's distance is its own setting (HUD > "Menu / movie screen distance", 2.5 m by default).
+- **HUD element scale** (HUD > "Hud Element Scale", 1 = automatic): the game lays its menus out in pixels, so they
+  would shrink as the resolution rises. The scale follows the resolution's width, so they look the same size at any
+  resolution and in both render modes: 1.5 at 5824 wide, 1 at about 3883, about 0.5 at 1920, always drawn at the full
+  resolution. The setting multiplies that: above 1 bigger, below 1 smaller. Applies live, with HUD placement on (not in
+  the driving missions). The HUD section sits under View, in the first column of the settings.
+- The floating screen's distance is its own setting (HUD > "Menu / movie screen distance", 0.7 m by default).
 
 ### Scripted scenes
 - **The game's own input locks mark scripted scenes** (View > "Scripted scenes follow the game's input locks", on by
@@ -106,6 +109,8 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
     the shots, laser and sight dots go back to the game's aim, and the reticle returns;
   - in either case the body is where the game puts it: no Body offset or "Keep body upright" turn and no "Keep body
     and gun steady" easing.
+  - when look comes back, wherever your head faces becomes straight ahead, so the view carries on from the scene's
+    last camera instead of swinging back to the old forward (2026-11-21).
 
   Every change is logged in `mohwvr_control.log` ("INPUT LOCKS"), with the inputs taken. Details:
   [docs/camera_state_and_resets.md](docs/camera_state_and_resets.md).
@@ -129,11 +134,21 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   grip positions were removed, 2026-11-09). The hand sits on its controller ("Right hand ..." in Arm IK), and "Gun
   offset in the hand right / up / forward" fine-tunes the gun in it for all guns. The profiles' grip rotation still
   applies. Details: [docs/weapons_sockets_magazines.md](docs/weapons_sockets_magazines.md).
+- **No idle animations under your hands** (Arm IK > "Hold hands and gun still (no idle animations)", on by default,
+  2026-11-21): about a second after a weapon comes in, once you're not aiming down sights and the pose is still, the
+  mod takes that pose (the hands, fingers, the gun in the hand, and the support hand on the gun) and holds it while
+  you have control. Idle fidgets, breathing and walking bob no longer move the hands against the controllers or the
+  gun in the hand. If it's ever taken at a bad moment, switch weapons (or the setting off and on) to take it again.
 - **Weapon socket view** (Hands > "Show weapon sockets (debug lines)", off by default): every bone of the gun's
   skeleton drawn in the headset as a line from its parent to itself, with its name, plus each hand's weapon bone. For
   checking where the gun's grip points are against the hands.
 - **Two-handed aiming:** grip with your other hand on the barrel to aim along the line between your hands. Only the
-  other hand's position counts (its palm, the SteamVR grip pose), so turning that hand doesn't move the aim.
+  other hand's position counts (its palm, the SteamVR grip pose), so turning that hand doesn't move the aim. Each
+  weapon profile's "Secondary grip offset right / up / forward" moves the point aimed at from your hand to where it
+  really holds the gun (below the bore for a vertical foregrip; forward along the barrel sets how far right / up tilt
+  the aim). **Pistols** (2026-11-21) aim with the weapon hand alone: gripping with the other hand anywhere on the
+  barrel line or within "Two-hand grab radius" of the weapon hand puts that hand on the pistol, and the aim doesn't
+  change. Pistols are told by their name in the game data, so the MP7 aims two-handed even when it's your sidearm.
 - **Left-handed mode.** With the gun in the left hand the game's arms swap roles, each hand mirroring the other's pose.
 - **Arms on your hands:** the first-person arms follow the controllers, with two-bone IK and an elbow model that
   follows your wrist. Each hand follows its own controller, the weapon hand included (it used to ride the gun); the
@@ -147,13 +162,20 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
 - **Manual reload:** there's no reload animation; you change the magazine yourself.
   1. Grip the magazine in the gun with your other hand. Your hand stays where it grabbed, on the magazine.
   2. Press the **magazine release** (the gripping hand's X / A by default, the SteamVR action "Magazine release") and
-     pull it out the way the gun's platform takes it: straight down an AR's magwell, rocked forward on an AK's front
-     lug. It only starts moving once you've pulled past the platform's pull force, and follows that far behind; at the
-     end of its travel it comes free and your hand returns to the controller. The gun can't fire once it's moving.
-  3. Let go away from the gun, and the magazine moves to a pouch on your chest.
-  4. Grip at the pouch to take it, and bring it to the magwell: its insertion point (the in-hand magazine's top) is
-     what counts. In range it turns onto the way in; at the lock distance it engages and your hand sticks to it.
-  5. Push it home (an AK: rock it back) past the pull force to seat it.
+     pull it straight down out of the magwell. It only starts moving once you've pulled past the platform's pull force,
+     and follows that far behind; at the end of its travel it comes free, staying where your hand had it, and your hand
+     returns to the controller. The gun can't fire once it's moving.
+  3. Let go away from the gun, and the magazine moves to a pouch on your chest ("Mag in pouch pitch / yaw / roll" in
+     the Holsters settings turn it there).
+  4. Grip at the pouch to take it. How it sits in your hand is "Mag taken from the pouch" (Holsters settings):
+     - **Snapped, vertical from the grip** (default): it snaps to the platform's hold ("Mag in hand" X / Z / pitch /
+       yaw / roll), but stays as far up or down the magazine as you gripped it: grip it low and it sticks up out of
+       your hand, grip it near the top and it hangs below. The hold's Y moves it up or down from there.
+     - **Snapped to the hand:** the whole hold, Y included.
+     - **Kept where grabbed:** it stays where it sat relative to your hand.
+
+     The hold is for the left hand, mirrored in the right. Bring its top to the magwell: in range ("Magazine starts turning at") it turns onto the way in, inside "Magazine locks horizontal at"
+     it's held on the magwell's line, and brought up to the seat ("Magazine seats within") it seats. No push needed.
 
   Pulling a magazine and pushing the same one back in costs nothing. The Reload button drops the magazine, as does the
   game's auto-reload when empty. The ammo count stays the game's own. If your hand gets further than "Magazine grip lets
@@ -161,26 +183,32 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   profiles**); the rest is per platform (see **Magazine platforms**).
 - **Magazine platforms:** every gun's magazine belongs to a platform (AK, AR-15 / 5.56, AR-10 / 7.62, SMG, bolt-action
   rifle, LMG box, shotgun box, other), picked from its name, or set with "Magazine platform" in its weapon profile.
-  Everything in a platform is shared by every gun on it: where the magazine sits in your hand ("Magazine in hand"
-  right / up / forward / pitch / yaw / roll), straight or hinged ("In and out of the gun"), the travel or the hinge
-  point and angle, the pull force, and whether it needs the magazine release. The **Magazine platform:** *name* group
-  in the settings edits the platform of the gun in your hand.
+  Everything in a platform is shared by every gun on it: how a magazine from the pouch sits in the hand, the travel to
+  clear the magwell, the pull force to pull it out, and whether it needs the magazine release (by default all but
+  AR-15 / 5.56 do). The **Magazine platform:** *name* group in the settings edits the platform of the gun in your hand.
 - **Magazine release action:** its own SteamVR action set, "Magazine", active only while a hand grips a magazine and
   only for that hand, so the button can do something else the rest of the time. A SteamVR binding saved before it
   existed has nothing on it: then the gripping hand's X / A (left / right) works as the release and stays away from
   the game while you hold the magazine. Re-select "MOHW VR defaults" in SteamVR's bindings to get it bound properly.
-- **Scoped eye (prototype, engine two-view):** bring one eye behind a scope's sight line (the weapon profile's optic
-  zero: within "Eye box" of it, up to "Eye relief" behind your hand) while aiming down sights, and that eye sees
-  through the scope: the world magnified by the game's own zoom for that gun (or the profile's "Scope magnification"),
-  inside an eyepiece that narrows as your eye leaves the line, black around it. The other eye keeps its own view, the
-  gun included. It costs nothing extra: the scoped view replaces that eye's normal one. The game's own zoom-optic mesh
-  (its reticle) stays in the scoped view; a drawn crosshair stands in when there's none. Only zooms of at least "Game
-  ADS zoom that counts as a scope" (2.5x) count, so red dots and iron sights aren't magnified. Settings: the **Scope**
-  group (shown in the engine two-view mode).
-- **Lens picture (prototype, screen space, engine two-view):** with a scope in use and neither eye behind it, both eyes
-  see a magnified picture inside the scope's lens (a disc of "Lens radius", "Lens distance ahead of the hand" along the
-  sight line), taken from the other eye's view of the sight line's far field (it sees past the scope rather than
-  through it). Drawn over the frame, so it ignores anything in front of the lens.
+- **Scopes (prototype, engine two-view), set up per gun:** a gun has a scope when its weapon profile gives it a "Scope
+  magnification" (0 = no scope). It works without aiming down sights in the game. The profile also places the scope's
+  lens on that gun: "Scope lens right" / "Scope lens up" from the optic zero, "Scope lens forward" from the hand, and
+  its "Scope lens radius". For a red dot with a flip-to-side magnifier, set "Scope shows" to "Only with the game's
+  magnifier on": the scope then appears only while the game's magnifier is switched on (ADS and click the right stick
+  to flip it; it stays flipped after you let go of ADS). The **Scope** group holds what every scope shares (the scoped
+  eye's eye box, eye relief, eyepiece size, drawn crosshair, and the lens picture on / off).
+  - **Scoped eye** (off by default; the lens picture is on): bring one eye behind the sight line (the profile's optic zero: within "Eye box" of it, up to "Eye
+    relief" behind your hand) and that eye sees through the scope, magnified, inside an eyepiece that narrows as your
+    eye leaves the line, black around it. The other eye keeps its own view, the gun included. It costs nothing extra:
+    the scoped view replaces that eye's normal one.
+  - **Lens picture (screen space):** with neither eye behind the scope, both eyes see a magnified picture inside the
+    lens, taken from the other eye's view (it sees past the scope rather than through it). Drawn over the frame, so it
+    ignores anything in front of the lens.
+  - **Holographic crosshair:** both show a crosshair on the impact point, placed where that eye sees the laser's point
+    (the same spot as the laser dot), and the magnified picture is anchored there. Wherever you see the crosshair is
+    where the shots land, whatever your eye's offset from the sight line: it moves a little inside the eyepiece or lens
+    instead of drifting off the target. Without the laser running it marks the sight line. The game's own zoom-optic
+    reticle isn't used ("Crosshair on the impact point" in the Scope group turns ours off).
 - **Body holsters:** press grip with a hand at a body position to trigger an action. That hand also takes the weapon
   if the action is a weapon.
 
@@ -191,7 +219,10 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   | Chest | Throw grenade |
   | Either shoulder | Melee |
 
-  Zone positions, size and actions are all adjustable; actions can be any of the game's keyboard actions.
+  Zone positions, size and actions are all adjustable; actions can be any of the game's keyboard actions. A held grip
+  that eases off and comes back within 0.3 s is the same hold, not a new press, so it can't fire the zone your hand
+  is in (2026-11-21: a held left grip easing off during a thumbrest double tap threw grenades at the chest). On Touch a
+  grip only counts as let go once it has been released for 0.1 s.
 - **Laser:** a dot exactly on the line the shots take, with no offset of its own, sitting on the first surface that
   line hits (found with the game's own collision, so it lands on walls, cover and enemies at the right depth), with a
   semi-transparent beam in the same colour from your hand to it. Shots and tracers are aimed at the dot, so they land
@@ -212,7 +243,7 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   and switch automatically with the weapon in your hand (picked-up weapons included). The settings menu's "Weapon
   profile: <weapon>" section edits the weapon you're holding; a weapon you haven't set up yet starts from the default
   values, which are also used when no weapon is held. The mod ships with profiles for the weapons used so far (AK-103,
-  AKM, OBR, AKS-74U, PKP, HK45C, MP7, TAC-300). The campaign hasn't been played all the way through yet, so later
+  AKM, OBR 5.56, OBR 7.62, AKS-74U, HK416, Mk18, PKP, HK45C, MP7, TAC-300). The campaign hasn't been played all the way through yet, so later
   weapons have no profile and use the defaults until you set them up.
 
 ### Driving missions
@@ -220,8 +251,35 @@ The game runs its driving missions in a separate executable (`game\MOHWD.exe`, s
 mod covers it too.
 - Stereo at each eye's real field of view, with head pitch and roll. Head yaw turns the game's own vehicle camera
   (as right-stick look, up to the game's limit), so the view is never cut off where you look.
+- **Both render modes** (2026-11-18, engine two-view new and untested): View > "Render mode" applies here as well. In
+  engine two-view the HUD is drawn into each eye's half at the HUD settings' place. Not there yet in two-view: depth
+  of field isn't turned off (cutscenes may show a faint double image), and the render scale and the eye-sized
+  backbuffer don't apply.
+- **Cutscenes show as the floating screen** (2026-11-21), as in the rest of the game: the game presents them with
+  vsync and play without, which is how they're told apart (with the game's own vsync on there's no difference, and
+  cutscenes stay in 3D).
+- **Exclusive fullscreen stays on here**: "Keep game out of exclusive fullscreen" doesn't apply to the driving
+  missions (a run with it went black at a few frames a second, sound and input still working).
+- **Logs are always written here for now**, as `mohwvr_driving_*.log` next to `MOHW.exe`, whatever "Write log files"
+  says.
 - The in-game menu shows in the HUD panel over the 3D world, as in the rest of the game, and head yaw and the wheel
   stay off the sticks while it's up.
+
+### Specialized sequences (new 2026-11-22, not yet tested in the headset)
+**Use 6DoF Motion For Specialized Sequences** in the dashboard switches all of them on or off (on by default). Each
+sequence also has its own profile below it. Off, a sequence plays as any other scene, still in stereo.
+
+#### Zodiac Sequence (the boat in Basilan)
+The RHIB sequence in Basilan is recognised by the level, the boat and your seat, so nothing here acts anywhere else.
+Its settings are in the dashboard's **Sequence profile: Zodiac Sequence** group.
+- **6DoF in both seats:** your head moves and turns in the boat, with a level horizon, and the view turns with the boat.
+  Your hands stay in the game's animation, on the wheel or the gun. Recenter sets straight ahead.
+- **Grenade launcher:** hold grip with one or both hands and move them as on the gun's handles: down and left sends the
+  barrel up and right. The turret is driven until its handles match your hands. Let go, and the thumbstick turns it,
+  with the view coming round. The mod doesn't move or re-pivot the gun, so aiming stays the game's. By the game's code
+  and data (not yet seen in play) grenades fly parallel to the barrel from 0.32 m above it, and drop with distance.
+- **Driving:** a steering wheel like the driving missions' (below): hold grip to steer. The triggers are throttle and
+  brake. The wheel's lock, placement and look are the profile's own, starting from your driving wheel's.
 
 #### Steering wheel
 Steer with your hands on a virtual wheel instead of the thumbstick.
@@ -231,7 +289,7 @@ Steer with your hands on a virtual wheel instead of the thumbstick.
 - **Two hands:** grip with both and the wheel turns by the average of the two hands' movement. Grabbing or letting go
   with either hand never makes the wheel jump, so you can steer hand over hand.
 - **Let go** with both hands and the wheel snaps back to centre; the thumbstick steers again.
-- **Full lock** is a hard stop at the "Wheel turn for full lock" angle (90 degrees by default): turning past it does
+- **Full lock** is a hard stop at the "Wheel turn for full lock" angle (190 degrees by default): turning past it does
   nothing more, and turning back takes effect straight away.
 - **Where it is:** fixed in your room, not to your head. It's set from where your head is at the start of the
   mission and at every recenter, so sit as you want to drive and recenter. Its distance forward, height below your
@@ -247,6 +305,11 @@ Steer with your hands on a virtual wheel instead of the thumbstick.
 All of it is in the settings menu's **Driving** section; "Steering wheel (hold grip)" switches it off.
 
 ### Controls
+The game reads a gamepad only while its window has keyboard focus. If the sticks and buttons are dead until you click
+the game's window, turn on Controls > "Controllers work without window focus" (off by default, 2026-11-22, untested in
+game; driving missions too). It doesn't cover holsters, whose key presses still need the window focused, or another
+controller the game has picked as its gamepad.
+
 The controllers drive a virtual Xbox gamepad, so the game itself maps buttons to actions in every context (on foot,
 vehicles, the Apache, menus). Default layout:
 
@@ -283,7 +346,8 @@ Other controllers use the same actions, moved to what each one has:
 Buttons that also have a double press (A, B, X) register a hold after 0.3 s, and a tap just after the double-press
 window; that is how SteamVR tells single from double presses. The grips are bound as their analog pull and the mod
 makes the press and the double-tap itself (SteamVR can't bind a double press on the Touch grip), so a grab is instant
-and a double-tap also counts as two quick grabs. Everything is rebindable in SteamVR. Besides the gamepad buttons (including LB, RB and Back, unbound by default),
+and a double-tap also counts as two quick grabs. A grip counts as pressed at 30 % pull and let go under 10 % (Index:
+squeeze force, unchanged). Everything is rebindable in SteamVR. Besides the gamepad buttons (including LB, RB and Back, unbound by default),
 every keyboard action the game has (read from your game profile, so in-game rebinds carry over) is available as its
 own SteamVR action, listed as "Keyboard: ...", alongside "Gamepad: ..." for the pad buttons.
 
@@ -296,18 +360,21 @@ is there, applies immediately and saves by itself. There is also a Recenter butt
 |---|---|
 | Head | Head look, its sensitivity and direction, head roll, head position |
 | View | Render mode (alternating eye or engine two-view), IPD, world scale, rotation smoothing, keeping the game out of exclusive fullscreen, exact sky rays, scripted scenes from the game's input locks; two-view only: screen effects in both eyes, depth of field, backbuffer at SteamVR eye size |
-| Controls | Turn speed, stick range, two-handed grab, shot spread, fire as mouse or triggers, double-tap bumpers |
+| Controls | Turn speed, stick range, two-handed grab, shot spread, fire as mouse or triggers, double-tap bumpers, controllers without window focus |
 | Hands | Left-handed, holster size, hand calibration, sight dots, laser beam |
 | Holsters | The grab zone view, each zone's position, the magazine pouch |
 | Holster actions | What each zone does |
 | Arm IK | Arms on or off, hand offsets, each shoulder's position, elbow behaviour |
 | Body | Body position, keeping it upright, steadying it on head turns |
 | Weapon | Gun follows the controller, manual reload, the magazine grip's break distance, which body parts are hidden |
-| Scope (engine two-view) | The scoped eye: on / off, eye box, eye relief, eyepiece size, the zoom that counts as a scope, the drawn crosshair; the lens picture, its distance and radius |
-| Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand, including its magazine platform and scope magnification |
-| Magazine platform: *platform* | The magazine in the hand, straight or hinged, travel, hinge point and angle, pull force, the release |
+| Scope (engine two-view) | What every scope shares: the scoped eye on / off, eye box, eye relief, eyepiece size, the drawn crosshair; the lens picture on / off |
+| Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand, including its magazine platform, its scope's magnification and where its lens sits |
+| Magazine platform: *platform* | Travel to clear the magwell, pull force out, the release |
 | HUD | The HUD panel on or off, its size, depth, IPD and offset, Hud Element Scale, the menu and movie screen size and distance, hiding the reticle (the numbers are kept per render mode) |
 | Driving | Head look, stereo and the steering wheel in the driving missions |
+| Specialized sequences | Use 6DoF Motion For Specialized Sequences: the switch over every sequence profile |
+| Sequence profile: Zodiac Sequence | 6DoF in the RHIB's seats, the grenade launcher's grip aim and how hard it follows, the wheel with its own lock, placement and look, stick deadzone compensation |
+| Diagnostics | Write log files: off by default, since logging costs frames; turn it on to report a problem (see [Troubleshooting](#troubleshooting)) |
 
 **Grab zone view:** turn on **Show grab zones (setup)** in Holsters to see everywhere a grip does something, drawn in
 the headset at its real position, so you can adjust it with the view on. Anything your hand is inside turns green.
@@ -317,7 +384,7 @@ the headset at its real position, so you can adjust it with the view on. Anythin
 | Blue labelled rings | The holster zones (they're spheres, and a ring is a sphere's outline from any side) |
 | Orange ring | The magazine pouch |
 | Yellow box | The magazine's grab box |
-| Purple / pink rings | The magazine's turn range and lock distance, around where it engages (the end of its path) |
+| Purple / pink rings | The magazine's turn range and lock distance, around its seat |
 | White / red dots | The magazine's seat and its aim point |
 | Green band | The two-handed grab along the barrel |
 
@@ -326,16 +393,20 @@ gun.
 
 ## Troubleshooting
 
-If the game runs flat, or the mod doesn't seem to do anything, open `mohwvr_startup.log` next to `MOHW.exe`. It
-reports the game build, SteamVR install, headset and controllers it found, and ends with why the mod is on or off.
-(`mohwvr_startup_driving.log` is the same for the driving missions.) If the game folder isn't writable, as under
-Program Files, the logs and settings are in `%LOCALAPPDATA%\MOHWVR` instead.
+**The mod writes no log files by default**, because logging costs frames. To get them, turn on Diagnostics > **Write
+log files** in the settings menu, or, if the mod isn't running far enough to show the menu, put `WriteLogFiles=1` in
+`mohwvr_settings.ini` next to `MOHW.exe` (create the file if it isn't there). Then start the game again.
+
+If the game runs flat, or the mod doesn't seem to do anything, turn the logs on and open `mohwvr_startup.log` next to
+`MOHW.exe`. It reports the game build, SteamVR install, headset and controllers it found, and ends with why the mod is
+on or off. (`mohwvr_startup_driving.log` is the same for the driving missions.) If the game folder isn't writable, as
+under Program Files, the logs and settings are in `%LOCALAPPDATA%\MOHWVR` instead.
 
 The mod talks to SteamVR only: **SteamVR must already be running** when you need VR, and an OpenXR runtime on its own
 doesn't count. With Virtual Desktop, start SteamVR from Virtual Desktop first.
 
-If `mohwvr_startup.log` doesn't exist in either place, the DLL never loaded: check that `dxgi.dll` is next to
-`MOHW.exe`. When reporting a problem, include that log along with `mohwvr_proxy.log`, `mohwvr_master.log` and
+If, with the logs on, `mohwvr_startup.log` doesn't exist in either place, the DLL never loaded: check that `dxgi.dll` is
+next to `MOHW.exe`. When reporting a problem, include that log along with `mohwvr_proxy.log`, `mohwvr_master.log` and
 `mohwvr_openvr_direct.log`.
 
 For Steam Link "vrlink driver" errors at launch or exit, see [Known issues](#known-issues); `C:\Steam\logs\driver_vrlink.txt`
@@ -359,13 +430,13 @@ The rough edges known so far:
   Virtual Desktop. The hand calibration and weapon profiles were tuned on Touch, so other controllers may need
   "Hand offset" / "Hand rotation" and the grip offsets adjusted. Controllers whose grip is bound as a button have no
   analog grip, and on HP, Cosmos and WMR two-handed aiming uses the controller's tip instead of the palm.
-- **Manual reload works but is unrefined,** and has only been tested on a single rifle in a single level. The sticky
-  magazine, the platforms and the release action (2026-11-14) haven't been tested in the headset yet, and every
-  platform's in-hand offset starts at zero (the magazine's top at the controller's tip, as before).
+- **Manual reload works but is unrefined,** and has only been tested on a few rifles. Going in is the first version's
+  again (2026-11-18); a weapon profile's "Magazine locks horizontal at" is measured from the seat, as it was before
+  2026-11-14, so a value tuned since then may want widening.
 - **The scoped eye is a prototype** (2026-11-14, untested in the headset): engine two-view only; the HUD shows inside
   the eyepiece; the eyepiece's edge is hard. The switch between the eye's view and the scope can be a frame off. The
-  lens picture is drawn over everything (a hand in front of the lens doesn't hide it), and the lens's distance and
-  radius are one setting for all guns.
+  lens picture is drawn over everything (a hand in front of the lens doesn't hide it). The magnifier switch was found
+  on one gun (the OBR's) with one toggle each way.
 - **Manual reload needs a magazine that's a separate part of the gun,** so it doesn't apply to pistols yet. They reload
   as the game does. Taking the magazine out of a gun and switching weapons refills it, and the HUD's count can change
   before you've seated a new magazine.

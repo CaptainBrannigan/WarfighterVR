@@ -8,6 +8,7 @@
 #include "camera_matrix_test_hook.h"
 #include "projection_aspect_hook.h"
 #include "aiming_controller_hook.h"
+#include "boat_seat.h"
 #include "driving_camera_hook.h"
 #include "ui_pass.h"
 #include "native_stereo.h"
@@ -223,7 +224,8 @@ bool NoPlayerForAWhile(bool world)
     unsigned long long now = GetTickCount64();
     static bool inLevel = false;              // render thread only
     static unsigned long long twoDSinceMs = 0; // render thread only
-    if (IsPlayerAimActive())
+    // A boat seat is in a level too: a checkpoint there loads straight into it, with no aim to have seen.
+    if (IsPlayerAimActive() || GetBoatSeatRaw() != BoatSeat::None)
         inLevel = true;
     if (world)
         twoDSinceMs = 0;
@@ -398,6 +400,78 @@ void KeepPlacedViewport(ID3D11DeviceContext* ctx)
                  g_placedVp.Width, g_placedVp.Height);
     }
     ctx->RSSetViewports(1, &g_placedVp);
+}
+
+// THE DRIVING MISSIONS' HUD IN TWO-VIEW (2026-11-18): MOHWD.exe has no UI pass hook (hooks/ui_pass.cpp is MOHW.exe's),
+// so its HUD would be drawn once across the whole side-by-side frame -- half of it in each eye. Instead each HUD draw
+// into the backbuffer is drawn twice, once into each eye's HUD rectangle (ComputeHudRectForEye, the whole half with the
+// placement off), its viewport and scissor rectangle mapped from the frame into that rectangle; the game's are put back
+// after. A HUD draw is told apart from the views' own by its viewport, wider than half the frame (a view draws into its
+// half), and by not being the bind's first draw (where a whole-frame composite would be). The first decisions are logged.
+template <typename DrawCall>
+bool DrawIntoBothHalves(ID3D11DeviceContext* ctx, DrawCall draw)
+{
+    if (!g_drivingExe || !g_curTargetIsBackbuffer || !g_backbuffer || !IsNativeStereoActive())
+        return false;
+    D3D11_TEXTURE2D_DESC bb{};
+    g_backbuffer->GetDesc(&bb);
+    const float W = static_cast<float>(bb.Width), H = static_cast<float>(bb.Height), half = W * 0.5f;
+    UINT vpCount = 0;
+    ctx->RSGetViewports(&vpCount, nullptr);
+    D3D11_VIEWPORT vp{};
+    if (vpCount >= 1)
+    {
+        vpCount = 1;
+        ctx->RSGetViewports(&vpCount, &vp);
+    }
+    const bool hud = vpCount == 1 && vp.Width > half + 1.0f && g_backbufferDrawCount >= 1 && W >= 2.0f && H >= 1.0f;
+    static int lines = 0; // render thread
+    if (lines < 40)
+    {
+        ++lines;
+        MOHW_LOG(kLogFile, "driving two-view: backbuffer draw %d, viewport x=%.0f y=%.0f w=%.0f h=%.0f of %.0fx%.0f: %s",
+                 g_backbufferDrawCount + 1, vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, W, H,
+                 hud ? "HUD, drawn into both eyes' HUD rectangles" : "a view's own, left as it is");
+    }
+    if (!hud)
+        return false;
+    UINT scCount = 0;
+    ctx->RSGetScissorRects(&scCount, nullptr);
+    D3D11_RECT sc{};
+    if (scCount >= 1)
+    {
+        scCount = 1;
+        ctx->RSGetScissorRects(&scCount, &sc);
+    }
+    for (int eye = 0; eye < 2; ++eye)
+    {
+        float rect[4] = {0.0f, 0.0f, 1.0f, 1.0f};
+        float placed[4];
+        if (ComputeHudRectForEye(eye, GetHudScale(), false, bb.Width, bb.Height, placed))
+            memcpy(rect, placed, sizeof(rect));
+        const float ex = static_cast<float>(eye) * half + rect[0] * half, ew = rect[2] * half;
+        const float ey = rect[1] * H, eh = rect[3] * H;
+        D3D11_VIEWPORT mapped = vp;
+        mapped.TopLeftX = ex + vp.TopLeftX / W * ew;
+        mapped.Width = vp.Width / W * ew;
+        mapped.TopLeftY = ey + vp.TopLeftY / H * eh;
+        mapped.Height = vp.Height / H * eh;
+        ctx->RSSetViewports(1, &mapped);
+        if (scCount == 1)
+        {
+            D3D11_RECT r{};
+            r.left = static_cast<LONG>(ex + static_cast<float>(sc.left) / W * ew);
+            r.right = static_cast<LONG>(ex + static_cast<float>(sc.right) / W * ew + 0.5f);
+            r.top = static_cast<LONG>(ey + static_cast<float>(sc.top) / H * eh);
+            r.bottom = static_cast<LONG>(ey + static_cast<float>(sc.bottom) / H * eh + 0.5f);
+            ctx->RSSetScissorRects(1, &r);
+        }
+        draw();
+    }
+    ctx->RSSetViewports(1, &vp);
+    if (scCount == 1)
+        ctx->RSSetScissorRects(1, &sc);
+    return true;
 }
 
 void PlaceHudForThisEye(ID3D11DeviceContext* ctx, UINT width, UINT height, float s, bool keepAspect)
@@ -690,7 +764,10 @@ bool ShouldSkipAsReticle(ID3D11DeviceContext* ctx, int nativeDraw)
     // Only while the controller aims (the weapon drive): with it off, shots follow the game's own aim again and the
     // reticle is needed to see it. And not while paused: the in-game menu uses the same draw numbers.
     // Nor in a scripted stretch: the gun is the game's then, and shots go where the game aims.
-    if (!g_curTargetIsBackbuffer || !GetHideReticle() || !GetWeaponDriveEnabled() || GetPlayerAimDriveWeight() < 0.5f)
+    // And on the RHIB's Mk19 aimed by hand: the head turns apart from the gun, so a head-locked crosshair isn't its aim.
+    const bool boatGun = GetBoatSeat() == BoatSeat::Gunner && GetBoatGunAim();
+    if (!g_curTargetIsBackbuffer || !GetHideReticle() ||
+        (!boatGun && (!GetWeaponDriveEnabled() || GetPlayerAimDriveWeight() < 0.5f)))
         return false;
     int next = g_backbufferDrawCount + 1; // the number this draw will get
     int first = kReticleFirstDraw, last = kReticleLastDraw;
@@ -701,7 +778,7 @@ bool ShouldSkipAsReticle(ID3D11DeviceContext* ctx, int nativeDraw)
         next = nativeDraw;
         first = 1;
     }
-    if (next < first || next > last || !IsPlayerSkeletonLoaded() || IsSimulationPaused())
+    if (next < first || next > last || (boatGun ? IsBoatPaused() : !IsPlayerSkeletonLoaded() || IsSimulationPaused()))
         return false;
     // The reticle's own texture: when it isn't drawn (live: a pass starting with the 256x64 weapon display), these
     // draw numbers are other HUD elements and must stay.
@@ -734,7 +811,9 @@ void MaybeStartPassCapture()
         return;
     }
     g_capturingPass = false;
-    if (g_passesCaptured >= kPassCaptureMaxPasses || !IsPlayerSkeletonLoaded())
+    // Only with the log files on (sdk/logging.h): the capture is nothing but log lines, thousands of them at a level's
+    // start in two-view (every backbuffer bind).
+    if (g_passesCaptured >= kPassCaptureMaxPasses || !IsPlayerSkeletonLoaded() || !LogsEnabled())
         return;
     unsigned long long now = GetTickCount64();
     if (now < nextCaptureMs)
@@ -827,7 +906,7 @@ void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT s, 
     }
     bool skip = ShouldSkipAsReticle(c, nativeDraw) || IsDebugHiddenDraw();
     BeforeBackbufferDraw(c, n, true, skip);
-    if (!skip)
+    if (!skip && !DrawIntoBothHalves(c, [&] { g_origDrawIndexed(c, n, s, b); }))
         g_origDrawIndexed(c, n, s, b);
     CountDraw(c, n);
     UiPassNoteDraw();
@@ -844,7 +923,7 @@ void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
     }
     bool skip = ShouldSkipAsReticle(c, nativeDraw) || IsDebugHiddenDraw();
     BeforeBackbufferDraw(c, n, false, skip);
-    if (!skip)
+    if (!skip && !DrawIntoBothHalves(c, [&] { g_origDraw(c, n, s); }))
         g_origDraw(c, n, s);
     CountDraw(c, n);
     UiPassNoteDraw();
@@ -852,13 +931,15 @@ void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
 void STDMETHODCALLTYPE Hook_DrawIndexedInstanced(ID3D11DeviceContext* c, UINT n, UINT i, UINT s, INT b, UINT si)
 {
     KeepPlacedViewport(c);
-    g_origDrawIndexedInstanced(c, n, i, s, b, si);
+    if (!DrawIntoBothHalves(c, [&] { g_origDrawIndexedInstanced(c, n, i, s, b, si); }))
+        g_origDrawIndexedInstanced(c, n, i, s, b, si);
     CountDraw(c, n * i);
 }
 void STDMETHODCALLTYPE Hook_DrawInstanced(ID3D11DeviceContext* c, UINT n, UINT i, UINT s, UINT si)
 {
     KeepPlacedViewport(c);
-    g_origDrawInstanced(c, n, i, s, si);
+    if (!DrawIntoBothHalves(c, [&] { g_origDrawInstanced(c, n, i, s, si); }))
+        g_origDrawInstanced(c, n, i, s, si);
     CountDraw(c, n * i);
 }
 void STDMETHODCALLTYPE Hook_Clear(ID3D11DeviceContext* c, ID3D11RenderTargetView* rtv, const FLOAT color[4])
@@ -947,6 +1028,8 @@ void InstallOnce(ID3D11Device* device)
 // (staging copy -> Map -> write BGRA/RGBA rows). Game-side equivalent, since this texture never leaves this process.
 void DumpUiSnapshotBmp(ID3D11DeviceContext* ctx, ID3D11Device* device)
 {
+    if (!LogsEnabled())
+        return; // a diagnostic file: only with the log files on (sdk/logging.h)
     if (!g_uiSnapshotTex)
     {
         MOHW_LOG(kLogFile, "DumpUiSnapshotBmp: no snapshot captured yet");

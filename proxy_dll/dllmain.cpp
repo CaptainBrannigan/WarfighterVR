@@ -97,6 +97,9 @@ void InstallDrivingHooks()
     // The in-world markers (the driving levels' target marker) projected into the HUD rectangle, as in MOHW.exe.
     if (!mohw::InstallMarkerProjectionHook())
         MOHW_LOG(kLogFile, "InstallMarkerProjectionHook FAILED -- see mohwvr_marker.log");
+    // Engine two-view stereo through this build's own view list builder (2026-11-18) -- see hooks/native_stereo.h.
+    if (!mohw::InstallNativeStereoHook())
+        MOHW_LOG(kLogFile, "InstallNativeStereoHook FAILED -- see mohwvr_nativestereo.log");
 }
 
 // The main game: every hook and the mod's threads. Run by the master switch once a headset is detected -- normally
@@ -202,6 +205,7 @@ void EnsureInitialized()
 {
     static std::once_flag once;
     std::call_once(once, [] {
+        mohw::LoadLogSwitch(); // before the first line: logs are off unless WriteLogFiles is on (sdk/logging.h)
         MOHW_LOG(kLogFile, "proxy dxgi.dll attached to process");
 
         // DRIVING MISSIONS (2026-10-14): MOHW.exe hands the driving levels to game\MOHWD.exe ("-exeSwap -returnExe
@@ -215,6 +219,7 @@ void EnsureInitialized()
         if (_stricmp(exeName, "MOHWD.exe") == 0)
         {
             mohw::g_drivingExe = true;
+            mohw::g_drivingLogs.store(true); // its own log files, always written for now (sdk/logging.h)
             MOHW_LOG(kLogFile, "running in the driving missions' executable (%s)", exePath);
             mohw::WriteStartupReport();
             auto base = reinterpret_cast<const unsigned char*>(GetModuleHandleW(nullptr));

@@ -8,11 +8,13 @@
 #include "aiming_controller_hook.h"
 #include "companion_bridge.h"
 #include "alternating_eye.h"
+#include "boat_seat.h"
 #include "eye_matched_fov.h"
 #include "render_pose_stamp.h"
 #include "head_position.h"
 #include "laser_raycast.h"
 #include "native_stereo.h"
+#include "perf_probe.h"
 #include "projection_aspect_hook.h"
 
 #include <windows.h>
@@ -561,6 +563,7 @@ struct ThisCallTrampoline
 {
     void Hooked(void* gameView)
     {
+        PerfScope perf(kPerfCommit); // hooks/perf_probe.h
         int param1 = reinterpret_cast<int>(this);
 
         long long n = ++g_commitCalls;
@@ -582,6 +585,8 @@ struct ThisCallTrampoline
         {
             // The laser (hooks/laser_raycast.h) needs the game's own camera, before anything below changes it.
             LaserCaptureGameCamera(static_cast<const float*>(param2));
+            float gameCamera[16]; // the boat seats' too (hooks/boat_seat.h)
+            memcpy(gameCamera, param2, sizeof(gameCamera));
             // SWAP POINT (2026-09-20): the eye-matched method (hooks/eye_matched_fov.cpp)
             // sets fovY from the headset's real per-eye frustum. The old method is
             // ApplyFovScale(param2) (FovScale multiplier, still defined above) -- swap back
@@ -608,6 +613,8 @@ struct ThisCallTrampoline
             ApplyHeadRoll(param2); // additive on top of the native yaw/pitch sync, see its own comment
             // EXPERIMENTAL head position (hooks/head_position.h): moves the camera translation by the real head delta since recenter.
             ApplyHeadPosition(param2);
+            // The Basilan RHIB's seats: the head's camera in the boat (hooks/boat_seat.h), instead of the two above.
+            ApplyBoatHead(static_cast<float*>(param2), gameCamera);
             // EXPERIMENTAL render-pose stamp (hooks/render_pose_stamp.h): the camera rotation is final here (the eye
             // offset below only moves it). Before the laser, which casts through this stamp.
             ComputeRenderPoseStamp(param2);

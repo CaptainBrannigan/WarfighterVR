@@ -8,6 +8,7 @@
 #include "aiming_controller_hook.h"
 #include "companion_bridge.h"
 #include "alternating_eye.h"
+#include "native_stereo.h"
 
 #include <windows.h>
 #include <algorithm>
@@ -380,13 +381,26 @@ bool ApplyEye(float* view, int eye, bool otherEye, float* fovOut, float* aspectO
     return true;
 }
 
+// CUTSCENES (driving_camera_hook.h DrivingCutsceneNow): the latest Present's sync interval, and the lowest one seen
+// while the view was turned for play (~0u before any).
+std::atomic<unsigned> g_presentSync{0};
+std::atomic<unsigned> g_playSync{~0u};
+
+bool CutsceneBySync()
+{
+    const unsigned play = g_playSync.load(std::memory_order_relaxed);
+    return play != ~0u && g_presentSync.load(std::memory_order_relaxed) > play;
+}
+
 // The source: turns a copy of the committed view by the head and gives it this frame's eye. False = pass the game's
-// view through untouched (head look off, the manual range in use, or not a 3D scene).
+// view through untouched (head look off, the manual range in use, not a 3D scene, or a cutscene).
 bool PrepareSourceView(const float* view, float* out, int* eyeOut)
 {
     if (!GetDrivingHeadLookAuto() || GetDrivingCameraIndex() >= 1)
         return false;
     if (g_sceneCameras.load(std::memory_order_relaxed) < kMinSceneCameras)
+        return false;
+    if (CutsceneBySync())
         return false;
     if (!CopyFloats(out, view, kViewDwords))
         return false;
@@ -398,6 +412,22 @@ bool PrepareSourceView(const float* view, float* out, int* eyeOut)
         return false;
     TurnRows(out, q);
     *eyeOut = -1;
+    {
+        // The lowest sync interval play has presented with (CUTSCENES).
+        const unsigned sync = g_presentSync.load(std::memory_order_relaxed);
+        unsigned play = g_playSync.load(std::memory_order_relaxed);
+        while (sync < play && !g_playSync.compare_exchange_weak(play, sync, std::memory_order_relaxed))
+        {
+        }
+    }
+    if (GetDrivingStereo() && NativeStereoTwoViewsWanted())
+    {
+        // ENGINE TWO-VIEW (2026-11-18, hooks/native_stereo.h): both eyes in one frame, each given its shift and frustum
+        // in the view list (MakeEyes). The source keeps only the head's turn; no eye frustum for FixSourceView to keep.
+        g_committedFovBits.store(0, std::memory_order_relaxed);
+        g_lastStereoMs.store(GetTickCount64(), std::memory_order_relaxed); // a per-eye 3D view (DrivingStereoActive)
+        return true;
+    }
     if (GetDrivingStereo())
     {
         // The commit runs on the game's main thread; the eye flips at Present on the render thread. If the main thread
@@ -441,7 +471,7 @@ void NoteViewChange(const float* view)
 void __fastcall HookedCommit(void* renderer, void* edx, const float* view)
 {
     NoteViewChange(view);
-    float local[kViewDwords];
+    alignas(16) float local[kViewDwords]; // for the game's SSE copy, as hooks/fov_scale_hook.cpp's
     int eye = -1;
     bool turned = view != nullptr && PrepareSourceView(view, local, &eye);
     if (eye >= 0)
@@ -572,7 +602,7 @@ void __fastcall Hooked(float* self, void* edx)
     float changed[kSavedFloats];
     memcpy(changed, saved, sizeof(changed));
     TurnRows(changed, q);
-    if (GetDrivingStereo())
+    if (GetDrivingStereo() && !NativeStereoTwoViewsWanted()) // two-view: the view list gives the eyes
     {
         // Rebuilt off the render thread (the game's main thread, likely a frame ahead): the next frame's eye, with
         // DrivingGameThreadNextEye on.
@@ -631,6 +661,22 @@ void DrivingStereoOnPresent(bool presentedRightEye)
         MOHW_LOG(kLogFile, "eye trace: %u of %u frames without exactly one commit for the presented eye", odd, frames);
 }
 
+void DrivingNotePresentSync(unsigned syncInterval)
+{
+    if (!g_drivingExe)
+        return;
+    const unsigned before = g_presentSync.exchange(syncInterval, std::memory_order_relaxed);
+    if (before != syncInterval)
+        MOHW_LOG(kLogFile, "the game presents with sync interval %u (was %u; play's lowest %d): %s", syncInterval, before,
+                 static_cast<int>(g_playSync.load(std::memory_order_relaxed)),
+                 CutsceneBySync() ? "a cutscene: no head look, the floating screen" : "play");
+}
+
+bool DrivingCutsceneNow()
+{
+    return g_drivingExe && CutsceneBySync();
+}
+
 bool DrivingStereoActive()
 {
     unsigned long long last = g_lastStereoMs.load(std::memory_order_relaxed);
@@ -653,8 +699,8 @@ bool GetDrivingStickLook(float* stickX)
     float range = GetDrivingStickLookRangeDeg();
     if (!g_drivingExe || range <= 0.0f || (!GetDrivingHeadLookAuto() && GetDrivingCameraIndex() < 1))
         return false;
-    if (DrivingSimulationPaused())
-        return false; // the menu: no head yaw on the right stick
+    if (DrivingSimulationPaused() || CutsceneBySync())
+        return false; // the menu or a cutscene: no head yaw on the right stick
     float relYaw = 0.0f;
     Quat pitchRoll{};
     if (!SplitHead(&relYaw, &pitchRoll))

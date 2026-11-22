@@ -7,6 +7,7 @@
 #include "../sdk/vr_math.h"
 #include "../hooks/aiming_controller_hook.h"
 #include "../hooks/companion_bridge.h"
+#include "../hooks/perf_probe.h"
 #include "../hooks/render_pose_stamp.h"
 #include "../hooks/startup_diag.h"
 #include "../shared/ipc_protocol.h"
@@ -14,6 +15,7 @@
 
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_4.h> // ID3D11Device5 / ID3D11Fence / ID3D11DeviceContext4: the hand-off slots' fence (COM only, no imports)
 #include <dxgi.h>
 #include <atomic>
 #include <cmath>
@@ -208,42 +210,82 @@ PFN_WaitGetPoses g_waitGetPoses = nullptr;
 PFN_Submit g_submit = nullptr;
 
 // Separate-device design (see openvr_direct.h's top comment for why): a second, fully independent ID3D11Device
-// (g_ownDevice below) is created on the SAME adapter as the game's device. The game thread creates its eye
-// textures with D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX and does CopyResource into them; a dedicated thread that
-// owns g_ownDevice exclusively opens those same textures via OpenSharedResource (standard cross-device GPU
-// resource sharing) and performs the paired WaitGetPoses+Submit sequence entirely on its own device/thread.
-ID3D11Texture2D* g_leftTex = nullptr;
-ID3D11Texture2D* g_rightTex = nullptr;
-UINT g_leftWidth = 0, g_leftHeight = 0;
-DXGI_FORMAT g_leftFormat = DXGI_FORMAT_UNKNOWN;
-UINT g_rightWidth = 0, g_rightHeight = 0;
-DXGI_FORMAT g_rightFormat = DXGI_FORMAT_UNKNOWN;
+// (g_ownDevice below) is created on the SAME adapter as the game's device. The game thread creates the eye textures
+// with D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX and does CopyResource into them; a dedicated thread that owns g_ownDevice
+// exclusively opens those same textures via OpenSharedResource (standard cross-device GPU resource sharing) and
+// performs the paired WaitGetPoses+Submit sequence entirely on its own device/thread. (D3D11_RESOURCE_MISC_SHARED alone,
+// without the keyed mutex, allowed a genuine torn-frame race between the two devices.)
+//
+// HAND-OFF SLOTS (2026-11-17): the game thread and SubmitThreadProc never wait on each other. Before, one shared texture
+// per eye was a plain lock between them (keyed mutex, 5 ms timeouts on each side), held by SubmitThreadProc through its
+// two Submit calls; Submit can only copy a pair once the GPU has finished writing it, behind the whole game frame. So
+// whenever the GPU ran behind (a level's first minute, mohwvr_perf.log), the game waited up to 5 ms per eye at every
+// Present (6-9 ms a frame) and the submit thread fell to 30-40 loops a second against the headset's 120. Worse, a timed-
+// out AcquireSync returns WAIT_TIMEOUT (0x102), a success code to SUCCEEDED(), so a timed-out wait went ahead as if it
+// held the lock: the game's copies went to textures it didn't own (dropped or torn) while the pair's stamp moved on --
+// the old image reprojected with the new pose. Every AcquireSync result is now compared with S_OK.
+//
+// Now: kSlotCount pairs of shared eye textures, each with its keyed mutexes. The game copies each frame into a slot
+// nobody else is using, signals g_gameFence after the copies, and publishes the slot with a sequence number.
+// SubmitThreadProc keeps the slot it shows (its keyed mutexes stay acquired across loops; re-submitted every loop with
+// that slot's stamp) and moves to the NEWEST pair THE GPU HAS FINISHED -- not simply the newest published: while the
+// game is GPU-bound the CPU runs up to the swap chain's frame latency (3 by default) ahead of the GPU, so the newest
+// published pair is never finished when the submit thread looks (the first try took only the newest: the headset froze
+// for the first ~48 s of a level, 2026-11-17). Hence six slots: the one shown, the newest finished one, up to three
+// in flight, and the one being written. The game never overwrites the newest finished pair; with no free slot it
+// reuses the oldest other published one (that frame is lost, counted as dropped). Neither side ever blocks: AcquireSync
+// with no timeout, on slots the other side has let go of. Slot bookkeeping is under g_slotMutex, held for a few
+// instructions on either thread, never across a GPU wait. Without fences (no ID3D11Device5 / ID3D11DeviceContext4) every
+// published pair counts as finished: the newest is taken at once, as before, but the game still never waits on the
+// submit thread.
+constexpr int kSlotCount = 6;
+enum SlotState : int
+{
+    kSlotFree = 0,  // nobody's: the game may write it
+    kSlotWriting,   // the game is copying into it
+    kSlotPublished, // written, waiting for SubmitThreadProc
+    kSlotHeld,      // SubmitThreadProc shows it
+};
 
-// Published by the game thread (EnsurePersistentEyeTexture) whenever it (re)creates a shared eye texture;
-// consumed by SubmitThreadProc, which re-opens the texture on g_ownDevice whenever the generation changes.
-// HANDLE from IDXGIResource::GetSharedHandle is a "weak" reference tied to the source texture's lifetime --
-// no separate CloseHandle needed, unlike the newer NT-handle sharing API.
-std::atomic<HANDLE> g_leftSharedHandle{nullptr};
-std::atomic<HANDLE> g_rightSharedHandle{nullptr};
-std::atomic<int> g_leftGeneration{0};
-std::atomic<int> g_rightGeneration{0};
+// Game thread only.
+struct GameSlot
+{
+    ID3D11Texture2D* tex[2] = {}; // left, right
+    IDXGIKeyedMutex* mutex[2] = {};
+};
+GameSlot g_gameSlots[kSlotCount];
+D3D11_TEXTURE2D_DESC g_slotDesc[2] = {};
+ID3D11Fence* g_gameFence = nullptr;
+UINT64 g_fenceValue = 0;
 
-// IDXGIKeyedMutex gives real GPU-level mutual exclusion between the game device's CopyResource writes and
-// g_ownDevice's Submit reads of the same shared texture -- D3D11_RESOURCE_MISC_SHARED alone allowed a genuine
-// torn-frame race between the two independent devices. Used as a plain lock (both sides always
-// Acquire(0)/Release(0), not a producer/consumer ping-pong key) since Submit must run for BOTH eyes every loop
-// iteration regardless of whether that eye rendered anything new this time (the other eye resubmits its last
-// content under alternating-eye). Game-thread-only pointers, created alongside g_leftTex/g_rightTex.
-IDXGIKeyedMutex* g_leftKeyedMutexGame = nullptr;
-IDXGIKeyedMutex* g_rightKeyedMutexGame = nullptr;
-constexpr DWORD kKeyedMutexTimeoutMs = 5; // bounded on purpose -- never let either side risk a real stall over this
+// Shared by both threads, under g_slotMutex.
+std::mutex g_slotMutex;
+int g_slotSetGeneration = 0;             // bumped whenever the game remakes the slots (a new device, a new size)
+HANDLE g_slotHandle[kSlotCount][2] = {}; // GetSharedHandle: a weak handle, valid while the game's texture lives
+HANDLE g_fenceShareHandle = nullptr;     // NT handle (CreateSharedHandle), closed when the set is remade
+int g_slotState[kSlotCount] = {};
+UINT64 g_slotFence[kSlotCount] = {};     // g_gameFence's value once the slot's copies are done (0: no fence)
+UINT64 g_slotSeq[kSlotCount] = {};       // the publish order (never reset, also across sets)
+PairStamp g_slotStamp[kSlotCount];
+UINT64 g_publishSeq = 0;
 
-// Written by UpdateOpenVrDirectPair while it holds both keyed mutexes; read by SubmitThreadProc while it holds both.
-std::mutex g_pairStampMutex;
-PairStamp g_pairStamp;
+// Under g_slotMutex: the published pair with the highest sequence whose copies the GPU has finished (completed = the
+// fence's completed value; a pair published without a fence counts as finished), newer than afterSeq. -1 if none.
+int NewestFinishedLocked(UINT64 completed, UINT64 afterSeq)
+{
+    int best = -1;
+    for (int i = 0; i < kSlotCount; ++i)
+        if (g_slotState[i] == kSlotPublished && g_slotSeq[i] > afterSeq && g_slotFence[i] <= completed &&
+            (best < 0 || g_slotSeq[i] > g_slotSeq[best]))
+            best = i;
+    return best;
+}
+
+std::atomic<long long> g_droppedPairs{0}; // game frames that never reached the headset's queue (see PublishPair)
+
 std::atomic<bool> g_pairPublishEnabled{true};
 
-// The second, independent D3D11 device (see the design comment near g_leftTex) -- created once, lazily, the first
+// The second, independent D3D11 device (see the design comment near g_gameSlots) -- created once, lazily, the first
 // time UpdateOpenVrDirect runs with a real game device available (needed to find the matching adapter). Written
 // once on the game thread strictly BEFORE SubmitThreadProc is started (std::thread's constructor establishes a
 // happens-before relationship for everything written before it), then read-only for the rest of the process's
@@ -251,80 +293,180 @@ std::atomic<bool> g_pairPublishEnabled{true};
 ID3D11Device* g_ownDevice = nullptr;
 std::atomic<bool> g_ownDeviceStarted{false};
 
-bool EnsurePersistentEyeTexture(ID3D11Device* device, ID3D11Texture2D*& tex, UINT& cachedWidth, UINT& cachedHeight,
-                                  DXGI_FORMAT& cachedFormat, const D3D11_TEXTURE2D_DESC& sourceDesc,
-                                  std::atomic<HANDLE>& outSharedHandle, std::atomic<int>& outGeneration,
-                                  IDXGIKeyedMutex*& outKeyedMutex)
+// Game thread, under g_slotMutex: lets go of the game's side of the slots.
+void ReleaseGameSlotsLocked()
 {
-    if (tex && cachedWidth == sourceDesc.Width && cachedHeight == sourceDesc.Height && cachedFormat == sourceDesc.Format &&
-        TextureOnDevice(tex, device)) // a new game device (level change) needs new shared textures too
+    for (GameSlot& slot : g_gameSlots)
+        for (int e = 0; e < 2; ++e)
+        {
+            if (slot.mutex[e])
+                slot.mutex[e]->Release();
+            if (slot.tex[e])
+                slot.tex[e]->Release();
+            slot.mutex[e] = nullptr;
+            slot.tex[e] = nullptr;
+        }
+    if (g_gameFence)
+        g_gameFence->Release();
+    g_gameFence = nullptr;
+    if (g_fenceShareHandle)
+        CloseHandle(g_fenceShareHandle);
+    g_fenceShareHandle = nullptr;
+    for (int s = 0; s < kSlotCount; ++s)
+        g_slotHandle[s][0] = g_slotHandle[s][1] = nullptr;
+}
+
+bool SameEyeTexture(const D3D11_TEXTURE2D_DESC& a, const D3D11_TEXTURE2D_DESC& b)
+{
+    return a.Width == b.Width && a.Height == b.Height && a.Format == b.Format;
+}
+
+// Game thread: the hand-off slots exist on this device at these eyes' sizes and formats, (re)made when not -- a level
+// change brings a new game device, a resolution change new sizes. SubmitThreadProc re-opens them by the generation.
+bool EnsureSlots(ID3D11Device* device, const D3D11_TEXTURE2D_DESC& leftDesc, const D3D11_TEXTURE2D_DESC& rightDesc)
+{
+    if (g_gameSlots[0].tex[0] && SameEyeTexture(g_slotDesc[0], leftDesc) && SameEyeTexture(g_slotDesc[1], rightDesc) &&
+        TextureOnDevice(g_gameSlots[0].tex[0], device))
         return true;
 
-    if (tex)
+    std::lock_guard<std::mutex> lock(g_slotMutex);
+    ReleaseGameSlotsLocked();
+    g_slotDesc[0] = g_slotDesc[1] = D3D11_TEXTURE2D_DESC{};
+    ++g_slotSetGeneration;
+    for (int s = 0; s < kSlotCount; ++s)
     {
-        tex->Release();
-        tex = nullptr;
-    }
-    if (outKeyedMutex)
-    {
-        outKeyedMutex->Release();
-        outKeyedMutex = nullptr;
-    }
-
-    D3D11_TEXTURE2D_DESC desc{};
-    desc.Width = sourceDesc.Width;
-    desc.Height = sourceDesc.Height;
-    desc.MipLevels = 1;
-    desc.ArraySize = 1;
-    desc.Format = sourceDesc.Format;
-    desc.SampleDesc.Count = 1;
-    desc.Usage = D3D11_USAGE_DEFAULT;
-    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    // KEYEDMUTEX instead of plain SHARED -- the two flags are mutually exclusive per the D3D11 docs. Gives real
-    // GPU-level mutual exclusion between the game's device and g_ownDevice's access to this same resource.
-    desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
-
-    HRESULT hr = device->CreateTexture2D(&desc, nullptr, &tex);
-    if (FAILED(hr))
-    {
-        MOHW_LOG(kLogFile, "EnsurePersistentEyeTexture: CreateTexture2D(%ux%u fmt=%d) FAILED 0x%08lX", desc.Width, desc.Height,
-                  static_cast<int>(desc.Format), hr);
-        cachedWidth = cachedHeight = 0;
-        cachedFormat = DXGI_FORMAT_UNKNOWN;
-        return false;
+        g_slotState[s] = kSlotFree;
+        g_slotFence[s] = 0;
+        g_slotSeq[s] = 0;
+        g_slotStamp[s] = PairStamp{};
     }
 
-    cachedWidth = desc.Width;
-    cachedHeight = desc.Height;
-    cachedFormat = desc.Format;
-
-    if (FAILED(tex->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&outKeyedMutex))))
-    {
-        MOHW_LOG(kLogFile, "EnsurePersistentEyeTexture: QueryInterface(IDXGIKeyedMutex) FAILED");
-        outKeyedMutex = nullptr;
-    }
-
-    IDXGIResource* dxgiRes = nullptr;
-    if (SUCCEEDED(tex->QueryInterface(__uuidof(IDXGIResource), reinterpret_cast<void**>(&dxgiRes))) && dxgiRes)
-    {
-        HANDLE sharedHandle = nullptr;
-        if (SUCCEEDED(dxgiRes->GetSharedHandle(&sharedHandle)) && sharedHandle)
+    const D3D11_TEXTURE2D_DESC* sources[2] = {&leftDesc, &rightDesc};
+    for (int s = 0; s < kSlotCount; ++s)
+        for (int e = 0; e < 2; ++e)
         {
-            outSharedHandle.store(sharedHandle, std::memory_order_relaxed);
-            outGeneration.fetch_add(1, std::memory_order_release); // release: pairs with SubmitThreadProc's acquire-load
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = sources[e]->Width;
+            desc.Height = sources[e]->Height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = sources[e]->Format;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX; // exclusive with plain SHARED, per the D3D11 docs
+            GameSlot& slot = g_gameSlots[s];
+            IDXGIResource* resource = nullptr;
+            HRESULT hr = device->CreateTexture2D(&desc, nullptr, &slot.tex[e]);
+            if (SUCCEEDED(hr))
+                hr = slot.tex[e]->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&slot.mutex[e]));
+            if (SUCCEEDED(hr))
+                hr = slot.tex[e]->QueryInterface(__uuidof(IDXGIResource), reinterpret_cast<void**>(&resource));
+            if (SUCCEEDED(hr))
+                hr = resource->GetSharedHandle(&g_slotHandle[s][e]);
+            if (resource)
+                resource->Release();
+            if (FAILED(hr) || !g_slotHandle[s][e])
+            {
+                MOHW_LOG(kLogFile, "hand-off slot %d eye %d (%ux%u fmt %d) FAILED 0x%08lX", s, e, desc.Width, desc.Height,
+                          static_cast<int>(desc.Format), hr);
+                ReleaseGameSlotsLocked();
+                return false;
+            }
         }
-        else
-        {
-            MOHW_LOG(kLogFile, "EnsurePersistentEyeTexture: GetSharedHandle FAILED");
-        }
-        dxgiRes->Release();
-    }
-    else
-    {
-        MOHW_LOG(kLogFile, "EnsurePersistentEyeTexture: QueryInterface(IDXGIResource) FAILED");
-    }
+    g_slotDesc[0] = leftDesc;
+    g_slotDesc[1] = rightDesc;
 
+    // The fence that tells SubmitThreadProc a slot's copies are done on the GPU (optional, see the slots' comment).
+    g_fenceValue = 0;
+    ID3D11Device5* device5 = nullptr;
+    if (SUCCEEDED(device->QueryInterface(__uuidof(ID3D11Device5), reinterpret_cast<void**>(&device5))) && device5)
+    {
+        if (FAILED(device5->CreateFence(0, D3D11_FENCE_FLAG_SHARED, __uuidof(ID3D11Fence),
+                                        reinterpret_cast<void**>(&g_gameFence))))
+            g_gameFence = nullptr;
+        else if (FAILED(g_gameFence->CreateSharedHandle(nullptr, GENERIC_ALL, nullptr, &g_fenceShareHandle)))
+        {
+            g_gameFence->Release();
+            g_gameFence = nullptr;
+            g_fenceShareHandle = nullptr;
+        }
+        device5->Release();
+    }
+    MOHW_LOG(kLogFile, "hand-off slots (set %d): %d pairs, eyes %ux%u / %ux%u fmt %d, %s", g_slotSetGeneration, kSlotCount,
+              leftDesc.Width, leftDesc.Height, rightDesc.Width, rightDesc.Height, static_cast<int>(leftDesc.Format),
+              g_gameFence ? "GPU fence" : "no fence: taken at once");
     return true;
+}
+
+// Game thread: copies one pair into a slot and publishes it with its stamp. Never waits. The slot: a free one; else the
+// oldest published pair other than the newest one the GPU has finished (what the submit thread takes next) -- that
+// frame never reaches the headset, counted as dropped; else (or a slot's lock not free at once) this frame isn't handed
+// over, the headset keeps showing what it has.
+void PublishPair(ID3D11DeviceContext* context, ID3D11Texture2D* left, ID3D11Texture2D* right, const PairStamp& stamp)
+{
+    int s = -1;
+    bool reused = false;
+    {
+        const UINT64 completed = g_gameFence ? g_gameFence->GetCompletedValue() : ~0ull;
+        std::lock_guard<std::mutex> lock(g_slotMutex);
+        for (int i = 0; i < kSlotCount && s < 0; ++i)
+            if (g_slotState[i] == kSlotFree)
+                s = i;
+        if (s < 0)
+        {
+            const int keep = NewestFinishedLocked(completed, 0);
+            for (int i = 0; i < kSlotCount; ++i)
+                if (g_slotState[i] == kSlotPublished && i != keep && (s < 0 || g_slotSeq[i] < g_slotSeq[s]))
+                    s = i;
+            reused = s >= 0;
+        }
+        if (s >= 0)
+            g_slotState[s] = kSlotWriting;
+    }
+    if (reused)
+        PerfAdd(kPerfDropped, 0);
+    GameSlot* slot = s >= 0 ? &g_gameSlots[s] : nullptr;
+    // S_OK only: WAIT_TIMEOUT (0x102) and WAIT_ABANDONED (0x80) are success codes to SUCCEEDED(). No timeout: a free
+    // slot's locks were let go of by the submit thread before it freed the slot.
+    const bool leftLocked = slot && slot->mutex[0]->AcquireSync(0, 0) == S_OK;
+    const bool rightLocked = leftLocked && slot->mutex[1]->AcquireSync(0, 0) == S_OK;
+    if (!rightLocked)
+    {
+        if (leftLocked)
+            slot->mutex[0]->ReleaseSync(0);
+        if (s >= 0)
+        {
+            std::lock_guard<std::mutex> lock(g_slotMutex);
+            g_slotState[s] = kSlotFree;
+        }
+        PerfAdd(kPerfDropped, 0);
+        const long long dropped = ++g_droppedPairs;
+        if (dropped <= 5 || dropped % 1000 == 0)
+            MOHW_LOG(kLogFile, "pair not handed over: %s (count %lld)", s < 0 ? "no free slot" : "a slot's lock wasn't free",
+                      dropped);
+        return;
+    }
+    context->CopyResource(slot->tex[0], left);
+    context->CopyResource(slot->tex[1], right);
+    slot->mutex[1]->ReleaseSync(0);
+    slot->mutex[0]->ReleaseSync(0);
+    // Queued after the copies on the same context: reached on the GPU once they're done. Goes out with Present's flush.
+    UINT64 fence = 0;
+    ID3D11DeviceContext4* context4 = nullptr;
+    if (g_gameFence &&
+        SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext4), reinterpret_cast<void**>(&context4))) && context4)
+    {
+        if (SUCCEEDED(context4->Signal(g_gameFence, g_fenceValue + 1)))
+            fence = ++g_fenceValue;
+        context4->Release();
+    }
+
+    std::lock_guard<std::mutex> lock(g_slotMutex);
+    g_slotFence[s] = fence;
+    g_slotStamp[s] = stamp;
+    g_slotSeq[s] = ++g_publishSeq;
+    g_slotState[s] = kSlotPublished;
 }
 
 // The runtime and every tracked device, to mohwvr_startup.log: which driver a tester's headset comes through (Steam
@@ -573,49 +715,79 @@ ConnectResult ConnectAttempt()
     return ConnectResult::Connected;
 }
 
-// Re-opens tex (and its keyed mutex) on g_ownDevice from sharedHandle whenever generationAtomic has moved
-// past lastOpenedGen (a resize on the game thread bumps the generation -- see EnsurePersistentEyeTexture).
-// Returns false if no shared handle has been published yet at all (startup grace period) or
-// OpenSharedResource/QueryInterface fails.
-bool EnsureOwnOpenedTexture(ID3D11Texture2D*& openedTex, IDXGIKeyedMutex*& openedMutex, int& lastOpenedGen,
-                              std::atomic<HANDLE>& sharedHandleAtomic, std::atomic<int>& generationAtomic)
+// SubmitThreadProc's side of the hand-off slots: the game's slot textures opened on g_ownDevice, the shared fence, and
+// the slot shown. SubmitThreadProc only.
+struct OwnSlots
 {
-    int currentGen = generationAtomic.load(std::memory_order_acquire); // acquire: pairs with the publisher's release-store
-    if (openedTex && currentGen == lastOpenedGen)
+    ID3D11Texture2D* tex[kSlotCount][2] = {};
+    IDXGIKeyedMutex* mutex[kSlotCount][2] = {};
+    ID3D11Fence* fence = nullptr;
+    int generation = -1;       // the game's set these were opened from
+    int failedGeneration = -1; // a set that wouldn't open: not retried every loop
+    int held = -1;             // the slot shown: its keyed mutexes stay acquired on g_ownDevice
+    UINT64 heldSeq = 0;        // its publish sequence: only newer pairs are taken (sequences never reset)
+    PairStamp heldStamp;
+    unsigned long long lastTakeMs = 0; // GetTickCount64 of the last pair taken (the stale-take safety valve)
+};
+
+void ReleaseOwnSlots(OwnSlots& own)
+{
+    if (own.held >= 0)
+        for (int e = 1; e >= 0; --e)
+            if (own.mutex[own.held][e])
+                own.mutex[own.held][e]->ReleaseSync(0);
+    own.held = -1;
+    for (int s = 0; s < kSlotCount; ++s)
+        for (int e = 0; e < 2; ++e)
+        {
+            if (own.mutex[s][e])
+                own.mutex[s][e]->Release();
+            if (own.tex[s][e])
+                own.tex[s][e]->Release();
+            own.mutex[s][e] = nullptr;
+            own.tex[s][e] = nullptr;
+        }
+    if (own.fence)
+        own.fence->Release();
+    own.fence = nullptr;
+    own.generation = -1;
+}
+
+// Under g_slotMutex (the game's handles stay valid while it's held): opens the game's current set on g_ownDevice when
+// it's a new one. False while there is none, or it wouldn't open.
+bool OpenSlotsLocked(OwnSlots& own)
+{
+    if (own.generation == g_slotSetGeneration)
         return true;
-
-    HANDLE handle = sharedHandleAtomic.load(std::memory_order_relaxed);
-    if (!handle)
+    ReleaseOwnSlots(own);
+    if (!g_slotHandle[0][0] || own.failedGeneration == g_slotSetGeneration)
         return false;
-
-    if (openedMutex)
+    for (int s = 0; s < kSlotCount; ++s)
+        for (int e = 0; e < 2; ++e)
+        {
+            HRESULT hr = g_ownDevice->OpenSharedResource(g_slotHandle[s][e], __uuidof(ID3D11Texture2D),
+                                                         reinterpret_cast<void**>(&own.tex[s][e]));
+            if (SUCCEEDED(hr))
+                hr = own.tex[s][e]->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&own.mutex[s][e]));
+            if (FAILED(hr))
+            {
+                MOHW_LOG(kLogFile, "submit thread: opening hand-off slot %d eye %d FAILED 0x%08lX", s, e, hr);
+                ReleaseOwnSlots(own);
+                own.failedGeneration = g_slotSetGeneration;
+                return false;
+            }
+        }
+    ID3D11Device5* own5 = nullptr;
+    if (g_fenceShareHandle &&
+        SUCCEEDED(g_ownDevice->QueryInterface(__uuidof(ID3D11Device5), reinterpret_cast<void**>(&own5))) && own5)
     {
-        openedMutex->Release();
-        openedMutex = nullptr;
+        if (FAILED(own5->OpenSharedFence(g_fenceShareHandle, __uuidof(ID3D11Fence), reinterpret_cast<void**>(&own.fence))))
+            own.fence = nullptr;
+        own5->Release();
     }
-    if (openedTex)
-    {
-        openedTex->Release();
-        openedTex = nullptr;
-    }
-
-    HRESULT hr = g_ownDevice->OpenSharedResource(handle, __uuidof(ID3D11Texture2D), reinterpret_cast<void**>(&openedTex));
-    if (FAILED(hr))
-    {
-        MOHW_LOG(kLogFile, "EnsureOwnOpenedTexture: OpenSharedResource FAILED 0x%08lX", hr);
-        lastOpenedGen = -1;
-        return false;
-    }
-    if (FAILED(openedTex->QueryInterface(__uuidof(IDXGIKeyedMutex), reinterpret_cast<void**>(&openedMutex))))
-    {
-        MOHW_LOG(kLogFile, "EnsureOwnOpenedTexture: QueryInterface(IDXGIKeyedMutex) FAILED");
-        openedMutex = nullptr;
-        openedTex->Release();
-        openedTex = nullptr;
-        lastOpenedGen = -1;
-        return false;
-    }
-    lastOpenedGen = currentGen;
+    own.generation = g_slotSetGeneration;
+    MOHW_LOG(kLogFile, "submit thread: hand-off slots (set %d) opened, %s", own.generation,
+              own.fence ? "GPU fence" : "no fence: taken at once");
     return true;
 }
 
@@ -634,16 +806,11 @@ long long QpcMicros()
     return (now.QuadPart * 1000000LL) / freq.QuadPart;
 }
 
-// Owns g_ownDevice exclusively for the rest of the process's life -- see the design comment near g_leftTex for
+// Owns g_ownDevice exclusively for the rest of the process's life -- see the design comment near g_gameSlots for
 // why this exists. WaitGetPoses and Submit are called together, paired, right here, on this dedicated thread.
 void SubmitThreadProc()
 {
-    ID3D11Texture2D* ownLeftTex = nullptr;
-    ID3D11Texture2D* ownRightTex = nullptr;
-    IDXGIKeyedMutex* ownLeftMutex = nullptr;
-    IDXGIKeyedMutex* ownRightMutex = nullptr;
-    int leftOpenedGen = -1;
-    int rightOpenedGen = -1;
+    OwnSlots own;
 
     bool submitBurstKeyWasDown = false;
     int submitBurstRemaining = 0;
@@ -720,41 +887,111 @@ void SubmitThreadProc()
             mohw::SetHeadPoseOverride(headPose);
         }
 
-        bool haveLeft = EnsureOwnOpenedTexture(ownLeftTex, ownLeftMutex, leftOpenedGen, g_leftSharedHandle, g_leftGeneration);
-        bool haveRight = EnsureOwnOpenedTexture(ownRightTex, ownRightMutex, rightOpenedGen, g_rightSharedHandle, g_rightGeneration);
-        if (!haveLeft || !haveRight)
-            continue; // startup grace period -- wait until both eyes have published a shared texture at least once
-
-        // AcquireSync/ReleaseSync around each eye's Submit: real GPU-level mutual exclusion against the game
-        // thread's CopyResource into the SAME shared texture -- see g_leftKeyedMutexGame's declaration comment.
-        // Used as a plain lock rather than a producer/consumer ping-pong key, because Submit must still run for
-        // BOTH eyes every single loop iteration regardless of whether that eye rendered anything new this time.
-        // A short, bounded timeout means a rare failure to acquire degrades to "submit anyway, log it" rather
-        // than ever risking a stall on this thread -- skipping Submit entirely would violate the
-        // WaitGetPoses/Submit pairing this whole design exists to protect. Taken BEFORE reading the pair stamp, so
-        // the stamp and both textures always come from the same published pair.
-        static long long leftAcquireFails = 0, rightAcquireFails = 0;
-        bool leftLocked = ownLeftMutex && SUCCEEDED(ownLeftMutex->AcquireSync(0, kKeyedMutexTimeoutMs));
-        if (!leftLocked && (++leftAcquireFails <= 5 || leftAcquireFails % 1000 == 0))
-            MOHW_LOG(kLogFile, "left eye AcquireSync timed out (count=%lld) -- submitting anyway", leftAcquireFails);
-        bool rightLocked = ownRightMutex && SUCCEEDED(ownRightMutex->AcquireSync(0, kKeyedMutexTimeoutMs));
-        if (!rightLocked && (++rightAcquireFails <= 5 || rightAcquireFails % 1000 == 0))
-            MOHW_LOG(kLogFile, "right eye AcquireSync timed out (count=%lld) -- submitting anyway", rightAcquireFails);
+        // The newest pair the GPU has finished writing (the hand-off slots, see g_gameSlots), if it's newer than the one
+        // shown; older published pairs it supersedes are freed. Otherwise the pair shown keeps going out with its own
+        // stamp. Nothing here waits.
+        int take = -1;
+        UINT64 takeSeq = 0;
+        PairStamp takeStamp{};
+        {
+            std::lock_guard<std::mutex> lock(g_slotMutex);
+            if (OpenSlotsLocked(own))
+            {
+                const UINT64 completed = own.fence ? own.fence->GetCompletedValue() : ~0ull;
+                take = NewestFinishedLocked(completed, own.heldSeq);
+                if (take >= 0)
+                {
+                    g_slotState[take] = kSlotHeld;
+                    takeSeq = g_slotSeq[take];
+                    takeStamp = g_slotStamp[take];
+                    for (int i = 0; i < kSlotCount; ++i) // superseded before they were shown: free again
+                        if (g_slotState[i] == kSlotPublished && g_slotSeq[i] < takeSeq)
+                            g_slotState[i] = kSlotFree;
+                }
+                else
+                {
+                    // Newer pairs exist, none finished yet: the shown one again. Safety valve: if that has gone on for
+                    // kStaleTakeMs (a fence that stopped advancing, or a GPU far behind), the newest published pair is
+                    // taken anyway -- its Submit then waits on the GPU, as the first design always did.
+                    constexpr unsigned long long kStaleTakeMs = 250;
+                    int newest = -1;
+                    for (int i = 0; i < kSlotCount; ++i)
+                        if (g_slotState[i] == kSlotPublished && g_slotSeq[i] > own.heldSeq &&
+                            (newest < 0 || g_slotSeq[i] > g_slotSeq[newest]))
+                            newest = i;
+                    if (newest >= 0)
+                    {
+                        PerfAdd(kPerfLate, 0);
+                        if (GetTickCount64() - own.lastTakeMs > kStaleTakeMs)
+                        {
+                            take = newest;
+                            g_slotState[take] = kSlotHeld;
+                            takeSeq = g_slotSeq[take];
+                            takeStamp = g_slotStamp[take];
+                            for (int i = 0; i < kSlotCount; ++i)
+                                if (g_slotState[i] == kSlotPublished && g_slotSeq[i] < takeSeq)
+                                    g_slotState[i] = kSlotFree;
+                            static long long staleTakes = 0;
+                            if (++staleTakes <= 5 || staleTakes % 100 == 0)
+                                MOHW_LOG(kLogFile, "submit thread: no finished pair for %llu ms, took the newest anyway "
+                                                   "(count %lld)", kStaleTakeMs, staleTakes);
+                        }
+                    }
+                }
+            }
+        }
+        if (take >= 0)
+        {
+            // S_OK only (WAIT_TIMEOUT is a success code). Free at once: the game let go of it after its copies.
+            const bool leftLocked = own.mutex[take][0]->AcquireSync(0, 0) == S_OK;
+            const bool rightLocked = leftLocked && own.mutex[take][1]->AcquireSync(0, 0) == S_OK;
+            if (leftLocked && !rightLocked)
+                own.mutex[take][0]->ReleaseSync(0);
+            const int previous = own.held;
+            if (rightLocked && previous >= 0)
+            {
+                own.mutex[previous][1]->ReleaseSync(0);
+                own.mutex[previous][0]->ReleaseSync(0);
+            }
+            std::lock_guard<std::mutex> lock(g_slotMutex);
+            const bool sameSet = own.generation == g_slotSetGeneration; // the game may have remade the slots meanwhile
+            if (rightLocked)
+            {
+                if (previous >= 0 && sameSet)
+                    g_slotState[previous] = kSlotFree;
+                own.held = take;
+                own.heldSeq = takeSeq;
+                own.heldStamp = takeStamp;
+                own.lastTakeMs = GetTickCount64();
+                PerfAdd(kPerfShown, 0);
+            }
+            else
+            {
+                if (sameSet)
+                    g_slotState[take] = kSlotPublished; // still a candidate next loop
+                static long long takeFails = 0;
+                if (++takeFails <= 5 || takeFails % 1000 == 0)
+                    MOHW_LOG(kLogFile, "submit thread: a published pair's lock wasn't free (count %lld)", takeFails);
+            }
+        }
+        if (own.held < 0)
+            continue; // nothing published yet: startup, or the game has just remade the slots
+        ID3D11Texture2D* ownLeftTex = own.tex[own.held][0];
+        ID3D11Texture2D* ownRightTex = own.tex[own.held][1];
 
         // One stamp for both eyes: SteamVR applies eye 0's pose to both and ignores eye 1's. With pair publish on
-        // it's the stamp the current pair was rendered with; otherwise the old per-eye slot query.
+        // it's the stamp the pair shown was rendered with; otherwise the old per-eye slot query.
         float sharedStampQuat[4], sharedStampPos[3];
         bool sharedStampPosValid = false;
         bool haveSharedStamp = false;
         if (g_pairPublishEnabled.load(std::memory_order_relaxed))
         {
-            std::lock_guard<std::mutex> lock(g_pairStampMutex);
-            haveSharedStamp = hmdPose.poseIsValid && g_pairStamp.valid;
+            haveSharedStamp = hmdPose.poseIsValid && own.heldStamp.valid;
             for (int i = 0; i < 4; ++i)
-                sharedStampQuat[i] = g_pairStamp.quat[i];
+                sharedStampQuat[i] = own.heldStamp.quat[i];
             for (int i = 0; i < 3; ++i)
-                sharedStampPos[i] = g_pairStamp.pos[i];
-            sharedStampPosValid = g_pairStamp.posValid;
+                sharedStampPos[i] = own.heldStamp.pos[i];
+            sharedStampPosValid = own.heldStamp.posValid;
         }
         else
         {
@@ -824,8 +1061,12 @@ void SubmitThreadProc()
         // ruling out per-eye pose divergence. Testing whether the ghost is actually tied to "whichever eye is
         // submitted SECOND" rather than "the right eye specifically" -- if it jumps to the left eye now, that's
         // a genuine SteamVR submission-order quirk; if it stays on the right eye, order is ruled out too.
-        int rightErr = g_submit(g_compositor, /*Eye_Right*/ 1, rightSubmitTex, nullptr, rightFlags);
-        int leftErr = g_submit(g_compositor, /*Eye_Left*/ 0, leftSubmitTex, nullptr, leftFlags);
+        int rightErr = 0, leftErr = 0;
+        {
+            PerfScope perf(kPerfSubmit); // hooks/perf_probe.h
+            rightErr = g_submit(g_compositor, /*Eye_Right*/ 1, rightSubmitTex, nullptr, rightFlags);
+            leftErr = g_submit(g_compositor, /*Eye_Left*/ 0, leftSubmitTex, nullptr, leftFlags);
+        }
         static bool reportedFirstSubmit = false;
         if (!reportedFirstSubmit)
         {
@@ -843,11 +1084,6 @@ void SubmitThreadProc()
                       submitBurstRemaining, deltaUs, leftErr, rightErr);
             --submitBurstRemaining;
         }
-
-        if (leftLocked)
-            ownLeftMutex->ReleaseSync(0);
-        if (rightLocked)
-            ownRightMutex->ReleaseSync(0);
 
         if (leftErr != lastLeftErr)
         {
@@ -872,7 +1108,7 @@ bool PrepareForUpdate(ID3D11Device* device)
     if (state != static_cast<int>(ConnectState::Connected))
         return false; // failed -- game keeps rendering normally
 
-    // One-time: create the separate device (see the design comment near g_leftTex) on the SAME adapter as the
+    // One-time: create the separate device (see the design comment near g_gameSlots) on the SAME adapter as the
     // game's device, then start SubmitThreadProc. Done here (not in ConnectThreadProc) because finding the
     // matching adapter needs a real game ID3D11Device*, which ConnectThreadProc never has. compare_exchange_strong
     // ensures exactly one caller wins this even though UpdateOpenVrDirect runs every frame.
@@ -905,6 +1141,11 @@ bool PrepareForUpdate(ID3D11Device* device)
     return true;
 }
 
+// The old per-eye publishing (pair publish off, NUMPAD3; the staleness test): each eye's newest frame kept in a staging
+// texture on the game's device, and the two handed over through the slots like any pair. Game thread only.
+ID3D11Texture2D* g_stagingTex[2] = {};
+bool g_stagingFilled[2] = {};
+
 } // namespace
 
 void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Texture2D* rightEye)
@@ -913,49 +1154,52 @@ void UpdateOpenVrDirect(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Te
         return;
 
     // leftEye/rightEye mirror UpdateCompanionEyes' contract: either may be nullptr meaning "this eye didn't render
-    // this frame" (alternating-eye's temporal-stereo mode -- see present_hook.cpp's routing). Only CopyResource
-    // into our own shared textures happens here -- WaitGetPoses/Submit are entirely on SubmitThreadProc (see its
-    // own comment), which reads these via OpenSharedResource on its own separate device.
+    // this frame" (alternating-eye's temporal-stereo mode -- see present_hook.cpp's routing): that eye's last frame
+    // goes out again with the other eye's new one.
     ID3D11DeviceContext* context = nullptr;
     device->GetImmediateContext(&context);
     if (!context)
         return;
-
-    // AcquireSync/ReleaseSync around each CopyResource: pairs with SubmitThreadProc's own Acquire/Release around
-    // Submit -- see g_leftKeyedMutexGame's declaration comment. Short, bounded timeout: if the submit thread is
-    // unusually slow to release (rare), skip this frame's copy rather than stall the game's own render thread --
-    // the eye just keeps showing its last successfully-copied content.
-    if (leftEye)
+    ID3D11Texture2D* eyes[2] = {leftEye, rightEye};
+    for (int e = 0; e < 2; ++e)
     {
-        D3D11_TEXTURE2D_DESC desc{};
-        leftEye->GetDesc(&desc);
-        if (EnsurePersistentEyeTexture(device, g_leftTex, g_leftWidth, g_leftHeight, g_leftFormat, desc, g_leftSharedHandle,
-                                          g_leftGeneration, g_leftKeyedMutexGame))
+        if (!eyes[e])
+            continue;
+        D3D11_TEXTURE2D_DESC desc{}, have{};
+        eyes[e]->GetDesc(&desc);
+        if (g_stagingTex[e])
+            g_stagingTex[e]->GetDesc(&have);
+        if (!g_stagingTex[e] || !SameEyeTexture(have, desc) || !TextureOnDevice(g_stagingTex[e], device))
         {
-            bool locked = g_leftKeyedMutexGame && SUCCEEDED(g_leftKeyedMutexGame->AcquireSync(0, kKeyedMutexTimeoutMs));
-            if (locked || !g_leftKeyedMutexGame)
+            if (g_stagingTex[e])
+                g_stagingTex[e]->Release();
+            g_stagingTex[e] = nullptr;
+            g_stagingFilled[e] = false;
+            D3D11_TEXTURE2D_DESC staging{};
+            staging.Width = desc.Width;
+            staging.Height = desc.Height;
+            staging.MipLevels = 1;
+            staging.ArraySize = 1;
+            staging.Format = desc.Format;
+            staging.SampleDesc.Count = 1;
+            staging.Usage = D3D11_USAGE_DEFAULT;
+            staging.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+            if (FAILED(device->CreateTexture2D(&staging, nullptr, &g_stagingTex[e])))
             {
-                context->CopyResource(g_leftTex, leftEye);
-                if (locked)
-                    g_leftKeyedMutexGame->ReleaseSync(0);
+                g_stagingTex[e] = nullptr;
+                continue;
             }
         }
+        context->CopyResource(g_stagingTex[e], eyes[e]);
+        g_stagingFilled[e] = true;
     }
-    if (rightEye)
+    if (g_stagingFilled[0] && g_stagingFilled[1])
     {
-        D3D11_TEXTURE2D_DESC desc{};
-        rightEye->GetDesc(&desc);
-        if (EnsurePersistentEyeTexture(device, g_rightTex, g_rightWidth, g_rightHeight, g_rightFormat, desc,
-                                          g_rightSharedHandle, g_rightGeneration, g_rightKeyedMutexGame))
-        {
-            bool locked = g_rightKeyedMutexGame && SUCCEEDED(g_rightKeyedMutexGame->AcquireSync(0, kKeyedMutexTimeoutMs));
-            if (locked || !g_rightKeyedMutexGame)
-            {
-                context->CopyResource(g_rightTex, rightEye);
-                if (locked)
-                    g_rightKeyedMutexGame->ReleaseSync(0);
-            }
-        }
+        D3D11_TEXTURE2D_DESC leftDesc{}, rightDesc{};
+        g_stagingTex[0]->GetDesc(&leftDesc);
+        g_stagingTex[1]->GetDesc(&rightDesc);
+        if (EnsureSlots(device, leftDesc, rightDesc))
+            PublishPair(context, g_stagingTex[0], g_stagingTex[1], PairStamp{}); // the submit thread queries the stamp
     }
     context->Release();
 }
@@ -969,41 +1213,15 @@ void UpdateOpenVrDirectPair(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D
     D3D11_TEXTURE2D_DESC leftDesc{}, rightDesc{};
     leftEye->GetDesc(&leftDesc);
     rightEye->GetDesc(&rightDesc);
-    if (!EnsurePersistentEyeTexture(device, g_leftTex, g_leftWidth, g_leftHeight, g_leftFormat, leftDesc,
-                                    g_leftSharedHandle, g_leftGeneration, g_leftKeyedMutexGame) ||
-        !EnsurePersistentEyeTexture(device, g_rightTex, g_rightWidth, g_rightHeight, g_rightFormat, rightDesc,
-                                    g_rightSharedHandle, g_rightGeneration, g_rightKeyedMutexGame))
+    if (!EnsureSlots(device, leftDesc, rightDesc))
         return;
 
     ID3D11DeviceContext* context = nullptr;
     device->GetImmediateContext(&context);
     if (!context)
         return;
-
-    // Same lock order as SubmitThreadProc (left, then right). If either can't be taken, skip the whole pair: the
-    // submitter keeps showing the previous, still-consistent pair rather than a half-updated one.
-    bool leftAcquired = g_leftKeyedMutexGame && SUCCEEDED(g_leftKeyedMutexGame->AcquireSync(0, kKeyedMutexTimeoutMs));
-    bool rightAcquired = (leftAcquired || !g_leftKeyedMutexGame) && g_rightKeyedMutexGame &&
-                         SUCCEEDED(g_rightKeyedMutexGame->AcquireSync(0, kKeyedMutexTimeoutMs));
-    bool leftOk = leftAcquired || !g_leftKeyedMutexGame;
-    bool rightOk = rightAcquired || !g_rightKeyedMutexGame;
-    if (leftOk && rightOk)
-    {
-        context->CopyResource(g_leftTex, leftEye);
-        context->CopyResource(g_rightTex, rightEye);
-        std::lock_guard<std::mutex> lock(g_pairStampMutex);
-        g_pairStamp = stamp;
-    }
-    else
-    {
-        static long long skipped = 0;
-        if (++skipped <= 5 || skipped % 1000 == 0)
-            MOHW_LOG(kLogFile, "pair publish skipped, keyed mutex busy (count=%lld)", skipped);
-    }
-    if (rightAcquired)
-        g_rightKeyedMutexGame->ReleaseSync(0);
-    if (leftAcquired)
-        g_leftKeyedMutexGame->ReleaseSync(0);
+    // One slot holds both eyes and their stamp: SubmitThreadProc takes all of it or none, never half a pair.
+    PublishPair(context, leftEye, rightEye, stamp);
     context->Release();
 }
 

@@ -18,6 +18,12 @@
 // once into each half (hooks/ui_pass.cpp) and placed per eye there (hooks/draw_trace_diag.cpp). The in-world markers
 // come from one projection for both halves, put in the right direction at the HUD's depth
 // (hooks/marker_projection_hook.cpp).
+//
+// THE DRIVING MISSIONS (2026-11-18): game\MOHWD.exe has the same builder (FUN_0092c280) with its own view layout
+// (sdk/mohw_offsets.h MOHWD_*), so the same render mode runs there: hooks/driving_camera_hook.cpp gives the committed
+// view only the head's turn while two views are wanted, and the eyes come from here. Not ported: the HUD pass replay
+// (its HUD draws are drawn into both halves by hooks/draw_trace_diag.cpp instead), depth of field off, the render scale
+// and the eye-sized backbuffer (MOHW.exe objects).
 
 namespace mohw {
 
@@ -36,6 +42,9 @@ void NativeStereoNoteSwapChainWindowed(bool windowed);
 
 // True while the setting is on and the engine built two views within the last quarter second. Any thread.
 bool IsNativeStereoActive();
+// True while the setting is on and this frame is asked for two views (the view count written at Present) -- a frame
+// before IsNativeStereoActive. The driving camera hook's switch: the eyes come from the view list then. Any thread.
+bool NativeStereoTwoViewsWanted();
 // Render threads (hooks/camera_matrix_test_hook.cpp): which eye a first-person batch is being built for, from its view's
 // raw camera position (ViewDesc +0xE00, moved to each eye here): 0 left, 1 right, -1 not one of the last frames' eye
 // cameras (then the frame's eye applies, as without this). *frame (if given) = which built frame it was, counting up,

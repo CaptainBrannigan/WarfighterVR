@@ -25,6 +25,10 @@ namespace mohw {
 // sdk/logging.h's LogFilePath() already does.
 void LoadSettings();
 
+// Only the log files switch (WriteLogFiles, sdk/logging.h), read before anything is logged so a session with the logs on
+// has its first lines too (the startup report, the build check). LoadSettings reads it again with everything else.
+void LoadLogSwitch();
+
 float GetFovScale();
 void SetFovScale(float value); // updates the in-memory value AND persists to disk immediately
 
@@ -193,6 +197,10 @@ void GetHandOffset(float position[3], float rotationDeg[3]);
 // {right, up, forward} (m) and rotation {pitch, yaw, roll} (deg) on its controller. ArmIkEnabled,
 // LeftHandIkRight/Up/Forward, LeftHandIkPitch/Yaw/Roll.
 bool GetArmIkEnabled();
+// HELD POSE (2026-11-21, the user: "cancel all weapon idle animations while player has control"): the hands and the gun
+// held in the pose each weapon settles in after it comes in, instead of following the game's animation under the
+// controllers (hooks/first_person_rig.cpp). HoldHandPose, default on.
+bool GetHoldHandPose();
 void GetLeftHandIkOffset(float position[3], float rotationDeg[3]);
 // The rest of the arm IK (hooks/first_person_rig.cpp). rightHand: the weapon hand's calibration on its own controller,
 // as the left hand's (position {right, up, forward} m, rotation {pitch, yaw, roll} deg; RightHandIk*; until 2026-11-09
@@ -224,6 +232,15 @@ bool GetShowGrabZones();
 bool GetManualReloadEnabled();
 void GetMagazinePouchOffset(float out[3]);
 float GetMagazinePouchRadius();
+// The magazine waiting in the pouch, turned {pitch, yaw, roll} degrees from the body's right / up / back (2026-11-18).
+// MagazinePouchPitch / Yaw / Roll.
+void GetMagazinePouchRotation(float deg[3]);
+// A magazine taken from the pouch (2026-11-21, openvr_direct/vr_magazine_path.h PouchGrabInHand): kept where it sat
+// relative to the hand; snapped into the hand at its platform's hold (MagazinePlatform holdPos / holdDeg) but slid along
+// its own vertical to where the hand gripped it, the hold's up an offset from there; or snapped fully.
+// MagazinePouchGrab, default snapped with the grip's vertical. A magazine pulled out of the gun always keeps its grab.
+constexpr int kPouchGrabAsGrabbed = 0, kPouchGrabSnapKeepVertical = 1, kPouchGrabSnap = 2;
+int GetMagazinePouchGrab();
 // The equipped weapon's magazine (per weapon, SetWeaponProfile), metres from its seat in the gun, in the gun's frame
 // {right, up, forward}. grabOffset / grabHalfSize: the box the off hand grabs it in. aimPoint: what the magazine's top
 // points at. range: how far out it starts turning, alpha 0; lockRange: alpha 1, its horizontal locks and only vertical
@@ -244,19 +261,16 @@ struct MagazinePlatform
 {
     int index;
     const char* name;
-    // The magazine in the hand that holds it: its insertion point (the Wep_Mag point, the one that seats) moved
-    // {right, up, forward} metres in that hand's frame, and the magazine turned {pitch, yaw, roll} degrees. The
-    // insertion is judged from that point. Mirrored for a magazine in the right hand.
+    // A magazine snapped into the hand from the pouch (GetMagazinePouchGrab): its top {right, up, forward} metres from
+    // the controller and its rotation {pitch, yaw, roll} degrees, for the left hand (mirrored in the right). (Unread
+    // 2026-11-18 .. 21, when every grab kept its own offset.)
     float holdPos[3], holdDeg[3];
-    // Straight (hinge false, AR): it slides along the line from its seat to the weapon profile's aim point, travel
-    // metres to clear the magwell. Hinge (AK): it rocks about the gun's right axis through hingePoint {forward, up}
-    // metres from its seat, its bottom swinging forward, hingeDeg degrees to clear (the front lug).
-    bool hinge;
+    // Coming out, it slides along the line from its seat to the weapon profile's aim point, travel metres to clear the
+    // magwell. (2026-11-18: the AK's hinged rock-out is gone -- the user: "do away with the AK hinge mag feature". Its
+    // values stay in the MagazinePlatform lines, unread, so older ini files still load.)
     float travel;
-    float hingePoint[2];
-    float hingeDeg;
-    // Stickiness: the hand stays on the magazine, and the controller has to get this far past it (metres along the
-    // path) before the magazine moves; it then follows that far behind, and seating takes that much push.
+    // Coming out: the hand stays on the magazine, and the controller has to get this far past it (metres along the
+    // path) before the magazine moves; it then follows that far behind. Going in takes no force (2026-11-18).
     float pullForce;
     // The magazine release (SteamVR action "Magazine release", only while a magazine is gripped) has to be pressed
     // before the magazine can leave the gun.
@@ -269,26 +283,32 @@ float GetMagazineGripBreak();
 // SCOPED EYE (2026-11-14, prototype, hooks/scope_view.h): in engine two-view, an eye brought behind the gun's sight
 // line (the weapon profile's optic zero: height / windage above the hand) sees through a magnified scope instead of its
 // own view. enabled: ScopeEyeEnabled (default on). eyeBox: how close to the sight line the eye has to be, m; relief: how
-// far behind the hand along it, m; apparentFovDeg: the eyepiece's size in view; minZoom: the game's own ADS zoom (its FOV
-// against the hip FOV) that counts as a scope; reticle: a drawn crosshair until the game's own reticle is found;
-// magnification: the weapon's own (per weapon, ScopeMagnification; 0 = the game's ADS zoom, so only while ADS is held).
-// lensPicture (ScopeLensPicture, default on): the screen-space prototype -- each eye not looking through the scope sees
-// a magnified picture in the scope's lens, a disc of lensRadius (ScopeLensRadius, m) on the sight line lensForward
-// (ScopeLensForward, m) ahead of the hand, filled from the other eye's view of the sight line's far field.
+// far behind the hand along it, m; apparentFovDeg: the eyepiece's size in view; reticle (ScopeReticle): a crosshair on
+// the impact point in the scoped eye and the lens picture, holographic (where each eye sees the laser's point; the game's
+// own zoom-optic reticle isn't used). lensPicture (ScopeLensPicture, default on): the screen-space prototype -- each eye not
+// looking through the scope sees a magnified picture in the scope's lens, filled from the other eye's view.
+// Per weapon (the profile, 2026-11-17): magnification (ScopeMagnification, 0 = the gun has no scope; it no longer falls
+// back to the game's ADS zoom, and needs no ADS); the lens disc: lensRadius (ScopeLensRadius, m), its centre lensRight /
+// lensUp from the optic zero (ScopeLensRight / ScopeLensUp, m, in the hand's frame) and lensForward ahead of the hand
+// (ScopeLensForward, m).
 struct ScopeSettings
 {
     bool enabled;
-    float eyeBox, relief, apparentFovDeg, minZoom;
+    float eyeBox, relief, apparentFovDeg;
     bool reticle;
     float magnification;
     bool lensPicture;
-    float lensForward, lensRadius;
+    float lensRight, lensUp, lensForward, lensRadius;
+    // Per weapon (ScopeNeedsMagnifier, 2026-11-17): the scope only while the game's flip magnifier is switched on
+    // (hooks/weapon_identity.h GetEquippedOpticState), for red dots with a magnifier behind them.
+    bool needsMagnifier;
 };
 ScopeSettings GetScopeSettings();
 // Secondary grip offset (per weapon, SetWeaponProfile): where the off hand holds relative to the barrel line, metres
-// in the gun's frame (+ right, + up). The two-handed aim targets the off hand's point moved by it, so a hand below the
-// bore (a vertical foregrip) doesn't tilt the gun. SecondaryGripRight / SecondaryGripUp, default 0.
-void GetSecondaryGripOffset(float* right, float* up);
+// in the gun's frame (+ right, + up, + forward). The two-handed aim targets the off hand's point moved by it, so a hand
+// below the bore (a vertical foregrip) doesn't tilt the gun; forward (2026-11-21) moves that point along the barrel,
+// which sets how far the right / up parts tilt the aim. SecondaryGripRight / Up / Forward, default 0.
+void GetSecondaryGripOffset(float* right, float* up, float* forward);
 
 // HUD placement (hooks/draw_trace_diag.cpp, true-frustum mode only): the game's full-screen HUD is drawn into HudScale
 // of each eye's real field of view (so it keeps to the corners), as one head-locked rectangle whose two eye copies
@@ -299,9 +319,11 @@ float GetHudScale();
 // fraction of the eye's view; the HUD's offsets. MenuScreenScale, default 0.75.
 float GetMenuScreenScale();
 // The game's own UI laid out as on a screen this many times smaller (2026-11-12, hooks/ui_pass.cpp): its menus are laid
-// out in pixels, so they shrink as the resolution grows (the eye-sized backbuffer); above 1 makes them bigger again,
-// still drawn at the full resolution. Only with HudPlacementEnabled. UiLayoutScale, default 1 (the game's own).
-float GetUiLayoutScale();
+// out in pixels, so they shrink as the resolution grows. Automatic since 2026-11-22: worked out from the width of the
+// rectangle the game lays its UI out in (screenWidth), 1.5 at 5824, so the menus look the same size at any resolution;
+// below 1 on smaller screens. UiLayoutSize (the dashboard's Hud Element Scale, default 1 = automatic) multiplies it.
+// Only with HudPlacementEnabled.
+float GetUiLayoutScale(int screenWidth);
 // Where that screen fuses, meters (MenuScreenDepth, default 2.5): its two eye copies are separated by the rendering eye
 // offset over this distance, as a real screen there would be (not the HUD's depth and IPD scale).
 float GetMenuScreenDepth();
@@ -325,6 +347,24 @@ float GetDrivingStickDeadzone();
 // Stereo in the driving missions (hooks/driving_camera_hook.cpp): the view gets the per-eye shift and true
 // frustum and the frame is shown full-view; off = the whole-frame floating screen. DrivingStereo, default on.
 bool GetDrivingStereo();
+// SPECIALIZED SEQUENCES (2026-11-22): "Use 6DoF Motion For Specialized Sequences", over every sequence's profile.
+// SpecializedSequenceMotion, default on.
+bool GetSpecializedSequenceMotion();
+// The Zodiac Sequence's profile (the Basilan RHIB, hooks/boat_seat.h; keys SequenceZodiac*), each toggle on by default.
+// GetBoatSixDof: the master and the profile's 6DoF both on: its wheel and Mk19 seats get the head in 6DoF with the
+// hands in the game's pose. Off, they are as for any other scene (only the level keeps its stereo), and the two below
+// with it. GunAim: the gripping hands lever the Mk19 about its pivot. Wheel: the driving missions' wheel code steers it.
+bool GetBoatSixDof();
+bool GetBoatGunAim();
+bool GetBoatWheel();
+// GunAimStrength (default 1): how hard the turret is driven to the hands. StickDeadzone (default 0.2): what the game
+// ignores of the stick, added back for both the gun and the wheel.
+float GetBoatGunAimStrength();
+float GetBoatStickDeadzone();
+// The profile's own wheel, as the driving missions' three below; an ini without it starts from that ini's.
+float GetBoatWheelLockDeg();
+void GetBoatWheelPlacement(float* forward, float* down, float* right, float* tiltDeg);
+void GetBoatWheelLook(float* radius, float* thickness, float* opacity);
 // Driving stereo: the committed view gets the next frame's eye, frustum and shift (swaps the eyes). Live 2026-10-14 the
 // commit lands in the frame it is presented in, so leave this off. Ini key DrivingGameThreadNextEye, default off.
 bool GetDrivingLateNextEye();
@@ -450,6 +490,10 @@ bool GetGripDoubleTapBumpers();
 // A double tap of the thumbrest = that hand's bumper (openvr_direct/vr_input.cpp UpdateThumbTap), and with it on, Touch
 // grips no longer double-tap. ThumbTapBumpers, default on.
 bool GetThumbTapBumpers();
+// The game reads its gamepad -- so the motion controllers -- without its window having keyboard focus: the game's own
+// ClientSettings.UseGlobalGamePadInput held on (hooks/xinput_hook.cpp GamepadFocusOnPresent). Both executables.
+// GamepadWithoutFocus, default off (2026-11-22, the user: "default to off for now").
+bool GetGamepadWithoutFocus();
 
 // Controller aim offset (sdk/motion_controller_aim.h ApplyControllerAimOffset), degrees in the controller's own frame:
 // + up, + right. Turns the shots and the aim-ray dot, not the gun (and so not the optic dot). ControllerAimUp /
@@ -509,7 +553,7 @@ bool GetMenuSettingInfo(int index, MenuSettingInfo* out);
 void AdjustMenuSetting(int index, int steps);
 // RENDER MODE (2026-11-12): one DLL, two renderers -- alternating eye, or the engine's two-view (NativeStereo). The
 // dashboard shows it as a choice, shows only the selected mode's rows, and keeps the HUD's numbers per mode (HudScale,
-// HudDepth, HudIpdScale, HudOffsetX/Y, MenuScreenScale/Depth, UiLayoutScale; the engine mode's under "...TwoView" keys;
+// HudDepth, HudIpdScale, HudOffsetX/Y, MenuScreenScale/Depth, UiLayoutSize; the engine mode's under "...TwoView" keys;
 // the driving missions always use the alternating-eye ones). Any thread: the render mode the current level was built
 // with (hooks/native_stereo.cpp, at the level's load), for the note under the setting while the selection differs.
 void NoteLevelRenderMode(bool twoView);

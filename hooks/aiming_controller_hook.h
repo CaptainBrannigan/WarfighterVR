@@ -112,6 +112,10 @@ float GetPlayerAimDriveWeight();
 // strapped to the head: no head look, head position, head roll or render-pose stamp. The user (2026-11-12): "just
 // toggle our head and control hooks, leaving only the stereo rendering enabled".
 bool IsHeadDrivingSoldier();
+// Any thread (2026-11-22): something outside the soldier has the look (a boat seat, hooks/boat_seat.h), maybe with his
+// aim not running at all to see it. The next aim update with look free then counts as look given back: straight ahead is
+// where the head faces.
+void NoteLookTaken();
 // HMD position (XR local space, meters) captured at the last recenter -- the origin head-position tracking measures from.
 bool GetHeadAimPositionOrigin(float out[3]);
 

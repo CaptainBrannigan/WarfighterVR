@@ -1,4 +1,5 @@
 #include "vr_reload.h"
+#include "../hooks/boat_seat.h"
 #include "vr_magazine_path.h"
 
 #include "../hooks/aiming_controller_hook.h"
@@ -120,13 +121,17 @@ unsigned long long g_ourReloadStartBy = 0;
 unsigned long long g_seatedAt = 0; // a new magazine's seat
 bool g_wasReloading = false;
 uintptr_t g_otherFiringLogged = 0;
-// On the path (2026-11-14).
-bool g_inserting = false;      // going in (a held magazine engaged) rather than coming out (gripped in the gun)
+// On the path, coming out (2026-11-14; going in left the path 2026-11-18).
 float g_s = 0.0f;              // 0 seated .. 1 clear
 float g_sOffset = 0.0f;        // the projection's offset at the start, so s doesn't jump
 bool g_released = false;       // coming out: the magazine release has been pressed during this grip
 bool g_movedOut = false;       // coming out: it has left the seat (back at it, it clicks in again)
 Rigid g_handInMag = RigidIdentity();
+// HELD (2026-11-18, the user: "attach the magazine with the offset of where we grabbed it at, rather than snapping it
+// down into the hand"): the magazine in the hand that holds it, mag-local -> that controller's frame, taken at the grab
+// -- from the pouch, or where the hand had it on the gun when it came free.
+Rigid g_magInHand = RigidIdentity();
+Vec3 g_bodyRight{1.0f, 0.0f, 0.0f}, g_bodyForward{0.0f, 0.0f, -1.0f}; // the latest UpdateManualReload's, for the pouch
 bool g_releaseDown = false, g_releasePressed = false; // SetMagazineReleaseInput
 int g_lastWeaponHand = kRightHand;
 // The next glide, for PublishView.
@@ -174,6 +179,7 @@ void PublishView()
     g_view.state = State();
     g_view.s = g_s;
     g_view.handInMag = g_handInMag;
+    g_view.magInHand = g_magInHand;
     if (g_blendPending)
     {
         g_view.blendStartMs = g_blend.blendStartMs;
@@ -192,7 +198,7 @@ struct PublishOnExit
 
 bool Available()
 {
-    if (!GetManualReloadEnabled() || !GetWeaponDriveEnabled() || !IsPlayerAimActive())
+    if (!GetManualReloadEnabled() || !GetWeaponDriveEnabled() || !IsPlayerAimActive() || GetBoatSeat() != BoatSeat::None)
         return false;
     return GetTickCount64() - g_pointTick.load(std::memory_order_relaxed) < kMagazineSeenMs;
 }
@@ -303,10 +309,40 @@ bool InGrabBox(const HandInput& weapon, const HandInput& off)
     return true;
 }
 
-// The held magazine: mag-local -> tracking, at its platform's place in the off hand.
+// The held magazine: mag-local -> tracking, where the grab put it in the off hand.
 Rigid HeldMagazine(const HandInput& off)
 {
-    return Compose(MagazineHold(GetMagazinePlatform(), g_lastWeaponHand == kLeftHand), FrameOf(off));
+    return Compose(g_magInHand, FrameOf(off));
+}
+
+// The magazine waiting in the pouch, mag-local -> tracking: the body's axes at the pouch's centre, turned by the pouch
+// rotation (as the drawing's, hooks/camera_matrix_test_hook.cpp PouchFrame).
+Rigid PouchMagazineNow(const Vec3& pouchCentre)
+{
+    Rigid frame{};
+    const Vec3 up{0.0f, 1.0f, 0.0f};
+    const Vec3 back = VecScale(g_bodyForward, -1.0f);
+    const Vec3* rows[3] = {&g_bodyRight, &up, &back};
+    for (int i = 0; i < 3; ++i)
+    {
+        frame.R[i][0] = rows[i]->x;
+        frame.R[i][1] = rows[i]->y;
+        frame.R[i][2] = rows[i]->z;
+    }
+    frame.t[0] = pouchCentre.x;
+    frame.t[1] = pouchCentre.y;
+    frame.t[2] = pouchCentre.z;
+    return PouchMagazine(frame);
+}
+
+// How far along the seat -> aim line a point is (below the seat is negative).
+float AlongAxis(const SeatNowResult& s, const Vec3& point)
+{
+    Vec3 axis = VecSub(s.aim, s.seat);
+    const float length = sqrtf(VecDot(axis, axis));
+    if (length < 1e-3f)
+        return 0.0f;
+    return VecDot(VecSub(point, s.seat), VecScale(axis, 1.0f / length));
 }
 
 void Seat()
@@ -333,27 +369,35 @@ void Seat()
     g_ourReloadStartBy = now + kReloadStartMs;
 }
 
-// ON THE PATH: the controller's pull, projected onto the path, moves the magazine once it's more than the platform's
-// pull force ahead or behind (a dead band: the magazine follows that far behind the hand). The hand is drawn stuck to
-// the magazine (handInMag); it lets go past MagazineGripBreak.
+// The magazine has come free in the hand (off the end of the path, or the grip pulled it away): it stays where the hand
+// had it on the gun -- g_handInMag is the hand in the magazine's frame, so the magazine in the hand is its inverse.
+void FreeInHand(const char* why)
+{
+    g_magInHand = Inverse(g_handInMag);
+    g_leftTheWell = false;
+    g_heldIsNew = false;
+    SetState(MagazineState::Held, why);
+}
+
+// ON THE PATH, COMING OUT: the controller's pull, projected onto the path, moves the magazine once it's more than the
+// platform's pull force ahead or behind (a dead band: the magazine follows that far behind the hand). The hand is drawn
+// stuck to the magazine (handInMag); it lets go past MagazineGripBreak.
 void UpdateOnPath(const HandInput& weapon, const HandInput& off, bool releasePressed)
 {
     const MagazinePath path = CurrentMagazinePath();
     const MagazinePlatform plat = GetMagazinePlatform();
-    const MagazineProfile prof = GetMagazineProfile();
     const Rigid seat = SeatFrame(weapon);
     const Rigid offFrame = FrameOf(off);
     float q[3]; // the controller, gun-local
     PointTimes(offFrame.t, Inverse(seat), q);
     const float* grab = g_handInMag.t;
-    const float length = PathLength(path, grab);
-    const float band = plat.pullForce / length;
-    if (!g_inserting && releasePressed && !g_released)
+    const float band = plat.pullForce / PathLength(path);
+    if (releasePressed && !g_released)
     {
         g_released = true;
         MOHW_LOG(kLogFile, "magazine release pressed: it can come out now");
     }
-    const bool locked = !g_inserting && plat.needsRelease && !g_released;
+    const bool locked = plat.needsRelease && !g_released;
     const float target = ProjectOnPath(path, grab, q) - g_sOffset;
     if (!locked)
     {
@@ -370,49 +414,29 @@ void UpdateOnPath(const HandInput& weapon, const HandInput& off, bool releasePre
         // Clear of the magwell: free in the hand, which comes back to its controller.
         g_s = 1.0f;
         StartBlend(true, true, path);
-        g_leftTheWell = false;
-        if (!g_inserting)
-            g_heldIsNew = false;
-        SetState(MagazineState::Held, g_inserting ? "pulled back out" : "out of the magwell");
+        FreeInHand("out of the magwell");
         return;
     }
-    // The weapon profile's "seats within", in metres along the path, but never more than a quarter of it (an AK's arc is
-    // only a few centimetres).
-    float seatTolerance = prof.seatRange / length;
-    seatTolerance = seatTolerance > 0.25f ? 0.25f : seatTolerance;
-    if (g_inserting && g_s <= seatTolerance)
+    if (g_s > 0.2f)
+        g_movedOut = true;
+    if (g_movedOut && g_s <= 0.02f)
     {
-        StartBlend(true, false, path);
+        // Pushed back home: it clicks in again, and needs the release again.
+        g_movedOut = false;
+        g_released = !plat.needsRelease;
         g_s = 0.0f;
-        Seat();
-        return;
-    }
-    if (!g_inserting)
-    {
-        if (g_s > 0.2f)
-            g_movedOut = true;
-        if (g_movedOut && g_s <= 0.02f)
-        {
-            // Pushed back home: it clicks in again, and needs the release again.
-            g_movedOut = false;
-            g_released = !plat.needsRelease;
-            g_s = 0.0f;
-            MOHW_LOG(kLogFile, "magazine pushed back in: it clicks into place");
-        }
+        MOHW_LOG(kLogFile, "magazine pushed back in: it clicks into place");
     }
     // The grip lets go once the controller is too far from the hand on the magazine.
     float stuck[3];
     PointTimes(grab, Compose(PathDisplacement(path, g_s), seat), stuck);
     if (Distance3(offFrame.t, stuck) > GetMagazineGripBreak())
     {
-        const bool comesAlong = g_inserting || g_s >= 0.5f;
+        const bool comesAlong = g_s >= 0.5f;
         StartBlend(true, comesAlong, path);
         if (comesAlong)
         {
-            g_leftTheWell = false;
-            if (!g_inserting)
-                g_heldIsNew = false;
-            SetState(MagazineState::Held, "the hand pulled away: the magazine comes with it");
+            FreeInHand("the hand pulled away: the magazine comes with it");
         }
         else
         {
@@ -422,31 +446,21 @@ void UpdateOnPath(const HandInput& weapon, const HandInput& off, bool releasePre
     }
 }
 
-// HELD: the magazine's insertion point (its in-hand Wep_Mag point) near the path's far end engages it, going in.
+// HELD, GOING IN (2026-11-18: back to the first version, which the user found "very smooth"; the path's engage-and-push
+// with its pull force is gone): once it's been away from the gun, the magazine's insertion point (its Wep_Mag point,
+// where the grab put it in the hand) within the weapon profile's lock range of the seat, and no more than "seats
+// within" below the seat along the magwell's line, seats it. The drawing turns it onto that line from the profile's range
+// and holds it on the line inside the lock range (hooks/camera_matrix_test_hook.cpp DriveMagazine).
 void UpdateHeld(const HandInput& weapon, const HandInput& off)
 {
-    const MagazinePath path = CurrentMagazinePath();
     const MagazineProfile prof = GetMagazineProfile();
-    const Rigid seat = SeatFrame(weapon);
-    const Rigid offFrame = FrameOf(off);
-    const Rigid held = HeldMagazine(off);
-    const Rigid entry = Compose(PathDisplacement(path, 1.0f), seat);
-    const float d = Distance3(held.t, entry.t);
-    if (d > prof.lockRange + kLeaveMargin)
+    const SeatNowResult s = SeatNow(weapon);
+    const Vec3 point = ToVec(HeldMagazine(off).t);
+    const float d = Distance(point, s.seat);
+    if (d > prof.lockRange)
         g_leftTheWell = true;
-    if (!g_leftTheWell || d > prof.lockRange)
-        return;
-    // On the path at its far end, the hand where it is against the magazine there (the drawing has turned the
-    // magazine onto the entry by now, so neither jumps).
-    g_inserting = true;
-    g_s = 1.0f;
-    g_released = true;
-    g_movedOut = false;
-    g_handInMag = Compose(offFrame, Inverse(entry));
-    float q[3];
-    PointTimes(offFrame.t, Inverse(seat), q);
-    g_sOffset = ProjectOnPath(path, g_handInMag.t, q) - 1.0f;
-    SetState(MagazineState::OnPath, g_heldIsNew ? "a new magazine engages the magwell" : "the magazine engages the magwell");
+    if (g_leftTheWell && d <= prof.lockRange && AlongAxis(s, point) >= -prof.seatRange)
+        Seat();
 }
 
 } // namespace
@@ -487,6 +501,8 @@ void UpdateManualReload(const HandInput hands[2], int weaponHand, bool haveHead,
     }
     if (haveHead)
     {
+        g_bodyRight = bodyRight;
+        g_bodyForward = bodyForward;
         std::lock_guard<std::mutex> lock(g_viewMutex);
         g_view.pouchFromHead[0] = pouchCentre.x - headPos[0];
         g_view.pouchFromHead[1] = pouchCentre.y - headPos[1];
@@ -579,7 +595,6 @@ bool ManualReloadGripPressed(const HandInput& weapon, const HandInput& off, cons
         const bool needsRelease = GetMagazinePlatform().needsRelease;
         const Rigid seat = SeatFrame(weapon);
         const Rigid offFrame = FrameOf(off);
-        g_inserting = false;
         g_s = 0.0f;
         g_movedOut = false;
         g_released = !needsRelease;
@@ -599,6 +614,18 @@ bool ManualReloadGripPressed(const HandInput& weapon, const HandInput& off, cons
         // A grip anywhere else stays with the holsters and the two-handed grab.
         if (haveHead && Distance(Position(off), pouchCentre) <= GetMagazinePouchRadius())
         {
+            // Where it sat in the pouch relative to the hand (2026-11-18), or snapped into the hand at the platform's
+            // hold, with or without the grip's height on the magazine (MagazinePouchGrab, 2026-11-21).
+            const Rigid grabbed = Compose(PouchMagazineNow(pouchCentre), Inverse(FrameOf(off)));
+            g_magInHand = PouchGrabInHand(grabbed, GetMagazinePlatform(), g_lastWeaponHand == kLeftHand);
+            const int mode = GetMagazinePouchGrab();
+            MOHW_LOG(kLogFile,
+                     "pouch grab (%s): the hand %.3f m up the magazine at the grip, %.3f m now; its top at (%.3f, %.3f, "
+                     "%.3f) m in the hand (right, up, back)",
+                     mode == kPouchGrabAsGrabbed ? "as grabbed"
+                     : mode == kPouchGrabSnapKeepVertical ? "snapped, vertical from the grip"
+                                                          : "snapped",
+                     Inverse(grabbed).t[1], Inverse(g_magInHand).t[1], g_magInHand.t[0], g_magInHand.t[1], g_magInHand.t[2]);
             g_heldIsNew = true;
             g_leftTheWell = true;
             SetState(MagazineState::Held, "taken from the pouch");
@@ -623,14 +650,14 @@ void ManualReloadGripReleased(const HandInput& weapon, const HandInput& off)
         return;
     const MagazinePath path = CurrentMagazinePath();
     StartBlend(true, false, path);
-    if (!g_inserting && g_s < 0.5f)
+    if (g_s < 0.5f)
     {
         g_s = 0.0f;
         SetState(MagazineState::InGun, "let go: it stays in");
     }
     else
     {
-        SetState(MagazineState::Out, g_inserting ? "let go half in: it falls out" : "let go half out: it falls out");
+        SetState(MagazineState::Out, "let go half out: it falls out");
     }
 }
 
@@ -675,7 +702,7 @@ bool GetMagazineDebug(const HandInput& weapon, const HandInput& off, MagazineDeb
         out->insertion = s.seat;
     out->range = p.range;
     out->lockRange = p.lockRange;
-    out->handDistance = Distance(out->insertion, out->entry);
+    out->handDistance = Distance(out->insertion, s.seat); // going in is judged at the seat again (2026-11-18)
     out->inBox = off.tracked && InGrabBox(weapon, off);
     return true;
 }
@@ -692,7 +719,7 @@ bool ManualReloadBlocksFire()
     if (state == MagazineState::InGun)
         return false;
     if (state == MagazineState::OnPath) // held in the gun, still seated: it fires
-        return g_inserting || g_s > 0.02f;
+        return g_s > 0.02f;
     return true;
 }
 

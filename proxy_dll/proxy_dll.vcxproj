@@ -121,8 +121,12 @@
     <ClCompile Include="..\hooks\first_person_rig.cpp" />
     <ClCompile Include="..\hooks\native_stereo.cpp" />
     <ClCompile Include="..\hooks\scope_view.cpp" />
+    <ClCompile Include="..\hooks\perf_probe.cpp" />
+    <ClCompile Include="..\hooks\holster_probe.cpp" />
+    <ClCompile Include="..\hooks\weapon_state_probe.cpp" />
     <ClCompile Include="..\hooks\player_control.cpp" />
     <ClCompile Include="..\hooks\input_restriction.cpp" />
+    <ClCompile Include="..\hooks\boat_seat.cpp" />
     <ClCompile Include="..\hooks\ui_pass.cpp" />
     <ClCompile Include="..\hooks\ocean_water_guard.cpp" />
     <ClCompile Include="..\hooks\sky_rays_fix.cpp" />
@@ -184,6 +188,8 @@
     <ClInclude Include="..\hooks\native_stereo.h" />
     <ClInclude Include="..\hooks\player_control.h" />
     <ClInclude Include="..\hooks\input_restriction.h" />
+    <ClInclude Include="..\hooks\boat_seat.h" />
+    <ClInclude Include="..\hooks\boat_math.h" />
     <ClInclude Include="..\hooks\ui_pass.h" />
     <ClInclude Include="..\hooks\ocean_water_guard.h" />
     <ClInclude Include="..\hooks\sky_rays_fix.h" />

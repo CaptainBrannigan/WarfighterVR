@@ -1,6 +1,6 @@
 #include "settings.h"
 #include "default_settings.h"
-#include "mohw_offsets.h" // g_drivingExe: the driving missions use the alternating-eye HUD values
+#include "mohw_offsets.h" // g_drivingExe: the driving missions keep exclusive fullscreen (GetKeepGameWindowed)
 
 #include "logging.h" // reuses LogFilePath()'s "next to the DLL" resolution
 
@@ -164,12 +164,21 @@ constexpr const char* kHandOffsetRotKeys[3] = {"HandOffsetPitch", "HandOffsetYaw
 std::atomic<float> g_gunSocketOffset[3] = {{0.0f}, {0.0f}, {0.0f}};
 constexpr const char* kGunSocketOffsetKeys[3] = {"GunInHandOffsetRight", "GunInHandOffsetUp", "GunInHandOffsetForward"};
 std::atomic<bool> g_armIkEnabled{true};
+// The hands and the gun held in the weapon's settled pose while the player has control, no idle animations
+// (2026-11-21, hooks/first_person_rig.cpp HELD POSE).
+std::atomic<bool> g_holdHandPose{true};
 std::atomic<float> g_leftHandIkPos[3] = {{0.0f}, {0.0f}, {0.0f}};
 std::atomic<float> g_leftHandIkRotDeg[3] = {{0.0f}, {0.0f}, {0.0f}};
 constexpr const char* kLeftHandIkPosKeys[3] = {"LeftHandIkRight", "LeftHandIkUp", "LeftHandIkForward"};
 constexpr const char* kLeftHandIkRotKeys[3] = {"LeftHandIkPitch", "LeftHandIkYaw", "LeftHandIkRoll"};
 std::atomic<bool> g_manualReloadEnabled{true};
 std::atomic<float> g_magazinePouchRadius{0.12f};
+// The magazine waiting in the pouch, turned {pitch, yaw, roll} degrees from the body's axes (2026-11-18, the user: "add
+// a rotation for the mag in the pouch"). A magazine taken from it keeps that pose in the hand.
+std::atomic<float> g_magazinePouchRot[3] = {{0.0f}, {0.0f}, {0.0f}};
+// A magazine taken from the pouch (2026-11-21, settings.h GetMagazinePouchGrab): kPouchGrab*, a choice row.
+std::atomic<float> g_magazinePouchGrab{static_cast<float>(kPouchGrabSnapKeepVertical)};
+const char* const kPouchGrabChoices[] = {"Kept where grabbed", "Snapped, vertical from the grip", "Snapped to the hand"};
 std::atomic<float> g_magazinePouch[3] = {{-0.14f}, {-0.42f}, {0.16f}};
 std::atomic<bool> g_keepGameWindowed{true};
 std::atomic<bool> g_nativeStereo{false}; // hooks/native_stereo.cpp, EXPERIMENTAL
@@ -224,10 +233,11 @@ const char* const kMagazinePlatformNames[kMagazinePlatformCount] = {
     "AK", "AR-15 / 5.56", "AR-10 / 7.62", "SMG", "Bolt-action rifle", "LMG box", "Shotgun box", "Other"};
 constexpr int kPlatformAk = 0, kPlatformAr15 = 1, kPlatformAr10 = 2, kPlatformSmg = 3, kPlatformBolt = 4,
               kPlatformLmg = 5, kPlatformShotgun = 6, kPlatformOther = 7;
-// hold right / up / forward, pitch / yaw / roll, hinge, travel, hinge forward / up, hinge degrees, pull, release
+// hold right / up / forward, pitch / yaw / roll, hinge, travel, hinge forward / up, hinge degrees, pull, release -- the
+// hinge values are no longer read (2026-11-18: straight paths only), kept so the MagazinePlatform lines keep their
+// layout; the hold is the pouch grab's snap again (2026-11-21).
 constexpr float kPlatformDefaults[kMagazinePlatformCount][kPfCount] = {
-    // Pull forces are small against the paths: an AK's 22 degrees with the hand 9 cm from the lug is a 3.4 cm arc.
-    {0, 0, 0, 0, 0, 0, 1, 0.06f, 0.035f, 0.0f, 22.0f, 0.012f, 1}, // AK: rocked in on the front lug
+    {0, 0, 0, 0, 0, 0, 0, 0.06f, 0.035f, 0.0f, 22.0f, 0.012f, 1}, // AK
     {0, 0, 0, 0, 0, 0, 0, 0.06f, 0.035f, 0.0f, 20.0f, 0.015f, 1}, // AR-15: straight up the magwell
     {0, 0, 0, 0, 0, 0, 0, 0.07f, 0.035f, 0.0f, 20.0f, 0.015f, 1}, // AR-10
     {0, 0, 0, 0, 0, 0, 0, 0.05f, 0.035f, 0.0f, 20.0f, 0.012f, 1}, // SMG
@@ -247,18 +257,22 @@ std::atomic<bool> g_scopeEyeEnabled{true};
 std::atomic<float> g_scopeEyeBox{0.035f};       // m from the sight line
 std::atomic<float> g_scopeEyeRelief{0.45f};     // m behind the hand along it
 std::atomic<float> g_scopeApparentFov{24.0f};   // deg, the eyepiece's size in view
-// The game's ADS zoom that counts as a scope: its zoom levels run 1.1-1.9x for iron sights and red dots (open sights,
-// which VR shouldn't magnify) and 3x / 4x / 6x / 24x for scopes (mohwvr_weaponsway.log, 2026-11-12).
-std::atomic<float> g_scopeMinZoom{2.5f};
 std::atomic<bool> g_scopeReticle{true};
-std::atomic<float> g_scopeMagnification{0.0f};  // per weapon: 0 = the game's ADS zoom
 std::atomic<bool> g_scopeLensPicture{true};     // the screen-space lens picture
-std::atomic<float> g_scopeLensForward{0.06f};   // m ahead of the hand on the sight line
+// Per weapon (2026-11-17, the user: one scope set up per gun, "we need an offset for the scope"). The game's ADS zoom no
+// longer stands in for a magnification: a gun has a scope when its profile gives one, and it works without ADS.
+std::atomic<float> g_scopeMagnification{0.0f};  // 0 = no scope
+std::atomic<float> g_scopeLensRight{0.0f};      // m, the lens disc's centre from the optic zero, + right
+std::atomic<float> g_scopeLensUp{0.0f};         // m, + up
+std::atomic<float> g_scopeLensForward{0.06f};   // m ahead of the hand
 std::atomic<float> g_scopeLensRadius{0.018f};   // m
+// 1 = the scope only while the game's flip magnifier is switched on (the user: "optics that have a secondary toggle, such
+// as a flip to side magnifier that the scope only appears when that is toggled on in game"), 0 = always.
+std::atomic<float> g_scopeNeedsMagnifier{0.0f};
+const char* const kScopeShowChoices[] = {"Always", "Only with the game's magnifier on"};
 const char kPlatformGroup[] = "Magazine platform";
 char g_platformTitleBuffers[2][96] = {"Magazine platform: AK (every gun on it)", ""};
 std::atomic<const char*> g_platformTitle{g_platformTitleBuffers[0]};
-const char* const kHingeChoices[] = {"Straight (AR: slides up)", "Hinge (AK: rocks in)"};
 const char* const kYesNoChoices[] = {"No", "Yes"};
 
 // A gun's platform from its blueprint name ("MOHW/Weapons/ASSAULT/AK103/spec/AK103__AKM").
@@ -320,6 +334,8 @@ const NamedFloat kArmIkKeys[] = {
     {"ElbowOutKnee", &g_elbowOutKneeDeg},         {"ElbowOutMax", &g_elbowOutMaxDeg},
     {"ElbowSmoothingMs", &g_elbowSmoothingMs},    {"ForearmTwist", &g_forearmTwist},
     {"MagazinePouchRadius", &g_magazinePouchRadius},
+    {"MagazinePouchPitch", &g_magazinePouchRot[0]}, {"MagazinePouchYaw", &g_magazinePouchRot[1]},
+    {"MagazinePouchRoll", &g_magazinePouchRot[2]},  {"MagazinePouchGrab", &g_magazinePouchGrab},
     {"BodyOffsetRight", &g_bodyOffset[0]},          {"BodyOffsetUp", &g_bodyOffset[1]},
     {"BodyOffsetForward", &g_bodyOffset[2]},
 };
@@ -328,6 +344,7 @@ constexpr const char* kMagazinePouchKeys[3] = {"MagazinePouchX", "MagazinePouchY
 // -- the two-handed aim targets the off hand's point moved by it (openvr_direct/vr_hands.cpp AimAtOffHand).
 std::atomic<float> g_secondaryGripRight{0.0f};
 std::atomic<float> g_secondaryGripUp{0.0f};
+std::atomic<float> g_secondaryGripForward{0.0f}; // 2026-11-21, the user: "create a secondary grip field offset forward"
 std::atomic<bool> g_hudPlacementEnabled{kDefaultHudPlacementEnabled};
 std::atomic<bool> g_hideReticle{kDefaultHideReticle};
 // Body batch parts hidden while the gun follows the controller (hooks/camera_matrix_test_hook.cpp). Default = parts 2
@@ -339,7 +356,7 @@ int BodyPartRowCount();
 std::atomic<float> g_hudScale{kDefaultHudScale};
 std::atomic<float> g_menuScreenScale{kDefaultMenuScreenScale};
 std::atomic<float> g_menuScreenDepth{kDefaultMenuScreenDepth};
-std::atomic<float> g_uiLayoutScale{1.0f}; // hooks/ui_pass.cpp: the game's UI laid out as on a screen this much smaller
+std::atomic<float> g_uiLayoutSize{1.0f}; // hooks/ui_pass.cpp: times the scale worked out from the resolution (1 = that)
 // Marker test (2026-09-29): from this draw of the final 2D pass on, the full frame instead of the HUD rectangle; 0 = off.
 std::atomic<float> g_drivingCameraIndex{0.0f};     // hooks/driving_camera_hook.cpp: 0 = auto, 1.. = ranked camera. Session-only
                                                    // (not saved): a leftover manual pick silently overrode auto (2026-10-14)
@@ -360,6 +377,22 @@ std::atomic<float> g_drivingWheelTiltDeg{25.0f};  // top of the wheel leaning aw
 std::atomic<float> g_drivingWheelRadius{0.18f};   // drawn wheel (openvr_direct/vr_overlay.cpp): rim radius, metres
 std::atomic<float> g_drivingWheelThickness{0.03f}; // rim thickness, metres
 std::atomic<float> g_drivingWheelOpacity{0.6f};   // 0 = not drawn
+std::atomic<bool> g_specializedSequenceMotion{true}; // the master over every sequence's profile (kSequenceFields)
+// The Zodiac Sequence's profile (hooks/boat_seat.h: the Basilan RHIB).
+std::atomic<bool> g_boatSixDof{true};
+std::atomic<bool> g_boatGunAim{true};
+std::atomic<bool> g_boatWheel{true};
+std::atomic<float> g_boatGunAimStrength{1.0f};
+std::atomic<float> g_boatStickDeadzone{0.2f};
+// Its own wheel, starting as the driving missions' (kSequenceFields).
+std::atomic<float> g_boatWheelLockDeg{90.0f};
+std::atomic<float> g_boatWheelForward{0.45f};
+std::atomic<float> g_boatWheelDown{0.35f};
+std::atomic<float> g_boatWheelRight{0.0f};
+std::atomic<float> g_boatWheelTiltDeg{25.0f};
+std::atomic<float> g_boatWheelRadius{0.18f};
+std::atomic<float> g_boatWheelThickness{0.03f};
+std::atomic<float> g_boatWheelOpacity{0.6f};
 std::atomic<float> g_debugHideDraw{0.0f};   // final-pass draw number not drawn, to see what it is; 0 = off
 std::atomic<float> g_hudOffsetXDeg{kDefaultHudOffsetXDeg};
 std::atomic<float> g_hudOffsetYDeg{kDefaultHudOffsetYDeg};
@@ -370,7 +403,7 @@ std::atomic<float> g_hudDepth{kDefaultHudDepth};
 std::atomic<float> g_hudScaleTv{kDefaultHudScale};
 std::atomic<float> g_menuScreenScaleTv{kDefaultMenuScreenScale};
 std::atomic<float> g_menuScreenDepthTv{kDefaultMenuScreenDepth};
-std::atomic<float> g_uiLayoutScaleTv{1.0f};
+std::atomic<float> g_uiLayoutSizeTv{1.0f};
 std::atomic<float> g_hudOffsetXDegTv{kDefaultHudOffsetXDeg};
 std::atomic<float> g_hudOffsetYDegTv{kDefaultHudOffsetYDeg};
 std::atomic<float> g_hudIpdScaleTv{kDefaultHudIpdScale};
@@ -385,7 +418,7 @@ const PerModeSetting kPerMode[] = {
     {"HudScale", &g_hudScale, &g_hudScaleTv},
     {"MenuScreenScale", &g_menuScreenScale, &g_menuScreenScaleTv},
     {"MenuScreenDepth", &g_menuScreenDepth, &g_menuScreenDepthTv},
-    {"UiLayoutScale", &g_uiLayoutScale, &g_uiLayoutScaleTv},
+    {"UiLayoutSize", &g_uiLayoutSize, &g_uiLayoutSizeTv},
     {"HudOffsetX", &g_hudOffsetXDeg, &g_hudOffsetXDegTv},
     {"HudOffsetY", &g_hudOffsetYDeg, &g_hudOffsetYDegTv},
     {"HudIpdScale", &g_hudIpdScale, &g_hudIpdScaleTv},
@@ -409,6 +442,7 @@ std::atomic<bool> g_sightDotEnabled{kDefaultSightDotEnabled};
 std::atomic<bool> g_dotsOnlyWithGrip{kDefaultDotsOnlyWithGrip};
 std::atomic<bool> g_gripDoubleTapBumpers{true}; // openvr_direct/vr_input.cpp UpdateGripGesture
 std::atomic<bool> g_thumbTapBumpers{true};      // openvr_direct/vr_input.cpp UpdateThumbTap
+std::atomic<bool> g_gamepadWithoutFocus{false}; // hooks/xinput_hook.cpp GamepadFocusOnPresent
 std::atomic<float> g_sightZeroDistance{kDefaultSightZeroDistance};
 std::atomic<float> g_sightDotSizeDeg{kDefaultSightDotSizeDeg};
 std::atomic<bool> g_opticDotEnabled{kDefaultOpticDotEnabled};
@@ -450,6 +484,39 @@ std::string SettingsFilePath()
     return LogFilePath("mohwvr_settings.ini"); // same "next to the DLL" resolution logging.h already uses
 }
 
+// ---- Specialized sequences (2026-11-22) ----------------------------------------------------------------------------
+// The user: a toggle "Use 6DoF Motion For Specialized Sequences", and a profile per sequence, the first being the
+// "Zodiac Sequence". The master, then each sequence's profile as keys named Sequence<name><setting>; a sequence's
+// getters apply the master. Not switched as the weapon profiles are: a sequence has settings of its own kind, and all
+// profiles can be edited from anywhere, so each has its own group in the menu.
+// seed = where a setting starts in an ini without it (read after the whole ini, so the player's value of it).
+struct SequenceField
+{
+    const char* key;
+    std::atomic<bool>* toggle; // one of toggle / number
+    std::atomic<float>* number;
+    int decimals;
+    const std::atomic<float>* seed;
+};
+const SequenceField kSequenceFields[] = {
+    {"SpecializedSequenceMotion", &g_specializedSequenceMotion, nullptr, 0, nullptr},
+    // The Zodiac Sequence.
+    {"SequenceZodiacSixDof", &g_boatSixDof, nullptr, 0, nullptr},
+    {"SequenceZodiacGunAim", &g_boatGunAim, nullptr, 0, nullptr},
+    {"SequenceZodiacGunAimStrength", nullptr, &g_boatGunAimStrength, 2, nullptr},
+    {"SequenceZodiacWheel", &g_boatWheel, nullptr, 0, nullptr},
+    {"SequenceZodiacStickDeadzone", nullptr, &g_boatStickDeadzone, 2, nullptr},
+    {"SequenceZodiacWheelLock", nullptr, &g_boatWheelLockDeg, 0, &g_drivingWheelLockDeg},
+    {"SequenceZodiacWheelForward", nullptr, &g_boatWheelForward, 2, &g_drivingWheelForward},
+    {"SequenceZodiacWheelDown", nullptr, &g_boatWheelDown, 2, &g_drivingWheelDown},
+    {"SequenceZodiacWheelRight", nullptr, &g_boatWheelRight, 2, &g_drivingWheelRight},
+    {"SequenceZodiacWheelTilt", nullptr, &g_boatWheelTiltDeg, 0, &g_drivingWheelTiltDeg},
+    {"SequenceZodiacWheelRadius", nullptr, &g_boatWheelRadius, 2, &g_drivingWheelRadius},
+    {"SequenceZodiacWheelThickness", nullptr, &g_boatWheelThickness, 3, &g_drivingWheelThickness},
+    {"SequenceZodiacWheelOpacity", nullptr, &g_boatWheelOpacity, 2, &g_drivingWheelOpacity},
+};
+constexpr int kSequenceFieldCount = static_cast<int>(sizeof(kSequenceFields) / sizeof(kSequenceFields[0]));
+
 // ---- Weapon profiles (2026-10-15) ----------------------------------------------------------------------------------
 // The settings below are per weapon: they switch with the equipped weapon (SetWeaponProfile, from
 // hooks/weapon_identity.cpp), and the menu rows edit the equipped weapon's profile. A weapon with no profile yet starts
@@ -472,10 +539,19 @@ std::atomic<float>* const kProfileFields[] = {
     &g_magazineGrabHalfSize[0], &g_magazineGrabHalfSize[1], &g_magazineGrabHalfSize[2],
     &g_magazineAimPoint[0], &g_magazineAimPoint[1], &g_magazineAimPoint[2],
     &g_magazineRange, &g_magazineLockRange, &g_magazineSeatRange,
-    // Appended 2026-11-14: the gun's magazine platform (-1 = from its name), its scope's magnification (0 = the game's).
+    // Appended 2026-11-14: the gun's magazine platform (-1 = from its name), its scope's magnification (0 = no scope;
+    // until 2026-11-17 it meant the game's ADS zoom).
     &g_weaponMagPlatform, &g_scopeMagnification,
+    // Appended 2026-11-17: the scope's lens on this gun (forward and radius were global settings until then: the ini's
+    // ScopeLensForward / ScopeLensRadius become the default profile's).
+    &g_scopeLensRight, &g_scopeLensUp, &g_scopeLensForward, &g_scopeLensRadius,
+    // Appended 2026-11-17: the scope only with the game's flip magnifier on.
+    &g_scopeNeedsMagnifier,
+    // Appended 2026-11-21: the secondary grip offset's forward part.
+    &g_secondaryGripForward,
 };
 constexpr int kProfileFieldCount = static_cast<int>(sizeof(kProfileFields) / sizeof(kProfileFields[0]));
+constexpr int kGripRollField = 2; // &g_weaponGripRollDeg's place in kProfileFields
 struct WeaponProfile
 {
     float v[kProfileFieldCount] = {};
@@ -667,13 +743,14 @@ void WriteSettingsFileLocked()
         fprintf(f, "%s=%.4f\n", kGunSocketOffsetKeys[i], g_gunSocketOffset[i].load(std::memory_order_relaxed));
     fprintf(f, "SecondaryGripRight=%.4f\n", DefaultProfileValue(&g_secondaryGripRight));
     fprintf(f, "SecondaryGripUp=%.4f\n", DefaultProfileValue(&g_secondaryGripUp));
+    fprintf(f, "SecondaryGripForward=%.4f\n", DefaultProfileValue(&g_secondaryGripForward));
     fprintf(f, "HudPlacementEnabled=%d\n", g_hudPlacementEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HideReticle=%d\n", g_hideReticle.load(std::memory_order_relaxed) ? 1 : 0);
     for (int i = 0, n = BodyPartRowCount(); i < n; ++i)
         fprintf(f, "HideBodyPart%d=%d\n", i + 1, g_hideBodyPart[i].load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HudScale=%.4f\n", g_hudScale.load(std::memory_order_relaxed));
     fprintf(f, "MenuScreenScale=%.4f\n", g_menuScreenScale.load(std::memory_order_relaxed));
-    fprintf(f, "UiLayoutScale=%.4f\n", g_uiLayoutScale.load(std::memory_order_relaxed));
+    fprintf(f, "UiLayoutSize=%.4f\n", g_uiLayoutSize.load(std::memory_order_relaxed));
     fprintf(f, "MenuScreenDepth=%.4f\n", g_menuScreenDepth.load(std::memory_order_relaxed));
     fprintf(f, "DrivingHeadLookInvert=%d\n", g_drivingHeadLookInvert.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "DrivingHeadLookAuto=%d\n", g_drivingHeadLookAuto.load(std::memory_order_relaxed) ? 1 : 0);
@@ -690,6 +767,13 @@ void WriteSettingsFileLocked()
     fprintf(f, "DrivingWheelRadius=%.2f\n", g_drivingWheelRadius.load(std::memory_order_relaxed));
     fprintf(f, "DrivingWheelThickness=%.3f\n", g_drivingWheelThickness.load(std::memory_order_relaxed));
     fprintf(f, "DrivingWheelOpacity=%.2f\n", g_drivingWheelOpacity.load(std::memory_order_relaxed));
+    for (const SequenceField& s : kSequenceFields)
+    {
+        if (s.toggle)
+            fprintf(f, "%s=%d\n", s.key, s.toggle->load(std::memory_order_relaxed) ? 1 : 0);
+        else
+            fprintf(f, "%s=%.*f\n", s.key, s.decimals, s.number->load(std::memory_order_relaxed));
+    }
     fprintf(f, "DebugHideDraw=%.0f\n", g_debugHideDraw.load(std::memory_order_relaxed));
     fprintf(f, "HudIpdScale=%.4f\n", g_hudIpdScale.load(std::memory_order_relaxed));
     fprintf(f, "HudDepth=%.4f\n", g_hudDepth.load(std::memory_order_relaxed));
@@ -706,6 +790,7 @@ void WriteSettingsFileLocked()
     fprintf(f, "LeftHanded=%d\n", g_leftHanded.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "WeaponDriveEnabled=%d\n", g_weaponDriveEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "ArmIkEnabled=%d\n", g_armIkEnabled.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "HoldHandPose=%d\n", g_holdHandPose.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "ManualReloadEnabled=%d\n", g_manualReloadEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "NaturalElbow=%d\n", g_naturalElbow.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "BodyUpright=%d\n", g_bodyUpright.load(std::memory_order_relaxed) ? 1 : 0);
@@ -719,6 +804,7 @@ void WriteSettingsFileLocked()
     fprintf(f, "RenderScaleFromSteamVr=%d\n", g_renderScaleFromSteamVr.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "EyeSizedBackbuffer=%d\n", g_eyeSizedBackbuffer.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "ScriptedScenesFromLocks=%d\n", g_scriptedScenesFromLocks.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "WriteLogFiles=%d\n", g_logsEnabled.load(std::memory_order_relaxed) ? 1 : 0); // sdk/logging.h
     fprintf(f, "ShowWeaponSockets=%d\n", g_showWeaponSockets.load(std::memory_order_relaxed) ? 1 : 0);
     for (const NamedFloat& n : kArmIkKeys)
         fprintf(f, "%s=%.4f\n", n.key, n.value->load(std::memory_order_relaxed));
@@ -730,12 +816,14 @@ void WriteSettingsFileLocked()
     fprintf(f, "ScopeEyeBox=%.4f\n", g_scopeEyeBox.load(std::memory_order_relaxed));
     fprintf(f, "ScopeEyeRelief=%.4f\n", g_scopeEyeRelief.load(std::memory_order_relaxed));
     fprintf(f, "ScopeApparentFov=%.2f\n", g_scopeApparentFov.load(std::memory_order_relaxed));
-    fprintf(f, "ScopeMinZoom=%.2f\n", g_scopeMinZoom.load(std::memory_order_relaxed));
     fprintf(f, "ScopeReticle=%d\n", g_scopeReticle.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "ScopeMagnification=%.2f\n", DefaultProfileValue(&g_scopeMagnification));
     fprintf(f, "ScopeLensPicture=%d\n", g_scopeLensPicture.load(std::memory_order_relaxed) ? 1 : 0);
-    fprintf(f, "ScopeLensForward=%.4f\n", g_scopeLensForward.load(std::memory_order_relaxed));
-    fprintf(f, "ScopeLensRadius=%.4f\n", g_scopeLensRadius.load(std::memory_order_relaxed));
+    fprintf(f, "ScopeLensRight=%.4f\n", DefaultProfileValue(&g_scopeLensRight));
+    fprintf(f, "ScopeLensUp=%.4f\n", DefaultProfileValue(&g_scopeLensUp));
+    fprintf(f, "ScopeLensForward=%.4f\n", DefaultProfileValue(&g_scopeLensForward));
+    fprintf(f, "ScopeLensRadius=%.4f\n", DefaultProfileValue(&g_scopeLensRadius));
+    fprintf(f, "ScopeNeedsMagnifier=%.0f\n", DefaultProfileValue(&g_scopeNeedsMagnifier));
     CapturePlatformLocked();
     fprintf(f, "; MagazinePlatform<n>: in-hand right,up,forward (m), pitch,yaw,roll (deg), hinge (0 straight / 1 hinge),\n"
                "; travel (m), hinge forward,up (m), hinge angle (deg), pull force (m), needs release (0/1). n:");
@@ -765,6 +853,7 @@ void WriteSettingsFileLocked()
     fprintf(f, "DotsOnlyWithGrip=%d\n", g_dotsOnlyWithGrip.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "GripDoubleTapBumpers=%d\n", g_gripDoubleTapBumpers.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "ThumbTapBumpers=%d\n", g_thumbTapBumpers.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "GamepadWithoutFocus=%d\n", g_gamepadWithoutFocus.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "SightZeroDistance=%.4f\n", g_sightZeroDistance.load(std::memory_order_relaxed));
     fprintf(f, "SightDotSize=%.4f\n", g_sightDotSizeDeg.load(std::memory_order_relaxed));
     fprintf(f, "OpticDotEnabled=%d\n", g_opticDotEnabled.load(std::memory_order_relaxed) ? 1 : 0);
@@ -832,6 +921,25 @@ bool ParseBoolSetting(const std::string& line, const char* key, bool* outValue)
     return true;
 }
 
+// kSequenceFields: apart from LoadSettings' else-if chain, which is near the compiler's nesting limit.
+bool ParseSequenceSetting(const std::string& line, bool (&seen)[kSequenceFieldCount])
+{
+    for (int i = 0; i < kSequenceFieldCount; ++i)
+    {
+        const SequenceField& s = kSequenceFields[i];
+        float value = 0.0f;
+        if (!ParseFloatSetting(line, s.key, &value))
+            continue;
+        if (s.toggle)
+            s.toggle->store(value != 0.0f, std::memory_order_relaxed);
+        else
+            s.number->store(value, std::memory_order_relaxed);
+        seen[i] = true;
+        return true;
+    }
+    return false;
+}
+
 // HideBodyPart1..kMaxBodyParts.
 bool ParseBodyPartSetting(const std::string& line)
 {
@@ -864,6 +972,25 @@ int BodyPartRowCount()
 
 } // namespace
 
+void LoadLogSwitch()
+{
+    std::lock_guard<std::mutex> lock(g_fileMutex);
+    FILE* f = nullptr;
+    if (fopen_s(&f, SettingsFilePath().c_str(), "r") != 0 || !f)
+        return; // first launch: the default (off)
+    char lineBuf[512];
+    while (fgets(lineBuf, sizeof(lineBuf), f))
+    {
+        std::string line(lineBuf);
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+            line.pop_back();
+        bool on = false;
+        if (ParseBoolSetting(line, "WriteLogFiles", &on))
+            g_logsEnabled.store(on, std::memory_order_relaxed);
+    }
+    fclose(f);
+}
+
 void LoadSettings()
 {
     std::lock_guard<std::mutex> lock(g_fileMutex);
@@ -895,6 +1022,8 @@ void LoadSettings()
 
     std::vector<std::string> profileLines;
     bool twoViewSeen[kPerModeCount] = {};
+    bool sequenceSeen[kSequenceFieldCount] = {};
+    bool layoutSizeSeen = false; // UiLayoutSize, new on 2026-11-22: without it the ini is from before
     char lineBuf[512];
     while (fgets(lineBuf, sizeof(lineBuf), f))
     {
@@ -917,7 +1046,7 @@ void LoadSettings()
                 perMode = true;
             }
         }
-        if (perMode)
+        if (perMode || ParseSequenceSetting(line, sequenceSeen))
             continue;
         if (ParseFloatSetting(line, "IpdScale", &value))
             g_ipdScale.store(value, std::memory_order_relaxed);
@@ -958,8 +1087,11 @@ void LoadSettings()
             g_hudScale.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "MenuScreenScale", &value))
             g_menuScreenScale.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "UiLayoutScale", &value))
-            g_uiLayoutScale.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "UiLayoutSize", &value))
+        {
+            g_uiLayoutSize.store(value, std::memory_order_relaxed);
+            layoutSizeSeen = true;
+        }
         else if (ParseFloatSetting(line, "MenuScreenDepth", &value))
             g_menuScreenDepth.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "DrivingHeadLookInvert", &boolValue))
@@ -1018,6 +1150,8 @@ void LoadSettings()
             g_weaponDriveEnabled.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "ArmIkEnabled", &boolValue))
             g_armIkEnabled.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "HoldHandPose", &boolValue))
+            g_holdHandPose.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "ManualReloadEnabled", &boolValue))
             g_manualReloadEnabled.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "NaturalElbow", &boolValue))
@@ -1044,6 +1178,8 @@ void LoadSettings()
             g_eyeSizedBackbuffer.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "ScriptedScenesFromLocks", &boolValue))
             g_scriptedScenesFromLocks.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "WriteLogFiles", &boolValue))
+            g_logsEnabled.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "ShowWeaponSockets", &boolValue))
             g_showWeaponSockets.store(boolValue, std::memory_order_relaxed);
         else if ([&] {
@@ -1084,6 +1220,8 @@ void LoadSettings()
             g_gripDoubleTapBumpers.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "ThumbTapBumpers", &boolValue))
             g_thumbTapBumpers.store(boolValue, std::memory_order_relaxed);
+        else if (ParseBoolSetting(line, "GamepadWithoutFocus", &boolValue))
+            g_gamepadWithoutFocus.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SightZeroDistance", &value))
             g_sightZeroDistance.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SightDotSize", &value))
@@ -1183,14 +1321,18 @@ void LoadSettings()
             g_scopeEyeRelief.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "ScopeApparentFov", &value))
             g_scopeApparentFov.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "ScopeMinZoom", &value))
-            g_scopeMinZoom.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "ScopeReticle", &boolValue))
             g_scopeReticle.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "ScopeMagnification", &value))
             g_scopeMagnification.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "ScopeLensPicture", &boolValue))
             g_scopeLensPicture.store(boolValue, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeLensRight", &value))
+            g_scopeLensRight.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeLensUp", &value))
+            g_scopeLensUp.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "ScopeNeedsMagnifier", &value))
+            g_scopeNeedsMagnifier.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "ScopeLensForward", &value))
             g_scopeLensForward.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "ScopeLensRadius", &value))
@@ -1202,6 +1344,8 @@ void LoadSettings()
             g_secondaryGripRight.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SecondaryGripUp", &value))
             g_secondaryGripUp.store(value, std::memory_order_relaxed);
+        else if (ParseFloatSetting(line, "SecondaryGripForward", &value))
+            g_secondaryGripForward.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "VrStickFullDeflection", &value))
             g_vrStickFullDeflection.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "VrTurnSpeed", &value))
@@ -1220,12 +1364,27 @@ void LoadSettings()
     for (int i = 0; i < kPerModeCount; ++i)
         if (!twoViewSeen[i])
             kPerMode[i].twoView->store(kPerMode[i].alternating->load(std::memory_order_relaxed), std::memory_order_relaxed);
+    // An ini from before a sequence's profile: that sequence's wheel starts as this ini's driving wheel.
+    for (int i = 0; i < kSequenceFieldCount; ++i)
+        if (!sequenceSeen[i] && kSequenceFields[i].seed)
+            kSequenceFields[i].number->store(kSequenceFields[i].seed->load(std::memory_order_relaxed),
+                                             std::memory_order_relaxed);
     // The ini's own values for the per-weapon settings are the default profile; then the weapons' own.
+    // THE OLD -10 DEG GRIP ROLL (2026-11-22, the user: "no grip should have roll unless a user specifies"): earlier
+    // builds' built-in default, so every ini they made holds it, and every profile copied from it. Taken out once, from
+    // an ini of before then (no UiLayoutSize yet); any other roll, and a -10 set after, is the user's.
+    const auto oldRollArtifact = [](float deg) { return fabsf(deg + 10.0f) < 0.0005f; };
+    if (!layoutSizeSeen && oldRollArtifact(g_weaponGripRollDeg.load(std::memory_order_relaxed)))
+        g_weaponGripRollDeg.store(0.0f, std::memory_order_relaxed);
     g_defaultProfile = ReadProfileFields();
     g_profileKey.clear();
     g_weaponProfiles.clear();
     for (const std::string& profileLine : profileLines)
         ParseWeaponProfileLine(profileLine);
+    if (!layoutSizeSeen)
+        for (auto& profile : g_weaponProfiles)
+            if (oldRollArtifact(profile.second.v[kGripRollField]))
+                profile.second.v[kGripRollField] = 0.0f;
     // The built-in weapon profiles (sdk/default_settings.h) for weapons this ini has none for -- an older ini gets the
     // profiles tuned since. Kept in memory; written out with the next save.
     int builtInAdded = 0;
@@ -1542,10 +1701,11 @@ void GetHandOffset(float position[3], float rotationDeg[3])
     }
 }
 
-void GetSecondaryGripOffset(float* right, float* up)
+void GetSecondaryGripOffset(float* right, float* up, float* forward)
 {
     *right = g_secondaryGripRight.load(std::memory_order_relaxed);
     *up = g_secondaryGripUp.load(std::memory_order_relaxed);
+    *forward = g_secondaryGripForward.load(std::memory_order_relaxed);
 }
 
 bool GetHudPlacementEnabled()
@@ -1569,10 +1729,11 @@ void SetBodyPartCountSeen(int count)
 }
 
 namespace {
-// The render mode whose HUD values are in force: the selected one; the driving missions only render alternating eyes.
+// The render mode whose HUD values are in force: the selected one -- in the driving missions too, since they render in
+// either mode (2026-11-18, hooks/native_stereo.h).
 float ModeValue(const std::atomic<float>& alternating, const std::atomic<float>& twoView)
 {
-    const bool tv = g_nativeStereo.load(std::memory_order_relaxed) && !g_drivingExe;
+    const bool tv = g_nativeStereo.load(std::memory_order_relaxed);
     return (tv ? twoView : alternating).load(std::memory_order_relaxed);
 }
 } // namespace
@@ -1587,9 +1748,21 @@ float GetMenuScreenScale()
     return ModeValue(g_menuScreenScale, g_menuScreenScaleTv);
 }
 
-float GetUiLayoutScale()
+namespace {
+// The automatic UI layout scale (2026-11-22): the author's, 1.5 on a 5824 wide screen (two eyes of 2912), kept as the
+// same layout width at any resolution, about 3883. By the width, since a menu's screen in the headset is as wide as
+// MenuScreenScale allows whatever the image's shape (draw_trace_diag.cpp ComputeHudRectForEye, keepAspect): the same
+// layout width is the same apparent size.
+constexpr float kUiLayoutBaseScale = 1.5f;
+constexpr float kUiLayoutBaseWidth = 5824.0f;
+} // namespace
+
+float GetUiLayoutScale(int screenWidth)
 {
-    return ModeValue(g_uiLayoutScale, g_uiLayoutScaleTv);
+    if (screenWidth <= 0)
+        return 1.0f;
+    return ModeValue(g_uiLayoutSize, g_uiLayoutSizeTv) * kUiLayoutBaseScale *
+           (static_cast<float>(screenWidth) / kUiLayoutBaseWidth);
 }
 
 float GetMenuScreenDepth()
@@ -1642,6 +1815,56 @@ bool GetDrivingStereo()
 bool GetDrivingLateNextEye()
 {
     return g_drivingLateNextEye.load(std::memory_order_relaxed);
+}
+
+bool GetSpecializedSequenceMotion()
+{
+    return g_specializedSequenceMotion.load(std::memory_order_relaxed);
+}
+
+bool GetBoatSixDof()
+{
+    return GetSpecializedSequenceMotion() && g_boatSixDof.load(std::memory_order_relaxed);
+}
+
+bool GetBoatGunAim()
+{
+    return g_boatGunAim.load(std::memory_order_relaxed);
+}
+
+bool GetBoatWheel()
+{
+    return g_boatWheel.load(std::memory_order_relaxed);
+}
+
+float GetBoatGunAimStrength()
+{
+    return g_boatGunAimStrength.load(std::memory_order_relaxed);
+}
+
+float GetBoatStickDeadzone()
+{
+    return g_boatStickDeadzone.load(std::memory_order_relaxed);
+}
+
+float GetBoatWheelLockDeg()
+{
+    return g_boatWheelLockDeg.load(std::memory_order_relaxed);
+}
+
+void GetBoatWheelPlacement(float* forward, float* down, float* right, float* tiltDeg)
+{
+    *forward = g_boatWheelForward.load(std::memory_order_relaxed);
+    *down = g_boatWheelDown.load(std::memory_order_relaxed);
+    *right = g_boatWheelRight.load(std::memory_order_relaxed);
+    *tiltDeg = g_boatWheelTiltDeg.load(std::memory_order_relaxed);
+}
+
+void GetBoatWheelLook(float* radius, float* thickness, float* opacity)
+{
+    *radius = g_boatWheelRadius.load(std::memory_order_relaxed);
+    *thickness = g_boatWheelThickness.load(std::memory_order_relaxed);
+    *opacity = g_boatWheelOpacity.load(std::memory_order_relaxed);
 }
 
 bool GetDrivingSteeringWheel()
@@ -1729,6 +1952,11 @@ bool GetArmIkEnabled()
     return g_armIkEnabled.load(std::memory_order_relaxed);
 }
 
+bool GetHoldHandPose()
+{
+    return g_holdHandPose.load(std::memory_order_relaxed);
+}
+
 void GetLeftHandIkOffset(float position[3], float rotationDeg[3])
 {
     for (int i = 0; i < 3; ++i)
@@ -1748,9 +1976,13 @@ float GetMagazinePouchRadius()
     return g_magazinePouchRadius.load(std::memory_order_relaxed);
 }
 
+// Not in the driving missions (2026-11-18): game\MOHWD.exe ran black and at 1-10 fps on the desktop and in the headset,
+// sound and input still going, and the setting arrived (2026-11-01) after its last good run -- an older build that may
+// not take a fullscreen request answered without being carried out. It takes the display as it did when it worked;
+// the logs it now always writes (sdk/logging.h g_drivingLogs) will say whether that was it.
 bool GetKeepGameWindowed()
 {
-    return g_keepGameWindowed.load(std::memory_order_relaxed);
+    return g_keepGameWindowed.load(std::memory_order_relaxed) && !g_drivingExe;
 }
 
 bool GetNativeStereoEnabled()
@@ -1828,11 +2060,7 @@ MagazinePlatform GetMagazinePlatform()
         p.holdPos[k] = v[kPfHoldRight + k];
         p.holdDeg[k] = v[kPfHoldPitch + k];
     }
-    p.hinge = v[kPfHinge] >= 0.5f;
     p.travel = v[kPfTravel] < 0.005f ? 0.005f : v[kPfTravel];
-    p.hingePoint[0] = v[kPfHingeForward];
-    p.hingePoint[1] = v[kPfHingeUp];
-    p.hingeDeg = v[kPfHingeDeg] < 2.0f ? 2.0f : v[kPfHingeDeg];
     p.pullForce = v[kPfPullForce] < 0.0f ? 0.0f : v[kPfPullForce];
     p.needsRelease = v[kPfNeedsRelease] >= 0.5f;
     return p;
@@ -1856,12 +2084,14 @@ ScopeSettings GetScopeSettings()
     s.eyeBox = g_scopeEyeBox.load(std::memory_order_relaxed);
     s.relief = g_scopeEyeRelief.load(std::memory_order_relaxed);
     s.apparentFovDeg = g_scopeApparentFov.load(std::memory_order_relaxed);
-    s.minZoom = g_scopeMinZoom.load(std::memory_order_relaxed);
     s.reticle = g_scopeReticle.load(std::memory_order_relaxed);
     s.magnification = g_scopeMagnification.load(std::memory_order_relaxed);
     s.lensPicture = g_scopeLensPicture.load(std::memory_order_relaxed);
+    s.lensRight = g_scopeLensRight.load(std::memory_order_relaxed);
+    s.lensUp = g_scopeLensUp.load(std::memory_order_relaxed);
     s.lensForward = g_scopeLensForward.load(std::memory_order_relaxed);
     s.lensRadius = g_scopeLensRadius.load(std::memory_order_relaxed);
+    s.needsMagnifier = g_scopeNeedsMagnifier.load(std::memory_order_relaxed) >= 0.5f;
     return s;
 }
 
@@ -1915,6 +2145,18 @@ void GetMagazinePouchOffset(float out[3])
         out[i] = g_magazinePouch[i].load(std::memory_order_relaxed);
 }
 
+void GetMagazinePouchRotation(float deg[3])
+{
+    for (int i = 0; i < 3; ++i)
+        deg[i] = g_magazinePouchRot[i].load(std::memory_order_relaxed);
+}
+
+int GetMagazinePouchGrab()
+{
+    const int mode = static_cast<int>(g_magazinePouchGrab.load(std::memory_order_relaxed) + 0.5f);
+    return mode < kPouchGrabAsGrabbed ? kPouchGrabAsGrabbed : mode > kPouchGrabSnap ? kPouchGrabSnap : mode;
+}
+
 float GetHolsterRadius()
 {
     return g_holsterRadius.load(std::memory_order_relaxed);
@@ -1963,6 +2205,11 @@ float GetAdsSwayScale()
 bool GetThumbTapBumpers()
 {
     return g_thumbTapBumpers.load(std::memory_order_relaxed);
+}
+
+bool GetGamepadWithoutFocus()
+{
+    return g_gamepadWithoutFocus.load(std::memory_order_relaxed);
 }
 
 bool GetGripDoubleTapBumpers()
@@ -2079,6 +2326,8 @@ struct MenuEntry
 // openvr_direct/vr_hands.cpp (SetHolsterActionChoices) once it has read the profile. Guarded by g_holsterMutex.
 std::vector<std::string> g_holsterChoices;
 
+const char kZodiacGroup[] = "Sequence profile: Zodiac Sequence";
+
 // Order = display order; entries of a group must be contiguous.
 const MenuEntry kMenu[] = {
     {"Head", "Head aim", &g_headAimEnabled, nullptr, 0, 0, 0, 0, ""},
@@ -2119,9 +2368,10 @@ const MenuEntry kMenu[] = {
      kRowAlternatingEye},
     {"HUD", "Menu / movie screen distance", nullptr, &g_menuScreenDepthTv, 0.5f, 10.0f, 0.1f, 1, "m", -1, nullptr, nullptr,
      kRowTwoView},
-    {"HUD", "Hud Element Scale", nullptr, &g_uiLayoutScale, 0.5f, 3.0f, 0.05f, 2, "x", -1, nullptr, nullptr,
-     kRowAlternatingEye},
-    {"HUD", "Hud Element Scale", nullptr, &g_uiLayoutScaleTv, 0.5f, 3.0f, 0.05f, 2, "x", -1, nullptr, nullptr, kRowTwoView},
+    {"HUD", "Hud Element Scale (1 = auto by resolution)", nullptr, &g_uiLayoutSize, 0.3f, 2.0f, 0.05f, 2, "x", -1, nullptr,
+     nullptr, kRowAlternatingEye},
+    {"HUD", "Hud Element Scale (1 = auto by resolution)", nullptr, &g_uiLayoutSizeTv, 0.3f, 2.0f, 0.05f, 2, "x", -1, nullptr,
+     nullptr, kRowTwoView},
     {"HUD", "Debug: hide draw # (0 off)", nullptr, &g_debugHideDraw, 0.0f, 128.0f, 1.0f, 0, ""},
     {"HUD", "Hide reticle (may clip pause-menu items)", &g_hideReticle, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "HUD scale", nullptr, &g_hudScale, 0.3f, 1.2f, 0.01f, 2, "x", -1, nullptr, nullptr, kRowAlternatingEye},
@@ -2149,6 +2399,7 @@ const MenuEntry kMenu[] = {
     {"Controls", "Fire / ADS as mouse (off = RT / LT)", &g_fireViaMouse, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "Thumbrest double-tap = LB / RB", &g_thumbTapBumpers, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "Grip double-tap = LB / RB (no thumbrest)", &g_gripDoubleTapBumpers, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Controllers work without window focus", &g_gamepadWithoutFocus, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Left-handed", &g_leftHanded, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Hold grip to keep weapon", &g_holsterHoldToKeep, nullptr, 0, 0, 0, 0, ""},
     {"Hands", "Holster size", nullptr, &g_holsterRadius, 0.05f, 0.4f, 0.01f, 2, "m"},
@@ -2183,6 +2434,11 @@ const MenuEntry kMenu[] = {
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch Y", nullptr, &g_magazinePouch[1], -1.2f, 0.3f, 0.01f, 2, "m"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch Z", nullptr, &g_magazinePouch[2], -0.5f, 0.6f, 0.01f, 2, "m"},
     {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch grab radius", nullptr, &g_magazinePouchRadius, 0.03f, 0.4f, 0.01f, 2, "m"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag in pouch pitch", nullptr, &g_magazinePouchRot[0], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag in pouch yaw", nullptr, &g_magazinePouchRot[1], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag in pouch roll", nullptr, &g_magazinePouchRot[2], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag taken from the pouch", nullptr, &g_magazinePouchGrab,
+     0.0f, 2.0f, 1.0f, 0, "", -1, nullptr, nullptr, kRowBothModes, kPouchGrabChoices, 3},
     {"Holster actions", "Stomach", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterStomach},
     {"Holster actions", "Hips", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterHip},
     {"Holster actions", "Chest", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterChest},
@@ -2200,6 +2456,7 @@ const MenuEntry kMenu[] = {
     {"Hands", "Laser raycast every N frames", nullptr, &g_laserRaycastEveryFrames, 1.0f, 30.0f, 1.0f, 0, ""},
     {"Hands", "Dot size", nullptr, &g_sightDotSizeDeg, 0.05f, 2.0f, 0.05f, 2, "deg"},
     {"Arm IK", "Arms follow the controllers", &g_armIkEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Arm IK", "Hold hands and gun still (no idle animations)", &g_holdHandPose, nullptr, 0, 0, 0, 0, ""},
     {"Arm IK", "Right hand right (on its controller)", nullptr, &g_rightHandIkPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
     {"Arm IK", "Right hand up", nullptr, &g_rightHandIkPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
     {"Arm IK", "Right hand forward", nullptr, &g_rightHandIkPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
@@ -2245,16 +2502,10 @@ const MenuEntry kMenu[] = {
      0.01f, 2, "m", -1, nullptr, nullptr, kRowTwoView},
     {"Scope (prototype, engine two-view)", "Eyepiece size in view", nullptr, &g_scopeApparentFov, 8.0f, 60.0f, 1.0f, 0,
      "deg", -1, nullptr, nullptr, kRowTwoView},
-    {"Scope (prototype, engine two-view)", "Game ADS zoom that counts as a scope", nullptr, &g_scopeMinZoom, 1.0f, 4.0f,
-     0.05f, 2, "x", -1, nullptr, nullptr, kRowTwoView},
-    {"Scope (prototype, engine two-view)", "Drawn crosshair (until the game's reticle)", &g_scopeReticle, nullptr, 0, 0, 0,
-     0, "", -1, nullptr, nullptr, kRowTwoView},
+    {"Scope (prototype, engine two-view)", "Crosshair on the impact point (holographic)", &g_scopeReticle, nullptr, 0, 0,
+     0, 0, "", -1, nullptr, nullptr, kRowTwoView},
     {"Scope (prototype, engine two-view)", "Lens picture (screen space, both eyes)", &g_scopeLensPicture, nullptr, 0, 0, 0,
      0, "", -1, nullptr, nullptr, kRowTwoView},
-    {"Scope (prototype, engine two-view)", "Lens distance ahead of the hand", nullptr, &g_scopeLensForward, -0.2f, 0.5f,
-     0.005f, 3, "m", -1, nullptr, nullptr, kRowTwoView},
-    {"Scope (prototype, engine two-view)", "Lens radius", nullptr, &g_scopeLensRadius, 0.005f, 0.05f, 0.001f, 3, "m", -1,
-     nullptr, nullptr, kRowTwoView},
     // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon.
     {kProfileGroup, "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
     {kProfileGroup, "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
@@ -2278,30 +2529,32 @@ const MenuEntry kMenu[] = {
     {kProfileGroup, "Magazine seats within", nullptr, &g_magazineSeatRange, 0.002f, 0.1f, 0.002f, 3, "m"},
     {kProfileGroup, "Secondary grip offset right", nullptr, &g_secondaryGripRight, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Secondary grip offset up", nullptr, &g_secondaryGripUp, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Secondary grip offset forward", nullptr, &g_secondaryGripForward, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Laser start (forward of the hand)", nullptr, &g_laserStartMeters, 0.0f, 1.5f, 0.01f, 2, "m"},
     {kProfileGroup, "Beam start right (visual)", nullptr, &g_laserBeamStartRight, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Beam start up (visual)", nullptr, &g_laserBeamStartUp, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Magazine platform", nullptr, &g_weaponMagPlatform, -1.0f, kMagazinePlatformCount - 1.0f, 1.0f, 0, "",
      -1, nullptr, nullptr, kRowBothModes, nullptr, 0, true},
-    {kProfileGroup, "Scope magnification (0 = the game's ADS zoom)", nullptr, &g_scopeMagnification, 0.0f, 30.0f, 0.25f, 2,
-     "x"},
+    {kProfileGroup, "Scope magnification (0 = no scope)", nullptr, &g_scopeMagnification, 0.0f, 30.0f, 0.25f, 2, "x"},
+    {kProfileGroup, "Scope shows", nullptr, &g_scopeNeedsMagnifier, 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr, nullptr,
+     kRowBothModes, kScopeShowChoices, 2},
+    {kProfileGroup, "Scope lens right (from the optic zero)", nullptr, &g_scopeLensRight, -0.1f, 0.1f, 0.001f, 3, "m"},
+    {kProfileGroup, "Scope lens up (from the optic zero)", nullptr, &g_scopeLensUp, -0.1f, 0.1f, 0.001f, 3, "m"},
+    {kProfileGroup, "Scope lens forward (from the hand)", nullptr, &g_scopeLensForward, -0.2f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Scope lens radius", nullptr, &g_scopeLensRadius, 0.005f, 0.05f, 0.001f, 3, "m"},
     // The equipped gun's magazine platform (2026-11-14): shared by every gun on it; the title names it.
-    {kPlatformGroup, "Magazine in hand right", nullptr, &g_magPlatform[kPfHoldRight], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kPlatformGroup, "Magazine in hand up", nullptr, &g_magPlatform[kPfHoldUp], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kPlatformGroup, "Magazine in hand forward", nullptr, &g_magPlatform[kPfHoldForward], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kPlatformGroup, "Magazine in hand pitch", nullptr, &g_magPlatform[kPfHoldPitch], -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {kPlatformGroup, "Magazine in hand yaw", nullptr, &g_magPlatform[kPfHoldYaw], -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {kPlatformGroup, "Magazine in hand roll", nullptr, &g_magPlatform[kPfHoldRoll], -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {kPlatformGroup, "In and out of the gun", nullptr, &g_magPlatform[kPfHinge], 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr,
-     nullptr, kRowBothModes, kHingeChoices, 2},
-    {kPlatformGroup, "Straight: travel to clear the magwell", nullptr, &g_magPlatform[kPfTravel], 0.005f, 0.25f, 0.005f, 3,
-     "m"},
-    {kPlatformGroup, "Hinge: point forward of the seat", nullptr, &g_magPlatform[kPfHingeForward], -0.2f, 0.2f, 0.005f, 3,
-     "m"},
-    {kPlatformGroup, "Hinge: point up from the seat", nullptr, &g_magPlatform[kPfHingeUp], -0.2f, 0.2f, 0.005f, 3, "m"},
-    {kPlatformGroup, "Hinge: angle to clear", nullptr, &g_magPlatform[kPfHingeDeg], 2.0f, 60.0f, 1.0f, 0, "deg"},
-    {kPlatformGroup, "Pull force (stretch before it moves)", nullptr, &g_magPlatform[kPfPullForce], 0.0f, 0.1f, 0.005f, 3,
-     "m"},
+    // The pouch grab's snap (2026-11-21, "Mag taken from the pouch"): the magazine's top from the controller, left hand
+    // (mirrored in the right). With "Snapped, vertical from the grip", up is an offset from where the grip had it.
+    {kPlatformGroup, "Mag in hand X (right)", nullptr, &g_magPlatform[kPfHoldRight], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Mag in hand Y (up; offset from the grip)", nullptr, &g_magPlatform[kPfHoldUp], -0.3f, 0.3f, 0.005f,
+     3, "m"},
+    {kPlatformGroup, "Mag in hand Z (forward)", nullptr, &g_magPlatform[kPfHoldForward], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Mag in hand pitch", nullptr, &g_magPlatform[kPfHoldPitch], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {kPlatformGroup, "Mag in hand yaw", nullptr, &g_magPlatform[kPfHoldYaw], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {kPlatformGroup, "Mag in hand roll", nullptr, &g_magPlatform[kPfHoldRoll], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {kPlatformGroup, "Travel to clear the magwell", nullptr, &g_magPlatform[kPfTravel], 0.005f, 0.25f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Pull force out (stretch before it moves)", nullptr, &g_magPlatform[kPfPullForce], 0.0f, 0.1f, 0.005f,
+     3, "m"},
     {kPlatformGroup, "Needs the magazine release button", nullptr, &g_magPlatform[kPfNeedsRelease], 0.0f, 1.0f, 1.0f, 0,
      "", -1, nullptr, nullptr, kRowBothModes, kYesNoChoices, 2},
     {"Driving", "Head look", &g_drivingHeadLookAuto, nullptr, 0, 0, 0, 0, ""},
@@ -2321,6 +2574,24 @@ const MenuEntry kMenu[] = {
     {"Driving", "Wheel opacity (0 = hidden)", nullptr, &g_drivingWheelOpacity, 0.0f, 1.0f, 0.05f, 2, ""},
     {"Driving", "Debug: manual views from # (0 = auto)", nullptr, &g_drivingCameraIndex, 0.0f, 64.0f, 1.0f, 0, ""},
     {"Driving", "Debug: manual views to # (0 = only from)", nullptr, &g_drivingCameraIndexTo, 0.0f, 64.0f, 1.0f, 0, ""},
+    // The master, then a group per sequence (kSequenceFields), titled "Sequence profile: <sequence>".
+    {"Specialized sequences", "Use 6DoF Motion For Specialized Sequences", &g_specializedSequenceMotion, nullptr, 0, 0, 0, 0,
+     ""},
+    {kZodiacGroup, "6DoF, hands on wheel / gun", &g_boatSixDof, nullptr, 0, 0, 0, 0, ""},
+    {kZodiacGroup, "Grenade launcher: grips lever the gun", &g_boatGunAim, nullptr, 0, 0, 0, 0, ""},
+    {kZodiacGroup, "Grenade launcher: follow strength", nullptr, &g_boatGunAimStrength, 0.2f, 3.0f, 0.1f, 1, "x"},
+    {kZodiacGroup, "Steering wheel (hold grip)", &g_boatWheel, nullptr, 0, 0, 0, 0, ""},
+    {kZodiacGroup, "Stick deadzone compensation", nullptr, &g_boatStickDeadzone, 0.0f, 0.5f, 0.01f, 2, ""},
+    {kZodiacGroup, "Wheel turn for full lock", nullptr, &g_boatWheelLockDeg, 20.0f, 540.0f, 5.0f, 0, "deg"},
+    {kZodiacGroup, "Wheel distance forward", nullptr, &g_boatWheelForward, 0.1f, 1.0f, 0.01f, 2, "m"},
+    {kZodiacGroup, "Wheel below eyes", nullptr, &g_boatWheelDown, 0.0f, 1.0f, 0.01f, 2, "m"},
+    {kZodiacGroup, "Wheel offset right", nullptr, &g_boatWheelRight, -0.5f, 0.5f, 0.01f, 2, "m"},
+    {kZodiacGroup, "Wheel tilt (top away)", nullptr, &g_boatWheelTiltDeg, 0.0f, 80.0f, 5.0f, 0, "deg"},
+    {kZodiacGroup, "Wheel radius (drawn)", nullptr, &g_boatWheelRadius, 0.08f, 0.4f, 0.01f, 2, "m"},
+    {kZodiacGroup, "Wheel thickness (drawn)", nullptr, &g_boatWheelThickness, 0.005f, 0.1f, 0.005f, 3, "m"},
+    {kZodiacGroup, "Wheel opacity (0 = hidden)", nullptr, &g_boatWheelOpacity, 0.0f, 1.0f, 0.05f, 2, ""},
+    // LOG FILES (2026-11-14, sdk/logging.h): off by default, on for a bug report.
+    {"Diagnostics", "Write log files (for bug reports; costs frames)", &g_logsEnabled, nullptr, 0, 0, 0, 0, ""},
 };
 constexpr int kMenuCount = static_cast<int>(sizeof(kMenu) / sizeof(kMenu[0]));
 

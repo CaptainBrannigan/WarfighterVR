@@ -383,6 +383,11 @@ be found and given their own depth per eye.
   transform. Giving markers their own depth per eye needs another way in:
   - re-recording the HUD per eye with the marker projection moved for that eye;
   - or the engine's own per-eye path (block B), which needs its stereo state on.
+- **Correction (2026-11-22): a marker does have its own draws.** The reading above didn't divide the translations by
+  w. The perspective draws' origins (A[3] / A[15], A[7] / A[15]) sit on the mapped markers: in the 2026-11-14 log, 10
+  of 15 on-screen markers had such draws, x within 0.0007 of the mapped position. The other 5 had no draw anywhere
+  near them (likely not shown). So a marker can get its own depth by shifting its draws sideways per half replay
+  (row 0 += shift x row 3 of block A). Not built yet.
 
 ## Particles in one eye (2026-11-09)
 
@@ -515,11 +520,18 @@ every frame. The next frame's display update then runs the game's own reset to t
 - **Menus got smaller the higher the resolution.** The game lays its menus out in pixels in one screen rectangle,
   `FUN_00CB7480`: DxRenderer +0x1A0 (u16 x y w h) inside the safe area (the Scaleform state's +0x2344/+0x2348, the
   `ScreenSafeAreaWidth/Height` options). Every movie's viewport comes from it (the UI manager's `FUN_008fcfd0` ->
-  `FUN_008f4c70`, each movie's constructor `FUN_00a75220`). HUD > "Hud Element Scale" (`UiLayoutScale`, default 1)
-  divides that rectangle (`hooks/ui_pass.cpp`), so the UI lays out as on a screen that much smaller: menus that much
-  bigger, still drawn at the full resolution. That works because the mod's placement sets the viewport the UI is
-  drawn into. The in-world markers stay right: their caller `FUN_016ab1c0` maps a fraction of the screen into the HUD
-  movie's own visible rectangle. Only with HUD placement on. The HUD movie itself scaled with the screen already.
+  `FUN_008f4c70`, each movie's constructor `FUN_00a75220`). A scale above 1 divides that rectangle
+  (`hooks/ui_pass.cpp`), so the UI lays out as on a screen that much smaller: menus that much bigger, still drawn at
+  the full resolution. That works because the mod's placement sets the viewport the UI is drawn into. The in-world
+  markers stay right: their caller `FUN_016ab1c0` maps a fraction of the screen into the HUD movie's own visible
+  rectangle. Only with HUD placement on. The HUD movie itself scaled with the screen already.
+- **The scale follows the resolution (2026-11-22).** It is 1.5 x the rectangle's width / 5824 (the author's 1.5 at
+  5824x3112), times HUD > "Hud Element Scale" (`UiLayoutSize`, default 1 = automatic; it replaced the absolute
+  `UiLayoutScale`). That's a constant layout width, since a whole-2D frame's width in the headset is fixed by
+  `MenuScreenScale`. Below 1 the rectangle can't be divided: the renderer's BeginDisplay (`FUN_00CC5610`) clips a
+  viewport to the backbuffer. So the rectangle stays the screen's and `FUN_00CBEA10` (the movies' SetViewport) is
+  followed by GFx's own SetViewport with scale mode 0 and viewport scale (2/3) / scale, which gives the visible stage
+  the larger layout would have had (`FUN_01606BA0`: visible = w x scale). See `sdk/mohw_offsets.h`.
 - **Off 1, the first version doubled the menus** ("double images, which become further separated the greater the
   value"), pulled to one side. The placement was set once per backbuffer bind and left as state, and with the
   rectangle smaller than the screen the game sets its own viewport per movie. Every later movie was then drawn at the

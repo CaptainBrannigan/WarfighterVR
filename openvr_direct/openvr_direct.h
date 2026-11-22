@@ -14,8 +14,9 @@
 // repeatedly) to sometimes hang indefinitely -- must never block the game's render thread. WaitGetPoses and Submit
 // are called together, paired, on a SEPARATE dedicated thread (SubmitThreadProc) that owns its own independent
 // D3D11 device (g_ownDevice), never the game's. The game thread only CopyResource's each eye's fresh content into
-// a shared texture (D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX); SubmitThreadProc opens that same texture via
-// OpenSharedResource on its own device and submits it, paced by its own WaitGetPoses calls. This design was
+// shared textures (D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX; since 2026-11-17 three pairs of them, the hand-off slots,
+// so neither thread ever waits on the other -- see openvr_direct.cpp's g_gameSlots); SubmitThreadProc opens the same
+// textures via OpenSharedResource on its own device and submits them, paced by its own WaitGetPoses calls. This design was
 // arrived at after two earlier, simpler attempts both failed: (1) running Submit() on a background thread but
 // still against the GAME's device caused a DXGI_ERROR_DEVICE_REMOVED crash near a ResizeBuffers call; (2) keeping
 // Submit() on the game thread but moving only WaitGetPoses to a background thread broke OpenVR's required
@@ -45,8 +46,8 @@ struct PairStamp
 
 // PAIR PUBLISH (2026-09-25): SteamVR applies eye 0's submitted pose to BOTH eyes and ignores eye 1's (live-confirmed,
 // see project memory project_mohw_steamvr_eye1_pose_ignored.md), so both textures must always match one pose. Copies
-// both eyes and stores their shared stamp as one unit under both keyed mutexes: all or nothing, so SubmitThreadProc
-// can never see half of a pair. Both textures are required.
+// both eyes into one hand-off slot with their shared stamp: SubmitThreadProc takes the whole slot or none of it, so it
+// can never see half of a pair. Both textures are required. Never waits: a frame with no free slot isn't handed over.
 void UpdateOpenVrDirectPair(ID3D11Device* device, ID3D11Texture2D* leftEye, ID3D11Texture2D* rightEye,
                             const PairStamp& stamp);
 

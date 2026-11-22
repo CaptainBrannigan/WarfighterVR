@@ -14,4 +14,11 @@ namespace mohw {
 bool InstallXInputHook();
 void RemoveXInputHook();
 
+// Present, every frame, both executables (2026-11-22). The game polls its gamepad, and so the hook above, only while its
+// window has keyboard focus, unless its ClientSettings.UseGlobalGamePadInput is set (sdk/mohw_offsets.h
+// OFFSET_CLIENTSETTINGS). With the setting GamepadWithoutFocus on, that byte is held at 1; switched off, a byte this set
+// goes back to 0. Off (the default) and never switched on, the game's memory isn't touched. It doesn't change which
+// device the game took for its gamepad, and holster key presses still go to whichever window has focus.
+void GamepadFocusOnPresent();
+
 } // namespace mohw

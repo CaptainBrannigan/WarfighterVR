@@ -8,7 +8,9 @@
 #include "openvr_direct.h"
 #include "../hooks/startup_diag.h"
 #include "../hooks/aiming_controller_hook.h"
+#include "../hooks/boat_seat.h"
 #include "../hooks/companion_bridge.h"
+#include "../hooks/perf_probe.h"
 #include "../sdk/logging.h"
 #include "../sdk/mohw_offsets.h"
 #include "../sdk/settings.h"
@@ -588,12 +590,13 @@ bool WriteTextFile(const std::string& path, const char* text)
 // the double-tap are made here. SteamVR can't do it: the Touch grip is an analog "trigger"-type input and every
 // button-mode input on it (click with double / held / long) is rejected ("Invalid input type button::double for path
 // /user/hand/.../input/grip" in vrserver.txt), so a grip double press was never bindable.
-// Pressed past kGripOnPull, released under kGripOffPull (hysteresis, so a half-held grip doesn't chatter). A press that
+// Pressed past kGripOnPull (30 %), released under kGripOffPull (10 %) (hysteresis, so a half-held grip doesn't chatter). A press that
 // starts within kGripDoubleTapMs of a short (under kGripTapMaxMs) press's release is a double-tap: that hand's bumper
 // (left = LB, right = RB) is held for as long as the second press, when GripDoubleTapBumpers is on. The grip itself is
 // reported straight away either way, so a double-tap is also two quick grip presses to the holsters.
-constexpr float kGripOnPull = 0.70f;
-constexpr float kGripOffPull = 0.55f;
+// 2026-11-21 (the user, after the re-grip fix: "change that to counts as pull at 30 and release 10"): was 0.70 / 0.55.
+constexpr float kGripOnPull = 0.30f;
+constexpr float kGripOffPull = 0.10f;
 // Index grips report squeeze force, not finger position: 0.7 force is a crushing grip (same values as AvPVR).
 constexpr float kGripOnForce = 0.50f;
 constexpr float kGripOffForce = 0.30f;
@@ -606,6 +609,7 @@ struct GripGesture
     bool bumper = false;
     unsigned long long pressedAtMs = 0;
     unsigned long long lastTapReleaseMs = 0; // release of the last short press, 0 = none
+    unsigned long long belowSinceMs = 0;     // held, but under the release point since then (0 = not under)
 };
 GripGesture g_gripGesture[2]; // submit thread only
 bool g_handIsIndex[2] = {false, false}; // submit thread only: its grip action carries force (RefreshControllerTypes)
@@ -649,11 +653,27 @@ bool UpdateGripGesture(int hand, float pull, bool* bumper)
     float onAt = g_handIsIndex[hand] ? kGripOnForce : kGripOnPull;
     float offAt = g_handIsIndex[hand] ? kGripOffForce : kGripOffPull;
     bool down = g.down ? pull > offAt : pull >= onAt;
+    // Not in a boat seat: the grips hold its wheel or gun there (and the bumpers fire that gun).
+    const bool gripTaps = GetGripDoubleTapBumpers() && !g_handHasRealBumper[hand] &&
+                          !(g_handHasThumbrestBumper[hand] && GetThumbTapBumpers()) && GetBoatSeat() == BoatSeat::None;
+    // A HELD GRIP THAT DIPS (2026-11-21, vr_hands.cpp RE-GRIP): where the grip has no double-tap (Touch: the bumpers are
+    // the thumbrests'), it only counts as let go once the pull has stayed under the release point for kGripUpAfterMs, so
+    // easing off for an instant -- the thumb tapping the rest -- doesn't drop two-handed aim or a held magazine.
+    constexpr unsigned long long kGripUpAfterMs = 100;
+    if (g.down && !down && !gripTaps)
+    {
+        if (g.belowSinceMs == 0)
+            g.belowSinceMs = now;
+        if (now - g.belowSinceMs < kGripUpAfterMs)
+            down = true;
+    }
+    if (down && pull > offAt)
+        g.belowSinceMs = 0;
+    if (!down)
+        g.belowSinceMs = 0;
     if (down && !g.down)
     {
         g.pressedAtMs = now;
-        const bool gripTaps = GetGripDoubleTapBumpers() && !g_handHasRealBumper[hand] &&
-                              !(g_handHasThumbrestBumper[hand] && GetThumbTapBumpers());
         g.bumper = gripTaps && g.lastTapReleaseMs != 0 && now - g.lastTapReleaseMs <= kGripDoubleTapMs;
         g.lastTapReleaseMs = 0;
         if (g.bumper)
@@ -904,6 +924,7 @@ void UpdateVrInput()
 {
     if (!g_updateActionState)
         return;
+    PerfScope perf(kPerfVrInput); // hooks/perf_probe.h
 
     // The magazine set over the main one, for the hand gripping a magazine only (priority: its buttons there turn off the
     // main set's), from the state the last update left (vr_reload.h GetMagazineGripHand).
@@ -1022,6 +1043,18 @@ void UpdateVrInput()
     float headPos[3] = {head.positionX, head.positionY, head.positionZ};
     Quat headQ{head.orientationX, head.orientationY, head.orientationZ, head.orientationW};
     HandsResult result{};
+    const BoatSeat boatSeat = GetBoatSeat();
+    const bool boatSteering = boatSeat == BoatSeat::Driver && GetBoatWheel();
+    static bool boatWasSteering = false; // submit thread only
+    if (boatWasSteering && !boatSteering)
+        StopSteering();
+    boatWasSteering = boatSteering;
+    // Getting up with a grip still closed: that isn't a new press, so no holster (a grenade at the chest) until it opens.
+    static bool gripsFromBoat = false; // submit thread only
+    if (boatSeat != BoatSeat::None)
+        gripsFromBoat = true;
+    else if (gripsFromBoat)
+        gripsFromBoat = hands[kLeftHand].grip || hands[kRightHand].grip;
     if (g_drivingExe)
     {
         // Driving missions: no weapon in hand -- no holsters (a grip near a hip would send a weapon key) and no
@@ -1030,6 +1063,25 @@ void UpdateVrInput()
         result.fire = hands[result.weaponHand].trigger;
         result.ads = hands[1 - result.weaponHand].trigger;
         UpdateSteering(hands, haveHead, headPos, headQ);
+    }
+    else if (boatSeat != BoatSeat::None || gripsFromBoat)
+    {
+        // The Basilan RHIB (hooks/boat_seat.h): as in the driving missions, no holsters or two-handed aim. The grips
+        // hold the wheel or the Mk19; the triggers stay RT (weapon hand: throttle, fire) and LT (other hand).
+        result.weaponHand = GetLeftHanded() ? kLeftHand : kRightHand;
+        result.fire = hands[result.weaponHand].trigger;
+        result.ads = hands[1 - result.weaponHand].trigger;
+        bool gripping[2];
+        float palms[2][3];
+        for (int h = 0; h < 2; ++h)
+        {
+            gripping[h] = hands[h].tracked && hands[h].grip;
+            for (int k = 0; k < 3; ++k)
+                palms[h][k] = hands[h].havePalm ? hands[h].palm[k] : hands[h].pose[k][3];
+        }
+        NoteBoatHands(gripping, palms);
+        if (boatSteering)
+            UpdateSteering(hands, haveHead, headPos, headQ);
     }
     else
     {

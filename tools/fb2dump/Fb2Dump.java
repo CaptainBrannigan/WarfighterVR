@@ -161,7 +161,7 @@ public class Fb2Dump {
                 Repeater rep = repeaters.get(r);
                 Complex c = complexes.get(rep.complex);
                 for (int k = 0; k < rep.count; k++) {
-                    while (b.position() % c.align != 0) b.get();
+                    // no padding before an instance: they're packed, whatever the type's alignment (2026-11-22)
                     String guid;
                     if (r < guidRepeaters) { byte[] ig = new byte[16]; b.get(ig); guid = hex(ig); } else guid = "#" + (nonGuid++);
                     instanceNames.add(c.name); instanceGuids.add(guid); instanceOffsets.add(b.position()); instanceComplex.add(rep.complex);

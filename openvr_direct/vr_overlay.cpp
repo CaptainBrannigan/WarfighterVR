@@ -162,8 +162,9 @@ void ScrollBy(int px)
 int ColumnForGroup(const char* group)
 {
     auto is = [group](const char* name) { return strncmp(group, name, strlen(name)) == 0; };
-    // HUD under View (2026-11-12, the user).
-    if (is("Head") || is("View") || is("HUD") || is("Legacy"))
+    // HUD under View (2026-11-12, the user). The specialized sequences and their profiles under that (2026-11-22): in
+    // the right column they came after everything else in the longest one.
+    if (is("Head") || is("View") || is("HUD") || is("Legacy") || is("Diagnostics") || is("Specialized") || is("Sequence"))
         return 0;
     if (is("Weapon") || is("Holster") || is("Driving"))
         return 2;
@@ -337,7 +338,9 @@ void DrawMenu(Canvas& c)
             continue;
         }
         c.Fill(row, odd ? kRowB : kRowA);
-        RECT label{x + 12, row.top, x + 420, row.bottom};
+        // A toggle has no value beside its button, so its label runs up to it ("Use 6DoF Motion For Specialized Sequences").
+        const int labelRight = info.isToggle ? x + kColumnWidth - 8 - kToggleWidth - 8 : x + 420;
+        RECT label{x + 12, row.top, labelRight, row.bottom};
         c.Text(info.label, label, rowFont, kTextColor, DT_LEFT | DT_END_ELLIPSIS);
 
         int right = x + kColumnWidth - 8;

@@ -40,4 +40,14 @@ uintptr_t GetEquippedSoldierWeapon();
 // isn't one. For diagnostics (hooks/laser_raycast.cpp names what the laser hit).
 bool GetReflectedTypeName(uintptr_t object, char* out, size_t size);
 
+// Any thread: any ClientSoldierWeapon's blueprint name and display name, by the chain above (not only the equipped
+// one: hooks/weapon_state_probe.cpp names the weapons in the player's slots). False if it isn't one.
+bool GetSoldierWeaponName(uintptr_t soldierWeapon, char* key, size_t keySize, char* display, size_t displaySize);
+
+// Any thread: the equipped weapon's optic state, from its AimingController (found live 2026-11-17,
+// mohwvr_weaponstate.log): magnifierOn = its secondary optic (a flip magnifier) is switched on -- it stays on out of
+// ADS; zoomLevel = 0 at the hip, 1 aiming down sights, 2 aiming through the magnifier. False when unknown (no weapon, or
+// values outside what was seen).
+bool GetEquippedOpticState(bool* magnifierOn, int* zoomLevel);
+
 } // namespace mohw

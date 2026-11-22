@@ -212,7 +212,7 @@ void DumpModuleRegistry()
 
 void CheckModuleRegistryDumpHotkey()
 {
-    if (g_moduleRegistryAlreadyDumped.load())
+    if (g_moduleRegistryAlreadyDumped.load() || !LogsEnabled()) // dumps only with the log files on (sdk/logging.h)
         return;
     if (!(GetAsyncKeyState(kModuleRegistryDumpHotkey) & 0x8000))
         return;
@@ -227,7 +227,7 @@ void CheckModuleRegistryDumpHotkey()
 
 void CheckMemoryDumpHotkey()
 {
-    if (g_alreadyDumped.load())
+    if (g_alreadyDumped.load() || !LogsEnabled()) // dumps only with the log files on (sdk/logging.h)
         return;
     if (!(GetAsyncKeyState(kDumpHotkey) & 0x8000))
         return;
@@ -252,6 +252,8 @@ void StartDelayedModuleDump(const char* fileName, unsigned delayMs)
 {
     std::thread([fileName, delayMs] {
         Sleep(delayMs);
+        if (!LogsEnabled())
+            return; // dumps only with the log files on (sdk/logging.h)
         bool expected = false;
         if (!g_alreadyDumped.compare_exchange_strong(expected, true))
             return;
