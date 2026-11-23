@@ -833,6 +833,10 @@ void NativeStereoOnPresent()
             g_lastSwitchMs = now;
             MOHW_LOG(kLogFile, "%s (for %llu ms): %s", flat ? "a whole 2D frame" : "a 3D frame", forMs,
                      flat ? "one view, the floating screen in both eyes" : "two views, one per eye");
+            // Next to the frame rates, whatever the log switch says (2026-11-22): a level that drops in and out of
+            // stereo shows each switch there.
+            MOHW_LOG_ALWAYS("mohwvr_perf.log", "stereo: %s (last frame drew the world %d times)",
+                            flat ? "one view (a whole 2D frame)" : "two views", GetLastFrameWorldDraws());
         }
     }
     g_wantTwoViews.store(want, std::memory_order_relaxed);

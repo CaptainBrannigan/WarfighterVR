@@ -3,7 +3,7 @@
 // close to an eye (and is out of view of the other)"). Engine two-view only (hooks/native_stereo.h).
 //
 // The gun's sight line is the weapon profile's optic zero: from the weapon hand, OpticHeight up and OpticWindageOffset
-// right, along the hand's forward (the line the optic dot sits on). When one eye is within ScopeEyeBox of that line and up
+// right, along the hand's forward. When one eye is within ScopeEyeBox of that line and up
 // to ScopeEyeRelief behind the hand, and the gun has a scope -- its profile's ScopeMagnification (2026-11-17: no longer
 // the game's ADS zoom as a fallback; it needs no ADS) -- that eye's view becomes the scope:
 //   - its camera moves onto the sight line, level with the eye's own up, looking along the line;
@@ -66,5 +66,17 @@ struct ScopeLensPicture
 };
 // Present (game thread): both eyes' pictures (on = false for an eye with none). False when there are none at all.
 bool GetScopeLensPictures(ScopeLensPicture out[2]);
+
+// RED DOT SIGHT (2026-11-22, the user: "an alternate that is purely a red dot holographic with no magnification? Then we
+// could hide the laser and have a more natural aiming experience that's perfectly zeroed"). A gun whose profile's Sight
+// is "Red dot" gets no scoped eye and no lens picture: each eye sees a red dot (RedDotSize across) where IT sees the
+// impact point -- the laser's point at its true direction from that eye, the sight line's vanishing point without the
+// laser -- drawn only inside the lens disc (the profile's ScopeLens* settings) as that eye sees it, so the lens is the
+// sight's window. Zeroed at whatever range the laser hits, with no parallax. Passed to Present as ScopeLensPictures with
+// reticle = {x, y, dot radius in uv x, 2}. With "Scope shows: only with the game's magnifier on" and a magnification,
+// the game's magnifier turns it into the scope. Engine two-view only, as the scope.
+// Any thread: a red dot sight is up (the gun has one and it was worked out this frame), for hiding the laser's beam and
+// dot (settings.h GetRedDotHidesLaser).
+bool IsRedDotSightUp();
 
 } // namespace mohw

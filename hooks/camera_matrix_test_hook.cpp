@@ -1,4 +1,5 @@
 #include "camera_matrix_test_hook.h"
+#include "../sdk/hotkeys.h"
 
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/logging.h"
@@ -1342,7 +1343,7 @@ void RemoveCameraMatrixTestHook()
 void CheckWeaponDriveHotkey()
 {
     static bool wasDown = false;
-    bool down = (GetAsyncKeyState(VK_DECIMAL) & 0x8000) != 0;
+    bool down = ModKeyDown(VK_DECIMAL);
     if (down && !wasDown)
     {
         bool on = !GetWeaponDriveEnabled();

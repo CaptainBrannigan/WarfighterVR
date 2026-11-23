@@ -45,7 +45,6 @@ constexpr float kDefaultFrustumScale = 1.0f;
 constexpr bool kDefaultHeadPositionEnabled = true;
 constexpr float kDefaultHeadPositionScale = 1.0f;
 constexpr bool kDefaultHeadPositionInvertHorizontal = true;
-constexpr bool kDefaultRotationSmoothingEnabled = true;
 constexpr float kDefaultRotationSmoothingWindowMs = 83.3333f; // user-tuned (the raw ~30Hz tick is 33.3ms)
 constexpr bool kDefaultBoneHideEnabled = true;
 constexpr float kDefaultBoneHideRangeStart = 12.0f;
@@ -87,16 +86,13 @@ constexpr bool kDefaultHolsterHoldToKeep = false; // false = sticky: a grabbed w
 constexpr float kDefaultHolsterRadius = 0.15f;    // meters
 constexpr float kDefaultHolsterDrop = 0.0f;       // meters, + moves every zone down
 constexpr bool kDefaultSightDotEnabled = true;
-constexpr bool kDefaultDotsOnlyWithGrip = false; // true = both dots only while the weapon grip is on
+constexpr bool kDefaultDotsOnlyWithGrip = false; // true = the aim ray dot and beam only while the weapon grip is on
 constexpr float kDefaultSightZeroDistance = 600.0f; // meters: the laser's max range
 constexpr float kDefaultSightDotSizeDeg = 0.35f;
-// Optic dot: at the weapon hand, raised by OpticHeight (the zero) and moved by OpticWindageOffset / OpticDistance, meters
-// in the hand's own frame. Dot colours: red, or green when the ...Green toggle is on.
-constexpr bool kDefaultOpticDotEnabled = true;
-constexpr float kDefaultOpticHeight = 0.05f;  // + = dot up
-constexpr float kDefaultOpticWindage = 0.0f;  // + = dot right
-constexpr float kDefaultOpticDistance = 0.0f; // + = dot forward of the hand
-constexpr bool kDefaultOpticDotGreen = false;
+// The optic zero: the gun's sight line, from the weapon hand, raised by OpticHeight and moved by OpticWindageOffset,
+// meters in the hand's own frame (the scopes and the red dot sight start from it, hooks/scope_view.h).
+constexpr float kDefaultOpticHeight = 0.05f; // + = up
+constexpr float kDefaultOpticWindage = 0.0f; // + = right
 constexpr bool kDefaultRayDotGreen = true;
 // Holster zone -> game action (a GstKeyBinding.infantry concept name from the game's profile; empty = unassigned).
 const char* const kHolsterZoneKeys[kHolsterZoneCount] = {"HolsterStomach", "HolsterHip", "HolsterChest",
@@ -135,7 +131,6 @@ std::atomic<float> g_frustumScale{kDefaultFrustumScale};
 std::atomic<bool> g_headPositionEnabled{kDefaultHeadPositionEnabled};
 std::atomic<float> g_headPositionScale{kDefaultHeadPositionScale};
 std::atomic<bool> g_headPositionInvertHorizontal{kDefaultHeadPositionInvertHorizontal};
-std::atomic<bool> g_rotationSmoothingEnabled{kDefaultRotationSmoothingEnabled};
 std::atomic<float> g_rotationSmoothingWindowMs{kDefaultRotationSmoothingWindowMs};
 std::atomic<bool> g_boneHideEnabled{kDefaultBoneHideEnabled};
 std::atomic<float> g_boneHideRangeStart{kDefaultBoneHideRangeStart};
@@ -270,6 +265,19 @@ std::atomic<float> g_scopeLensRadius{0.018f};   // m
 // as a flip to side magnifier that the scope only appears when that is toggled on in game"), 0 = always.
 std::atomic<float> g_scopeNeedsMagnifier{0.0f};
 const char* const kScopeShowChoices[] = {"Always", "Only with the game's magnifier on"};
+// RED DOT SIGHT (2026-11-22, the user: "an alternate that is purely a red dot holographic with no magnification? Then we
+// could hide the laser and have a more natural aiming experience that's perfectly zeroed"). Per weapon: 0 = the scope,
+// 1 = a red dot seen through the lens disc, on the impact point (hooks/scope_view.h). With "Scope shows: only with the
+// game's magnifier on" and a magnification, the magnifier turns the red dot into the scope.
+std::atomic<float> g_sightType{0.0f};
+const char* const kSightTypeChoices[] = {"Scope (magnified)", "Red dot (no magnification)"};
+std::atomic<bool> g_redDotHidesLaser{true}; // the laser's beam and dot hidden while a red dot sight is up
+// Per weapon (2026-11-23, the user: "you can turn off the aim ray once the start point is configured to a place the user
+// is happy with"): 1 = this gun's laser beam and dot hidden. Only the drawing: the laser keeps running (the shots follow
+// it, from the shot line start), so a gun whose shot line starts at its sight aims with the sight alone.
+std::atomic<float> g_aimRayHidden{0.0f};
+const char* const kAimRayChoices[] = {"Shown", "Hidden (the shots still follow it)"};
+std::atomic<float> g_redDotSizeDeg{0.15f};  // the dot's size in view
 const char kPlatformGroup[] = "Magazine platform";
 char g_platformTitleBuffers[2][96] = {"Magazine platform: AK (every gun on it)", ""};
 std::atomic<const char*> g_platformTitle{g_platformTitleBuffers[0]};
@@ -358,9 +366,6 @@ std::atomic<float> g_menuScreenScale{kDefaultMenuScreenScale};
 std::atomic<float> g_menuScreenDepth{kDefaultMenuScreenDepth};
 std::atomic<float> g_uiLayoutSize{1.0f}; // hooks/ui_pass.cpp: times the scale worked out from the resolution (1 = that)
 // Marker test (2026-09-29): from this draw of the final 2D pass on, the full frame instead of the HUD rectangle; 0 = off.
-std::atomic<float> g_drivingCameraIndex{0.0f};     // hooks/driving_camera_hook.cpp: 0 = auto, 1.. = ranked camera. Session-only
-                                                   // (not saved): a leftover manual pick silently overrode auto (2026-10-14)
-std::atomic<float> g_drivingCameraIndexTo{0.0f};   // end of the manual range (0 = only the "from" view); session-only
 std::atomic<bool> g_drivingHeadLookInvert{false};
 std::atomic<bool> g_drivingHeadLookAuto{true};
 std::atomic<float> g_drivingStickLookRangeDeg{90.0f}; // head yaw at full stick; 0 = render-only yaw
@@ -393,7 +398,6 @@ std::atomic<float> g_boatWheelTiltDeg{25.0f};
 std::atomic<float> g_boatWheelRadius{0.18f};
 std::atomic<float> g_boatWheelThickness{0.03f};
 std::atomic<float> g_boatWheelOpacity{0.6f};
-std::atomic<float> g_debugHideDraw{0.0f};   // final-pass draw number not drawn, to see what it is; 0 = off
 std::atomic<float> g_hudOffsetXDeg{kDefaultHudOffsetXDeg};
 std::atomic<float> g_hudOffsetYDeg{kDefaultHudOffsetYDeg};
 std::atomic<float> g_hudIpdScale{kDefaultHudIpdScale};
@@ -445,11 +449,11 @@ std::atomic<bool> g_thumbTapBumpers{true};      // openvr_direct/vr_input.cpp Up
 std::atomic<bool> g_gamepadWithoutFocus{false}; // hooks/xinput_hook.cpp GamepadFocusOnPresent
 std::atomic<float> g_sightZeroDistance{kDefaultSightZeroDistance};
 std::atomic<float> g_sightDotSizeDeg{kDefaultSightDotSizeDeg};
-std::atomic<bool> g_opticDotEnabled{kDefaultOpticDotEnabled};
 std::atomic<float> g_opticHeight{kDefaultOpticHeight};
 std::atomic<float> g_opticWindage{kDefaultOpticWindage};
-std::atomic<float> g_opticDistance{kDefaultOpticDistance};
-std::atomic<bool> g_opticDotGreen{kDefaultOpticDotGreen};
+// The optic dot's forward distance (OpticDistance) had this place in the weapon profiles' lines: removed with the dot on
+// 2026-11-22 (the red dot sight replaces it), the place kept so saved lines keep their order. Not a setting.
+std::atomic<float> g_retiredProfileSlot5{0.0f};
 std::atomic<bool> g_rayDotGreen{kDefaultRayDotGreen};
 // Laser (hooks/laser_raycast.cpp, openvr_direct/vr_overlay.cpp): the aim-ray dot at the first surface the shot line hits,
 // and a beam from the hand to it.
@@ -458,8 +462,8 @@ std::atomic<float> g_laserBeamOpacity{0.35f};
 std::atomic<float> g_laserBeamWidthMm{4.0f};
 std::atomic<float> g_laserRaycastEveryFrames{1.0f}; // the game raycast every N rendered frames
 std::atomic<float> g_laserStartMeters{0.15f};       // per weapon: where the laser begins, forward of the hand (the muzzle)
-std::atomic<float> g_laserBeamStartRight{0.0f};     // per weapon: the drawn beam's start, right of the shot line
-std::atomic<float> g_laserBeamStartUp{0.0f};        // per weapon: the drawn beam's start, above the shot line
+std::atomic<float> g_laserBeamStartRight{0.0f};     // per weapon: where the shot line starts, right of the hand
+std::atomic<float> g_laserBeamStartUp{0.0f};        // per weapon: where the shot line starts, above the hand
 std::atomic<float> g_holsterPos[kHolsterZoneCount][3] = {
     {kDefaultHolsterPos[0][0], kDefaultHolsterPos[0][1], kDefaultHolsterPos[0][2]},
     {kDefaultHolsterPos[1][0], kDefaultHolsterPos[1][1], kDefaultHolsterPos[1][2]},
@@ -530,7 +534,7 @@ constexpr int kSequenceFieldCount = static_cast<int>(sizeof(kSequenceFields) / s
 constexpr int kOldProfileGripValues = 3;
 std::atomic<float>* const kProfileFields[] = {
     &g_weaponGripPitchDeg,  &g_weaponGripYawDeg,   &g_weaponGripRollDeg, &g_opticHeight, &g_opticWindage,
-    &g_opticDistance,       &g_controllerAimUpDeg, &g_controllerAimRightDeg,
+    &g_retiredProfileSlot5, &g_controllerAimUpDeg, &g_controllerAimRightDeg,
     // Appended 2026-10-15 (lines saved before take the default for these).
     &g_secondaryGripRight, &g_secondaryGripUp, &g_laserStartMeters,
     &g_laserBeamStartRight, &g_laserBeamStartUp,
@@ -549,6 +553,10 @@ std::atomic<float>* const kProfileFields[] = {
     &g_scopeNeedsMagnifier,
     // Appended 2026-11-21: the secondary grip offset's forward part.
     &g_secondaryGripForward,
+    // Appended 2026-11-22: the sight, scope or red dot.
+    &g_sightType,
+    // Appended 2026-11-23: the aim ray (laser beam and dot) hidden on this gun.
+    &g_aimRayHidden,
 };
 constexpr int kProfileFieldCount = static_cast<int>(sizeof(kProfileFields) / sizeof(kProfileFields[0]));
 constexpr int kGripRollField = 2; // &g_weaponGripRollDeg's place in kProfileFields
@@ -705,18 +713,9 @@ void WriteSettingsFileLocked()
         MOHW_LOG(kLogFile, "WriteSettingsFileLocked: failed to open %s for writing", path.c_str());
         return;
     }
-    fprintf(f, "; MOHWVR settings -- edit while the game is closed, or use the\n");
-    fprintf(f, "; in-game hotkeys, which keep this file in sync automatically:\n");
-    fprintf(f, ";   F5/F6  = FOV scale down/up\n");
-    fprintf(f, ";   F7/F8  = IPD scale down/up\n");
-    fprintf(f, ";   F12    = head-driven aim/movement on/off (TEMPORARILY DISABLED -- see\n");
-    fprintf(f, ";            hooks/aiming_controller_hook.cpp's CheckAimingControllerHotkeys)\n");
-    fprintf(f, ";   F2     = head-aim sensitivity up (TEMPORARILY DISABLED, same reason)\n");
-    fprintf(f, ";   F3     = head-aim recenter\n");
-    fprintf(f, ";   F4     = head-aim invert yaw toggle\n");
-    fprintf(f, ";   F1     = head-aim invert pitch toggle\n");
-    fprintf(f, ";   (HeadAimClampPitch below has no hotkey yet -- edit the value in\n");
-    fprintf(f, ";    this file directly and relaunch to change it)\n");
+    // No hotkeys since 2026-11-23 (sdk/hotkeys.h): the header no longer lists the F-keys it used to.
+    fprintf(f, "; MOHWVR settings -- change them in the headset: SteamVR dashboard, MOHW VR tab. Every\n");
+    fprintf(f, "; change there saves here. Edit this file only while the game is closed.\n");
     fprintf(f, "IpdScale=%.4f\n", g_ipdScale.load(std::memory_order_relaxed));
     fprintf(f, "HeadAimEnabled=%d\n", g_headAimEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HeadAimSensitivity=%.4f\n", g_headAimSensitivity.load(std::memory_order_relaxed));
@@ -725,7 +724,6 @@ void WriteSettingsFileLocked()
     fprintf(f, "HeadAimClampPitch=%d\n", g_headAimClampPitch.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HeadRollEnabled=%d\n", g_headRollEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "HeadRollInvert=%d\n", g_headRollInvert.load(std::memory_order_relaxed) ? 1 : 0);
-    fprintf(f, "RotationSmoothingEnabled=%d\n", g_rotationSmoothingEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "RotationSmoothingWindowMs=%.4f\n", g_rotationSmoothingWindowMs.load(std::memory_order_relaxed));
     fprintf(f, "VrTurnSpeed=%.4f\n", g_vrTurnSpeed.load(std::memory_order_relaxed));
     fprintf(f, "VrStickFullDeflection=%.4f\n", g_vrStickFullDeflection.load(std::memory_order_relaxed));
@@ -774,7 +772,6 @@ void WriteSettingsFileLocked()
         else
             fprintf(f, "%s=%.*f\n", s.key, s.decimals, s.number->load(std::memory_order_relaxed));
     }
-    fprintf(f, "DebugHideDraw=%.0f\n", g_debugHideDraw.load(std::memory_order_relaxed));
     fprintf(f, "HudIpdScale=%.4f\n", g_hudIpdScale.load(std::memory_order_relaxed));
     fprintf(f, "HudDepth=%.4f\n", g_hudDepth.load(std::memory_order_relaxed));
     fprintf(f, "HudOffsetX=%.4f\n", g_hudOffsetXDeg.load(std::memory_order_relaxed));
@@ -824,6 +821,10 @@ void WriteSettingsFileLocked()
     fprintf(f, "ScopeLensForward=%.4f\n", DefaultProfileValue(&g_scopeLensForward));
     fprintf(f, "ScopeLensRadius=%.4f\n", DefaultProfileValue(&g_scopeLensRadius));
     fprintf(f, "ScopeNeedsMagnifier=%.0f\n", DefaultProfileValue(&g_scopeNeedsMagnifier));
+    fprintf(f, "SightType=%.0f\n", DefaultProfileValue(&g_sightType));
+    fprintf(f, "AimRayHidden=%.0f\n", DefaultProfileValue(&g_aimRayHidden));
+    fprintf(f, "RedDotHidesLaser=%d\n", g_redDotHidesLaser.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "RedDotSize=%.3f\n", g_redDotSizeDeg.load(std::memory_order_relaxed));
     CapturePlatformLocked();
     fprintf(f, "; MagazinePlatform<n>: in-hand right,up,forward (m), pitch,yaw,roll (deg), hinge (0 straight / 1 hinge),\n"
                "; travel (m), hinge forward,up (m), hinge angle (deg), pull force (m), needs release (0/1). n:");
@@ -856,11 +857,8 @@ void WriteSettingsFileLocked()
     fprintf(f, "GamepadWithoutFocus=%d\n", g_gamepadWithoutFocus.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "SightZeroDistance=%.4f\n", g_sightZeroDistance.load(std::memory_order_relaxed));
     fprintf(f, "SightDotSize=%.4f\n", g_sightDotSizeDeg.load(std::memory_order_relaxed));
-    fprintf(f, "OpticDotEnabled=%d\n", g_opticDotEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "OpticHeight=%.4f\n", DefaultProfileValue(&g_opticHeight));
     fprintf(f, "OpticWindageOffset=%.4f\n", DefaultProfileValue(&g_opticWindage));
-    fprintf(f, "OpticDistance=%.4f\n", DefaultProfileValue(&g_opticDistance));
-    fprintf(f, "OpticDotGreen=%d\n", g_opticDotGreen.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "RayDotGreen=%d\n", g_rayDotGreen.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "LaserBeam=%d\n", g_laserBeamEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "LaserBeamOpacity=%.2f\n", g_laserBeamOpacity.load(std::memory_order_relaxed));
@@ -938,6 +936,24 @@ bool ParseSequenceSetting(const std::string& line, bool (&seen)[kSequenceFieldCo
         return true;
     }
     return false;
+}
+
+// The red dot sight's keys (2026-11-22), read ahead of LoadSettings' long else-if chain (the compiler's nesting limit).
+bool ParseSightSetting(const std::string& line)
+{
+    float value = 0.0f;
+    bool boolValue = false;
+    if (ParseFloatSetting(line, "SightType", &value))
+        g_sightType.store(value, std::memory_order_relaxed);
+    else if (ParseFloatSetting(line, "AimRayHidden", &value))
+        g_aimRayHidden.store(value, std::memory_order_relaxed);
+    else if (ParseBoolSetting(line, "RedDotHidesLaser", &boolValue))
+        g_redDotHidesLaser.store(boolValue, std::memory_order_relaxed);
+    else if (ParseFloatSetting(line, "RedDotSize", &value))
+        g_redDotSizeDeg.store(value, std::memory_order_relaxed);
+    else
+        return false;
+    return true;
 }
 
 // HideBodyPart1..kMaxBodyParts.
@@ -1046,7 +1062,7 @@ void LoadSettings()
                 perMode = true;
             }
         }
-        if (perMode || ParseSequenceSetting(line, sequenceSeen))
+        if (perMode || ParseSequenceSetting(line, sequenceSeen) || ParseSightSetting(line))
             continue;
         if (ParseFloatSetting(line, "IpdScale", &value))
             g_ipdScale.store(value, std::memory_order_relaxed);
@@ -1072,8 +1088,6 @@ void LoadSettings()
             g_headPositionScale.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "HeadPositionInvertHorizontal", &boolValue))
             g_headPositionInvertHorizontal.store(boolValue, std::memory_order_relaxed);
-        else if (ParseBoolSetting(line, "RotationSmoothingEnabled", &boolValue))
-            g_rotationSmoothingEnabled.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "RotationSmoothingWindowMs", &value))
             g_rotationSmoothingWindowMs.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "HudPlacementEnabled", &boolValue))
@@ -1124,8 +1138,6 @@ void LoadSettings()
             g_drivingWheelThickness.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "DrivingWheelOpacity", &value))
             g_drivingWheelOpacity.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "DebugHideDraw", &value))
-            g_debugHideDraw.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HudOffsetX", &value))
             g_hudOffsetXDeg.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "HudOffsetY", &value))
@@ -1226,16 +1238,10 @@ void LoadSettings()
             g_sightZeroDistance.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SightDotSize", &value))
             g_sightDotSizeDeg.store(value, std::memory_order_relaxed);
-        else if (ParseBoolSetting(line, "OpticDotEnabled", &boolValue))
-            g_opticDotEnabled.store(boolValue, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "OpticHeight", &value))
             g_opticHeight.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "OpticWindageOffset", &value))
             g_opticWindage.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "OpticDistance", &value))
-            g_opticDistance.store(value, std::memory_order_relaxed);
-        else if (ParseBoolSetting(line, "OpticDotGreen", &boolValue))
-            g_opticDotGreen.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "RayDotGreen", &boolValue))
             g_rayDotGreen.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "LaserBeam", &boolValue))
@@ -1576,16 +1582,10 @@ void SetHeadPositionInvertHorizontal(bool value)
     WriteSettingsFileLocked();
 }
 
+// Always on since 2026-11-23 (its switch said "keep on": the pair publish's right eye depends on it, see settings.h).
 bool GetRotationSmoothingEnabled()
 {
-    return g_rotationSmoothingEnabled.load(std::memory_order_relaxed);
-}
-
-void SetRotationSmoothingEnabled(bool value)
-{
-    g_rotationSmoothingEnabled.store(value, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lock(g_fileMutex);
-    WriteSettingsFileLocked();
+    return true;
 }
 
 float GetRotationSmoothingWindowMs()
@@ -1777,14 +1777,15 @@ void NoteLevelRenderMode(bool twoView)
     g_levelModeKnown.store(true, std::memory_order_relaxed);
 }
 
+// The manual view pick was a debug aid, removed from the menu on 2026-11-23: always automatic now.
 int GetDrivingCameraIndex()
 {
-    return static_cast<int>(g_drivingCameraIndex.load(std::memory_order_relaxed) + 0.5f);
+    return 0;
 }
 
 int GetDrivingCameraIndexTo()
 {
-    return static_cast<int>(g_drivingCameraIndexTo.load(std::memory_order_relaxed) + 0.5f);
+    return 0;
 }
 
 bool GetDrivingHeadLookInvert()
@@ -1890,12 +1891,6 @@ void GetDrivingWheelLook(float* radius, float* thickness, float* opacity)
     *radius = g_drivingWheelRadius.load(std::memory_order_relaxed);
     *thickness = g_drivingWheelThickness.load(std::memory_order_relaxed);
     *opacity = g_drivingWheelOpacity.load(std::memory_order_relaxed);
-}
-
-
-int GetDebugHideDraw()
-{
-    return static_cast<int>(g_debugHideDraw.load(std::memory_order_relaxed) + 0.5f);
 }
 
 
@@ -2092,7 +2087,19 @@ ScopeSettings GetScopeSettings()
     s.lensForward = g_scopeLensForward.load(std::memory_order_relaxed);
     s.lensRadius = g_scopeLensRadius.load(std::memory_order_relaxed);
     s.needsMagnifier = g_scopeNeedsMagnifier.load(std::memory_order_relaxed) >= 0.5f;
+    s.redDot = g_sightType.load(std::memory_order_relaxed) >= 0.5f;
+    s.redDotSizeDeg = g_redDotSizeDeg.load(std::memory_order_relaxed);
     return s;
+}
+
+bool GetRedDotHidesLaser()
+{
+    return g_redDotHidesLaser.load(std::memory_order_relaxed);
+}
+
+bool GetAimRayHidden()
+{
+    return g_aimRayHidden.load(std::memory_order_relaxed) >= 0.5f;
 }
 
 void GetBodyOffset(float out[3])
@@ -2227,25 +2234,10 @@ float GetSightDotSizeDeg()
     return g_sightDotSizeDeg.load(std::memory_order_relaxed);
 }
 
-bool GetOpticDotEnabled()
-{
-    return g_opticDotEnabled.load(std::memory_order_relaxed);
-}
-
 void GetOpticOffset(float* height, float* windage)
 {
     *height = g_opticHeight.load(std::memory_order_relaxed);
     *windage = g_opticWindage.load(std::memory_order_relaxed);
-}
-
-float GetOpticDistance()
-{
-    return g_opticDistance.load(std::memory_order_relaxed);
-}
-
-bool GetOpticDotGreen()
-{
-    return g_opticDotGreen.load(std::memory_order_relaxed);
 }
 
 bool GetRayDotGreen()
@@ -2327,26 +2319,35 @@ struct MenuEntry
 std::vector<std::string> g_holsterChoices;
 
 const char kZodiacGroup[] = "Sequence profile: Zodiac Sequence";
+// Weapon placement's three layers (2026-11-23, kMenu's comment).
+const char kCalibrationGroup[] = "Controller calibration (moves the aim too)";
+const char kHandsGroup[] = "Hands on the controllers (looks only)";
+const char kGunInHandGroup[] = "Gun in the hand (looks only)";
+const char kHolstersGroup[] = "Holsters (X = right, Y = up, Z = forward, m from head)";
 
-// Order = display order; entries of a group must be contiguous.
+// THE LAYOUT (2026-11-23, the user: "fit all rendering type settings on the left, hands and weapons center, then body
+// and ik details on the right"; openvr_direct/vr_overlay.cpp ColumnForGroup puts each group in its column):
+//   left   View, Head, HUD, Driving, Specialized sequences and their profiles, Diagnostics
+//   centre Weapon, Controls, Aim ray (laser), Sights, the weapon profile, the magazine platform
+//   right  the three placement groups (the user: "The hand offset vs hand ik offset is confusing"), Arm IK, Holsters,
+//          Holster actions, Body (the body-part rows follow it)
+// WEAPON PLACEMENT, three layers, each in its own group, in the order they apply:
+//   Controller calibration (HandOffset*): the tracked controller pose itself is moved and turned, so everything moves
+//     with it: the aim and shots, the laser, the gun, the hands, holsters, the two-handed grab.
+//   Hands on the controllers (RightHandIk* / LeftHandIk*): where the model's hands sit on the (calibrated)
+//     controllers. Looks only: the gun rides the gun hand, the aim doesn't move.
+//   Gun in the hand (GunInHandOffset*): the gun moved inside the hand. Looks only.
+// Removed the same day: the rotation smoothing switch (it has to stay on: always on now), "Debug: hide draw #" and the
+// driving missions' "Debug: manual views from / to #".
+// Order = display order within each column; entries of a group must be contiguous.
 const MenuEntry kMenu[] = {
-    {"Head", "Head aim", &g_headAimEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Head", "Head aim sensitivity", nullptr, &g_headAimSensitivity, 0.1f, 3.0f, 0.05f, 2, ""},
-    {"Head", "Invert head yaw", &g_headAimInvertYaw, nullptr, 0, 0, 0, 0, ""},
-    {"Head", "Invert head pitch", &g_headAimInvertPitch, nullptr, 0, 0, 0, 0, ""},
-    {"Head", "Clamp pitch to game limits", &g_headAimClampPitch, nullptr, 0, 0, 0, 0, ""},
-    {"Head", "Head roll", &g_headRollEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Head", "Invert head roll", &g_headRollInvert, nullptr, 0, 0, 0, 0, ""},
-    {"Head", "Head position", &g_headPositionEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Head", "Head position scale", nullptr, &g_headPositionScale, 0.1f, 3.0f, 0.05f, 2, "x"},
-    {"Head", "Invert head position (horizontal)", &g_headPositionInvertHorizontal, nullptr, 0, 0, 0, 0, ""},
+    // ---- Left: rendering ----
     // RENDER MODE (2026-11-12): one DLL, two renderers; a change applies fully at the next level load (its note row
     // follows while the level was built with the other mode, see MenuRows).
     {"View", "Render mode", &g_nativeStereo, nullptr, 0, 0, 0, 0, "", -1, "Alternating eye", "Engine two-view"},
     {"View", "IPD scale", nullptr, &g_ipdScale, 0.5f, 2.0f, 0.02f, 2, "x"},
     {"View", "World scale (frustum)", nullptr, &g_frustumScale, 0.5f, 2.0f, 0.02f, 2, "x"},
-    {"View", "Rotation smoothing (keep on)", &g_rotationSmoothingEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"View", "Smoothing window", nullptr, &g_rotationSmoothingWindowMs, 10.0f, 200.0f, 1.0f, 1, "ms"},
+    {"View", "Rotation smoothing window", nullptr, &g_rotationSmoothingWindowMs, 10.0f, 200.0f, 1.0f, 1, "ms"},
     {"View", "Keep game out of exclusive fullscreen", &g_keepGameWindowed, nullptr, 0, 0, 0, 0, ""},
     {"View", "Exact sky rays (clouds match both eyes)", &g_skyExactRays, nullptr, 0, 0, 0, 0, ""},
     {"View", "Screen effects (dust) in both eyes", &g_screenEffectsBothEyes, nullptr, 0, 0, 0, 0, "", -1, nullptr, nullptr,
@@ -2357,8 +2358,17 @@ const MenuEntry kMenu[] = {
     {"View", "Backbuffer at SteamVR eye size (experimental)", &g_eyeSizedBackbuffer, nullptr, 0, 0, 0, 0, "", -1, nullptr,
      nullptr, kRowTwoView},
     {"View", "Scripted scenes follow the game's input locks", &g_scriptedScenesFromLocks, nullptr, 0, 0, 0, 0, ""},
-    // HUD right after View (2026-11-12, the user). The numbers are per render mode: each has one row per mode, and only
-    // the selected mode's shows.
+    {"Head", "Head aim", &g_headAimEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Head aim sensitivity", nullptr, &g_headAimSensitivity, 0.1f, 3.0f, 0.05f, 2, ""},
+    {"Head", "Invert head yaw", &g_headAimInvertYaw, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Invert head pitch", &g_headAimInvertPitch, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Clamp pitch to game limits", &g_headAimClampPitch, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Head roll", &g_headRollEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Invert head roll", &g_headRollInvert, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Head position", &g_headPositionEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Head", "Head position scale", nullptr, &g_headPositionScale, 0.1f, 3.0f, 0.05f, 2, "x"},
+    {"Head", "Invert head position (horizontal)", &g_headPositionInvertHorizontal, nullptr, 0, 0, 0, 0, ""},
+    // The HUD's numbers are per render mode: each has one row per mode, and only the selected mode's shows.
     {"HUD", "HUD placement", &g_hudPlacementEnabled, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "Menu / movie screen size", nullptr, &g_menuScreenScale, 0.3f, 1.2f, 0.01f, 2, "x", -1, nullptr, nullptr,
      kRowAlternatingEye},
@@ -2372,7 +2382,6 @@ const MenuEntry kMenu[] = {
      nullptr, kRowAlternatingEye},
     {"HUD", "Hud Element Scale (1 = auto by resolution)", nullptr, &g_uiLayoutSizeTv, 0.3f, 2.0f, 0.05f, 2, "x", -1, nullptr,
      nullptr, kRowTwoView},
-    {"HUD", "Debug: hide draw # (0 off)", nullptr, &g_debugHideDraw, 0.0f, 128.0f, 1.0f, 0, ""},
     {"HUD", "Hide reticle (may clip pause-menu items)", &g_hideReticle, nullptr, 0, 0, 0, 0, ""},
     {"HUD", "HUD scale", nullptr, &g_hudScale, 0.3f, 1.2f, 0.01f, 2, "x", -1, nullptr, nullptr, kRowAlternatingEye},
     {"HUD", "HUD scale", nullptr, &g_hudScaleTv, 0.3f, 1.2f, 0.01f, 2, "x", -1, nullptr, nullptr, kRowTwoView},
@@ -2390,177 +2399,12 @@ const MenuEntry kMenu[] = {
      kRowAlternatingEye},
     {"HUD", "HUD offset up", nullptr, &g_hudOffsetYDegTv, -30.0f, 30.0f, 0.5f, 1, "deg", -1, nullptr, nullptr,
      kRowTwoView},
-    {"Controls", "Stick turn speed", nullptr, &g_vrTurnSpeed, 0.2f, 3.0f, 0.05f, 2, "x"},
-    {"Controls", "Stick full deflection", nullptr, &g_vrStickFullDeflection, 0.5f, 1.0f, 0.01f, 2, ""},
-    {"Controls", "Two-hand grab radius", nullptr, &g_twoHandGrabRadius, 0.05f, 0.5f, 0.01f, 2, "m"},
-    {"Controls", "Two-hand reach", nullptr, &g_twoHandReach, 0.2f, 1.5f, 0.05f, 2, "m"},
-    {"Controls", "Remove shot spread", &g_removeShotSpread, nullptr, 0, 0, 0, 0, ""},
-    {"Controls", "ADS sway (0 = none, 1 = game's)", nullptr, &g_adsSwayScale, 0.0f, 1.0f, 0.05f, 2, "x"},
-    {"Controls", "Fire / ADS as mouse (off = RT / LT)", &g_fireViaMouse, nullptr, 0, 0, 0, 0, ""},
-    {"Controls", "Thumbrest double-tap = LB / RB", &g_thumbTapBumpers, nullptr, 0, 0, 0, 0, ""},
-    {"Controls", "Grip double-tap = LB / RB (no thumbrest)", &g_gripDoubleTapBumpers, nullptr, 0, 0, 0, 0, ""},
-    {"Controls", "Controllers work without window focus", &g_gamepadWithoutFocus, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Left-handed", &g_leftHanded, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Hold grip to keep weapon", &g_holsterHoldToKeep, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Holster size", nullptr, &g_holsterRadius, 0.05f, 0.4f, 0.01f, 2, "m"},
-    {"Hands", "Holster height offset (+ lower)", nullptr, &g_holsterDrop, -0.4f, 0.4f, 0.01f, 2, "m"},
-    {"Hands", "Hand offset right (all weapons)", nullptr, &g_handOffsetPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Hands", "Hand offset up", nullptr, &g_handOffsetPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Hands", "Hand offset forward", nullptr, &g_handOffsetPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Hands", "Hand rotation pitch (+ up)", nullptr, &g_handOffsetRotDeg[0], -45.0f, 45.0f, 0.5f, 1, "deg"},
-    {"Hands", "Hand rotation yaw (+ right)", nullptr, &g_handOffsetRotDeg[1], -45.0f, 45.0f, 0.5f, 1, "deg"},
-    {"Hands", "Hand rotation roll (+ right)", nullptr, &g_handOffsetRotDeg[2], -45.0f, 45.0f, 0.5f, 1, "deg"},
-    {"Hands", "Gun offset in the hand right (all guns)", nullptr, &g_gunSocketOffset[0], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Hands", "Gun offset in the hand up", nullptr, &g_gunSocketOffset[1], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Hands", "Gun offset in the hand forward", nullptr, &g_gunSocketOffset[2], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Hands", "Show weapon sockets (debug lines)", &g_showWeaponSockets, nullptr, 0, 0, 0, 0, ""},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Show grab zones (setup)", &g_showGrabZones, nullptr, 0, 0, 0, 0, ""},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach X (each side)", nullptr, &g_holsterPos[0][0], 0.0f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach Y", nullptr, &g_holsterPos[0][1], -1.2f, 0.3f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Stomach Z", nullptr, &g_holsterPos[0][2], -0.5f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Hip X (each side)", nullptr, &g_holsterPos[1][0], 0.0f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Hip Y", nullptr, &g_holsterPos[1][1], -1.2f, 0.3f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Hip Z", nullptr, &g_holsterPos[1][2], -0.5f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Chest X", nullptr, &g_holsterPos[2][0], -0.6f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Chest Y", nullptr, &g_holsterPos[2][1], -1.2f, 0.3f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Chest Z", nullptr, &g_holsterPos[2][2], -0.5f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Left shoulder X", nullptr, &g_holsterPos[3][0], -0.6f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Left shoulder Y", nullptr, &g_holsterPos[3][1], -1.2f, 0.3f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Left shoulder Z", nullptr, &g_holsterPos[3][2], -0.5f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Right shoulder X", nullptr, &g_holsterPos[4][0], -0.6f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Right shoulder Y", nullptr, &g_holsterPos[4][1], -1.2f, 0.3f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Right shoulder Z", nullptr, &g_holsterPos[4][2], -0.5f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch X", nullptr, &g_magazinePouch[0], -0.6f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch Y", nullptr, &g_magazinePouch[1], -1.2f, 0.3f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch Z", nullptr, &g_magazinePouch[2], -0.5f, 0.6f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag pouch grab radius", nullptr, &g_magazinePouchRadius, 0.03f, 0.4f, 0.01f, 2, "m"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag in pouch pitch", nullptr, &g_magazinePouchRot[0], -180.0f, 180.0f, 5.0f, 0, "deg"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag in pouch yaw", nullptr, &g_magazinePouchRot[1], -180.0f, 180.0f, 5.0f, 0, "deg"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag in pouch roll", nullptr, &g_magazinePouchRot[2], -180.0f, 180.0f, 5.0f, 0, "deg"},
-    {"Holsters (X = right, Y = up, Z = forward, m from head)", "Mag taken from the pouch", nullptr, &g_magazinePouchGrab,
-     0.0f, 2.0f, 1.0f, 0, "", -1, nullptr, nullptr, kRowBothModes, kPouchGrabChoices, 3},
-    {"Holster actions", "Stomach", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterStomach},
-    {"Holster actions", "Hips", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterHip},
-    {"Holster actions", "Chest", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterChest},
-    {"Holster actions", "Left shoulder", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterLeftShoulder},
-    {"Holster actions", "Right shoulder", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterRightShoulder},
-    {"Hands", "Dots only with weapon grip", &g_dotsOnlyWithGrip, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Optic dot", &g_opticDotEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Optic dot green (off = red)", &g_opticDotGreen, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Aim ray dot", &g_sightDotEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Aim ray dot green (off = red)", &g_rayDotGreen, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Laser max range (dot when nothing's hit)", nullptr, &g_sightZeroDistance, 5.0f, 1000.0f, 5.0f, 0, "m"},
-    {"Hands", "Laser beam", &g_laserBeamEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Hands", "Laser beam opacity", nullptr, &g_laserBeamOpacity, 0.05f, 1.0f, 0.05f, 2, ""},
-    {"Hands", "Laser beam width", nullptr, &g_laserBeamWidthMm, 1.0f, 20.0f, 0.5f, 1, "mm"},
-    {"Hands", "Laser raycast every N frames", nullptr, &g_laserRaycastEveryFrames, 1.0f, 30.0f, 1.0f, 0, ""},
-    {"Hands", "Dot size", nullptr, &g_sightDotSizeDeg, 0.05f, 2.0f, 0.05f, 2, "deg"},
-    {"Arm IK", "Arms follow the controllers", &g_armIkEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Arm IK", "Hold hands and gun still (no idle animations)", &g_holdHandPose, nullptr, 0, 0, 0, 0, ""},
-    {"Arm IK", "Right hand right (on its controller)", nullptr, &g_rightHandIkPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Arm IK", "Right hand up", nullptr, &g_rightHandIkPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Arm IK", "Right hand forward", nullptr, &g_rightHandIkPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Arm IK", "Right hand pitch", nullptr, &g_rightHandIkRotDeg[0], -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Right hand yaw", nullptr, &g_rightHandIkRotDeg[1], -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Right hand roll", nullptr, &g_rightHandIkRotDeg[2], -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Left hand right", nullptr, &g_leftHandIkPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Arm IK", "Left hand up", nullptr, &g_leftHandIkPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Arm IK", "Left hand forward", nullptr, &g_leftHandIkPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {"Arm IK", "Left hand pitch", nullptr, &g_leftHandIkRotDeg[0], -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Left hand yaw", nullptr, &g_leftHandIkRotDeg[1], -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Left hand roll", nullptr, &g_leftHandIkRotDeg[2], -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Left shoulder outward", nullptr, &g_shoulderOffset[0][0], -0.5f, 0.5f, 0.005f, 3, "m"},
-    {"Arm IK", "Left shoulder up", nullptr, &g_shoulderOffset[0][1], -1.0f, 1.0f, 0.005f, 3, "m"},
-    {"Arm IK", "Left shoulder forward", nullptr, &g_shoulderOffset[0][2], -1.0f, 1.0f, 0.005f, 3, "m"},
-    {"Arm IK", "Right shoulder outward", nullptr, &g_shoulderOffset[1][0], -0.5f, 0.5f, 0.005f, 3, "m"},
-    {"Arm IK", "Right shoulder up", nullptr, &g_shoulderOffset[1][1], -1.0f, 1.0f, 0.005f, 3, "m"},
-    {"Arm IK", "Right shoulder forward", nullptr, &g_shoulderOffset[1][2], -1.0f, 1.0f, 0.005f, 3, "m"},
-    {"Arm IK", "Forearm twist share", nullptr, &g_forearmTwist, 0.0f, 1.0f, 0.05f, 2, ""},
-    {"Arm IK", "Natural elbow model", &g_naturalElbow, nullptr, 0, 0, 0, 0, ""},
-    {"Arm IK", "Elbow swivel (natural model off)", nullptr, &g_elbowSwivelDeg, -90.0f, 90.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Elbow follows wrist roll", nullptr, &g_elbowFollow, 0.0f, 1.0f, 0.05f, 2, ""},
-    {"Arm IK", "Elbow inward: exact up to", nullptr, &g_elbowInKneeDeg, 0.0f, 150.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Elbow inward: at most", nullptr, &g_elbowInMaxDeg, 0.0f, 170.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Elbow inward near the body", nullptr, &g_elbowInNearBody, 0.0f, 1.0f, 0.05f, 2, "x"},
-    {"Arm IK", "Elbow outward: exact up to", nullptr, &g_elbowOutKneeDeg, 0.0f, 150.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Elbow outward: at most", nullptr, &g_elbowOutMaxDeg, 0.0f, 170.0f, 1.0f, 0, "deg"},
-    {"Arm IK", "Elbow smoothing", nullptr, &g_elbowSmoothingMs, 0.0f, 300.0f, 10.0f, 0, "ms"},
-    {"Body", "Body right", nullptr, &g_bodyOffset[0], -1.0f, 1.0f, 0.005f, 3, "m"},
-    {"Body", "Body up", nullptr, &g_bodyOffset[1], -2.0f, 2.0f, 0.005f, 3, "m"},
-    {"Body", "Body forward", nullptr, &g_bodyOffset[2], -2.0f, 2.0f, 0.005f, 3, "m"},
-    {"Body", "Keep body upright (no tilt with the view)", &g_bodyUpright, nullptr, 0, 0, 0, 0, ""},
-    {"Body", "Keep body and gun steady on head turns", &g_stabilizeRig, nullptr, 0, 0, 0, 0, ""},
-    {"Weapon", "Gun + shots follow controller (Numpad .)", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Weapon", "Manual reload", &g_manualReloadEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Weapon", "Magazine grip lets go beyond", nullptr, &g_magazineGripBreak, 0.05f, 1.0f, 0.01f, 2, "m"},
-    // SCOPED EYE (2026-11-14, prototype): engine two-view only.
-    {"Scope (prototype, engine two-view)", "Scoped eye: look through the scope", &g_scopeEyeEnabled, nullptr, 0, 0, 0, 0, "",
-     -1, nullptr, nullptr, kRowTwoView},
-    {"Scope (prototype, engine two-view)", "Eye box (how close to the sight line)", nullptr, &g_scopeEyeBox, 0.01f, 0.1f,
-     0.005f, 3, "m", -1, nullptr, nullptr, kRowTwoView},
-    {"Scope (prototype, engine two-view)", "Eye relief (how far behind the hand)", nullptr, &g_scopeEyeRelief, 0.1f, 1.0f,
-     0.01f, 2, "m", -1, nullptr, nullptr, kRowTwoView},
-    {"Scope (prototype, engine two-view)", "Eyepiece size in view", nullptr, &g_scopeApparentFov, 8.0f, 60.0f, 1.0f, 0,
-     "deg", -1, nullptr, nullptr, kRowTwoView},
-    {"Scope (prototype, engine two-view)", "Crosshair on the impact point (holographic)", &g_scopeReticle, nullptr, 0, 0,
-     0, 0, "", -1, nullptr, nullptr, kRowTwoView},
-    {"Scope (prototype, engine two-view)", "Lens picture (screen space, both eyes)", &g_scopeLensPicture, nullptr, 0, 0, 0,
-     0, "", -1, nullptr, nullptr, kRowTwoView},
-    // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon.
-    {kProfileGroup, "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {kProfileGroup, "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {kProfileGroup, "Grip roll", nullptr, &g_weaponGripRollDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
-    {kProfileGroup, "Optic zero / height (+ up)", nullptr, &g_opticHeight, -0.3f, 0.3f, 0.001f, 3, "m"},
-    {kProfileGroup, "Optic windage (+ right)", nullptr, &g_opticWindage, -0.3f, 0.3f, 0.001f, 3, "m"},
-    {kProfileGroup, "Optic forward (from the hand)", nullptr, &g_opticDistance, 0.0f, 300.0f, 0.01f, 2, "m"},
-    {kProfileGroup, "Controller aim offset up", nullptr, &g_controllerAimUpDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
-    {kProfileGroup, "Controller aim offset right", nullptr, &g_controllerAimRightDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
-    {kProfileGroup, "Magazine grab box right", nullptr, &g_magazineGrabOffset[0], -0.4f, 0.4f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine grab box up", nullptr, &g_magazineGrabOffset[1], -0.4f, 0.4f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine grab box forward", nullptr, &g_magazineGrabOffset[2], -0.4f, 0.4f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine grab box half width", nullptr, &g_magazineGrabHalfSize[0], 0.01f, 0.4f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine grab box half height", nullptr, &g_magazineGrabHalfSize[1], 0.01f, 0.4f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine grab box half depth", nullptr, &g_magazineGrabHalfSize[2], 0.01f, 0.4f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine aim point right", nullptr, &g_magazineAimPoint[0], -0.5f, 0.5f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine aim point up", nullptr, &g_magazineAimPoint[1], -0.5f, 1.0f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine aim point forward", nullptr, &g_magazineAimPoint[2], -0.5f, 0.5f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine starts turning at", nullptr, &g_magazineRange, 0.02f, 0.8f, 0.01f, 2, "m"},
-    {kProfileGroup, "Magazine locks horizontal at", nullptr, &g_magazineLockRange, 0.005f, 0.3f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine seats within", nullptr, &g_magazineSeatRange, 0.002f, 0.1f, 0.002f, 3, "m"},
-    {kProfileGroup, "Secondary grip offset right", nullptr, &g_secondaryGripRight, -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kProfileGroup, "Secondary grip offset up", nullptr, &g_secondaryGripUp, -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kProfileGroup, "Secondary grip offset forward", nullptr, &g_secondaryGripForward, -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kProfileGroup, "Laser start (forward of the hand)", nullptr, &g_laserStartMeters, 0.0f, 1.5f, 0.01f, 2, "m"},
-    {kProfileGroup, "Beam start right (visual)", nullptr, &g_laserBeamStartRight, -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kProfileGroup, "Beam start up (visual)", nullptr, &g_laserBeamStartUp, -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kProfileGroup, "Magazine platform", nullptr, &g_weaponMagPlatform, -1.0f, kMagazinePlatformCount - 1.0f, 1.0f, 0, "",
-     -1, nullptr, nullptr, kRowBothModes, nullptr, 0, true},
-    {kProfileGroup, "Scope magnification (0 = no scope)", nullptr, &g_scopeMagnification, 0.0f, 30.0f, 0.25f, 2, "x"},
-    {kProfileGroup, "Scope shows", nullptr, &g_scopeNeedsMagnifier, 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr, nullptr,
-     kRowBothModes, kScopeShowChoices, 2},
-    {kProfileGroup, "Scope lens right (from the optic zero)", nullptr, &g_scopeLensRight, -0.1f, 0.1f, 0.001f, 3, "m"},
-    {kProfileGroup, "Scope lens up (from the optic zero)", nullptr, &g_scopeLensUp, -0.1f, 0.1f, 0.001f, 3, "m"},
-    {kProfileGroup, "Scope lens forward (from the hand)", nullptr, &g_scopeLensForward, -0.2f, 0.5f, 0.005f, 3, "m"},
-    {kProfileGroup, "Scope lens radius", nullptr, &g_scopeLensRadius, 0.005f, 0.05f, 0.001f, 3, "m"},
-    // The equipped gun's magazine platform (2026-11-14): shared by every gun on it; the title names it.
-    // The pouch grab's snap (2026-11-21, "Mag taken from the pouch"): the magazine's top from the controller, left hand
-    // (mirrored in the right). With "Snapped, vertical from the grip", up is an offset from where the grip had it.
-    {kPlatformGroup, "Mag in hand X (right)", nullptr, &g_magPlatform[kPfHoldRight], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kPlatformGroup, "Mag in hand Y (up; offset from the grip)", nullptr, &g_magPlatform[kPfHoldUp], -0.3f, 0.3f, 0.005f,
-     3, "m"},
-    {kPlatformGroup, "Mag in hand Z (forward)", nullptr, &g_magPlatform[kPfHoldForward], -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kPlatformGroup, "Mag in hand pitch", nullptr, &g_magPlatform[kPfHoldPitch], -180.0f, 180.0f, 5.0f, 0, "deg"},
-    {kPlatformGroup, "Mag in hand yaw", nullptr, &g_magPlatform[kPfHoldYaw], -180.0f, 180.0f, 5.0f, 0, "deg"},
-    {kPlatformGroup, "Mag in hand roll", nullptr, &g_magPlatform[kPfHoldRoll], -180.0f, 180.0f, 5.0f, 0, "deg"},
-    {kPlatformGroup, "Travel to clear the magwell", nullptr, &g_magPlatform[kPfTravel], 0.005f, 0.25f, 0.005f, 3, "m"},
-    {kPlatformGroup, "Pull force out (stretch before it moves)", nullptr, &g_magPlatform[kPfPullForce], 0.0f, 0.1f, 0.005f,
-     3, "m"},
-    {kPlatformGroup, "Needs the magazine release button", nullptr, &g_magPlatform[kPfNeedsRelease], 0.0f, 1.0f, 1.0f, 0,
-     "", -1, nullptr, nullptr, kRowBothModes, kYesNoChoices, 2},
     {"Driving", "Head look", &g_drivingHeadLookAuto, nullptr, 0, 0, 0, 0, ""},
     {"Driving", "Invert head look", &g_drivingHeadLookInvert, nullptr, 0, 0, 0, 0, ""},
     {"Driving", "Stereo (full view)", &g_drivingStereo, nullptr, 0, 0, 0, 0, ""},
-    {"Driving", "Stereo uses next eye (swap)", &g_drivingLateNextEye, nullptr, 0, 0, 0, 0, ""},
+    // The eye a view rebuilt off the render thread gets: a one-eye-per-frame matter.
+    {"Driving", "Stereo uses next eye (swap)", &g_drivingLateNextEye, nullptr, 0, 0, 0, 0, "", -1, nullptr, nullptr,
+     kRowAlternatingEye},
     {"Driving", "Stick look range (0 = render yaw)", nullptr, &g_drivingStickLookRangeDeg, 0.0f, 180.0f, 5.0f, 0, "deg"},
     {"Driving", "Stick deadzone compensation", nullptr, &g_drivingStickDeadzone, 0.0f, 0.5f, 0.01f, 2, ""},
     {"Driving", "Steering wheel (hold grip)", &g_drivingSteeringWheel, nullptr, 0, 0, 0, 0, ""},
@@ -2572,8 +2416,6 @@ const MenuEntry kMenu[] = {
     {"Driving", "Wheel radius (drawn)", nullptr, &g_drivingWheelRadius, 0.08f, 0.4f, 0.01f, 2, "m"},
     {"Driving", "Wheel thickness (drawn)", nullptr, &g_drivingWheelThickness, 0.005f, 0.1f, 0.005f, 3, "m"},
     {"Driving", "Wheel opacity (0 = hidden)", nullptr, &g_drivingWheelOpacity, 0.0f, 1.0f, 0.05f, 2, ""},
-    {"Driving", "Debug: manual views from # (0 = auto)", nullptr, &g_drivingCameraIndex, 0.0f, 64.0f, 1.0f, 0, ""},
-    {"Driving", "Debug: manual views to # (0 = only from)", nullptr, &g_drivingCameraIndexTo, 0.0f, 64.0f, 1.0f, 0, ""},
     // The master, then a group per sequence (kSequenceFields), titled "Sequence profile: <sequence>".
     {"Specialized sequences", "Use 6DoF Motion For Specialized Sequences", &g_specializedSequenceMotion, nullptr, 0, 0, 0, 0,
      ""},
@@ -2592,6 +2434,191 @@ const MenuEntry kMenu[] = {
     {kZodiacGroup, "Wheel opacity (0 = hidden)", nullptr, &g_boatWheelOpacity, 0.0f, 1.0f, 0.05f, 2, ""},
     // LOG FILES (2026-11-14, sdk/logging.h): off by default, on for a bug report.
     {"Diagnostics", "Write log files (for bug reports; costs frames)", &g_logsEnabled, nullptr, 0, 0, 0, 0, ""},
+
+    // ---- Centre: hands and weapons ----
+    // MOTION CONTROLS (2026-11-23, the user's name for it; "Gun + shots follow controller" before): the gun on the
+    // controller and the shots along it, or the game's own aim (WeaponDriveEnabled; Numpad . until the hotkeys went).
+    {"Weapon", "Motion Controls", &g_weaponDriveEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Weapon", "Manual reload", &g_manualReloadEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Weapon", "Magazine grip lets go beyond", nullptr, &g_magazineGripBreak, 0.05f, 1.0f, 0.01f, 2, "m"},
+    {"Controls", "Left-handed", &g_leftHanded, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Stick turn speed", nullptr, &g_vrTurnSpeed, 0.2f, 3.0f, 0.05f, 2, "x"},
+    {"Controls", "Stick full deflection", nullptr, &g_vrStickFullDeflection, 0.5f, 1.0f, 0.01f, 2, ""},
+    {"Controls", "Two-hand grab radius", nullptr, &g_twoHandGrabRadius, 0.05f, 0.5f, 0.01f, 2, "m"},
+    {"Controls", "Two-hand reach", nullptr, &g_twoHandReach, 0.2f, 1.5f, 0.05f, 2, "m"},
+    {"Controls", "Remove shot spread", &g_removeShotSpread, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "ADS sway (0 = none, 1 = game's)", nullptr, &g_adsSwayScale, 0.0f, 1.0f, 0.05f, 2, "x"},
+    {"Controls", "Fire / ADS as mouse (off = RT / LT)", &g_fireViaMouse, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Thumbrest double-tap = LB / RB", &g_thumbTapBumpers, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Grip double-tap = LB / RB (no thumbrest)", &g_gripDoubleTapBumpers, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Controllers work without window focus", &g_gamepadWithoutFocus, nullptr, 0, 0, 0, 0, ""},
+    // The laser: drawing only (hooks/laser_raycast.cpp keeps casting whatever these say, the shots follow it).
+    {"Aim ray (laser)", "Aim ray dot", &g_sightDotEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Aim ray (laser)", "Dot green (off = red)", &g_rayDotGreen, nullptr, 0, 0, 0, 0, ""},
+    {"Aim ray (laser)", "Dot size", nullptr, &g_sightDotSizeDeg, 0.05f, 2.0f, 0.05f, 2, "deg"},
+    {"Aim ray (laser)", "Laser beam", &g_laserBeamEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Aim ray (laser)", "Laser beam opacity", nullptr, &g_laserBeamOpacity, 0.05f, 1.0f, 0.05f, 2, ""},
+    {"Aim ray (laser)", "Laser beam width", nullptr, &g_laserBeamWidthMm, 1.0f, 20.0f, 0.5f, 1, "mm"},
+    {"Aim ray (laser)", "Only while gripping the gun", &g_dotsOnlyWithGrip, nullptr, 0, 0, 0, 0, ""},
+    {"Aim ray (laser)", "Max range (dot when nothing's hit)", nullptr, &g_sightZeroDistance, 5.0f, 1000.0f, 5.0f, 0, "m"},
+    {"Aim ray (laser)", "Raycast every N frames", nullptr, &g_laserRaycastEveryFrames, 1.0f, 30.0f, 1.0f, 0, ""},
+    // SIGHTS (scopes 2026-11-14, the red dot 2026-11-22): engine two-view only. Each gun's own sight is in its profile.
+    {"Sights (engine two-view)", "Scoped eye: look through the scope", &g_scopeEyeEnabled, nullptr, 0, 0, 0, 0, "", -1,
+     nullptr, nullptr, kRowTwoView},
+    {"Sights (engine two-view)", "Eye box (how close to the sight line)", nullptr, &g_scopeEyeBox, 0.01f, 0.1f, 0.005f, 3,
+     "m", -1, nullptr, nullptr, kRowTwoView},
+    {"Sights (engine two-view)", "Eye relief (how far behind the hand)", nullptr, &g_scopeEyeRelief, 0.1f, 1.0f, 0.01f, 2,
+     "m", -1, nullptr, nullptr, kRowTwoView},
+    {"Sights (engine two-view)", "Eyepiece size in view", nullptr, &g_scopeApparentFov, 8.0f, 60.0f, 1.0f, 0, "deg", -1,
+     nullptr, nullptr, kRowTwoView},
+    {"Sights (engine two-view)", "Crosshair on the impact point (holographic)", &g_scopeReticle, nullptr, 0, 0, 0, 0, "",
+     -1, nullptr, nullptr, kRowTwoView},
+    {"Sights (engine two-view)", "Lens picture (screen space, both eyes)", &g_scopeLensPicture, nullptr, 0, 0, 0, 0, "",
+     -1, nullptr, nullptr, kRowTwoView},
+    {"Sights (engine two-view)", "Red dot sight hides the laser", &g_redDotHidesLaser, nullptr, 0, 0, 0, 0, "", -1,
+     nullptr, nullptr, kRowTwoView},
+    {"Sights (engine two-view)", "Red dot size", nullptr, &g_redDotSizeDeg, 0.02f, 1.0f, 0.01f, 2, "deg", -1, nullptr,
+     nullptr, kRowTwoView},
+    // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon. Grouped by what they set: the
+    // grip, the aim, the sight, the second hand, the magazine.
+    {kProfileGroup, "Grip pitch", nullptr, &g_weaponGripPitchDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kProfileGroup, "Grip yaw", nullptr, &g_weaponGripYawDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kProfileGroup, "Grip roll", nullptr, &g_weaponGripRollDeg, -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kProfileGroup, "Controller aim offset up", nullptr, &g_controllerAimUpDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
+    {kProfileGroup, "Controller aim offset right", nullptr, &g_controllerAimRightDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
+    {kProfileGroup, "Laser start (forward of the hand)", nullptr, &g_laserStartMeters, 0.0f, 1.5f, 0.01f, 2, "m"},
+    {kProfileGroup, "Shot line start right", nullptr, &g_laserBeamStartRight, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Shot line start up", nullptr, &g_laserBeamStartUp, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Aim ray", nullptr, &g_aimRayHidden, 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr, nullptr, kRowBothModes,
+     kAimRayChoices, 2},
+    {kProfileGroup, "Sight", nullptr, &g_sightType, 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr, nullptr, kRowBothModes,
+     kSightTypeChoices, 2},
+    {kProfileGroup, "Optic zero / height (+ up)", nullptr, &g_opticHeight, -0.3f, 0.3f, 0.001f, 3, "m"},
+    {kProfileGroup, "Optic windage (+ right)", nullptr, &g_opticWindage, -0.3f, 0.3f, 0.001f, 3, "m"},
+    {kProfileGroup, "Scope magnification (0 = no scope)", nullptr, &g_scopeMagnification, 0.0f, 30.0f, 0.25f, 2, "x"},
+    {kProfileGroup, "Scope shows", nullptr, &g_scopeNeedsMagnifier, 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr, nullptr,
+     kRowBothModes, kScopeShowChoices, 2},
+    {kProfileGroup, "Scope lens right (from the optic zero)", nullptr, &g_scopeLensRight, -0.1f, 0.1f, 0.001f, 3, "m"},
+    {kProfileGroup, "Scope lens up (from the optic zero)", nullptr, &g_scopeLensUp, -0.1f, 0.1f, 0.001f, 3, "m"},
+    {kProfileGroup, "Scope lens forward (from the hand)", nullptr, &g_scopeLensForward, -0.2f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Scope lens radius", nullptr, &g_scopeLensRadius, 0.005f, 0.05f, 0.001f, 3, "m"},
+    {kProfileGroup, "Secondary grip offset right", nullptr, &g_secondaryGripRight, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Secondary grip offset up", nullptr, &g_secondaryGripUp, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Secondary grip offset forward", nullptr, &g_secondaryGripForward, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine platform", nullptr, &g_weaponMagPlatform, -1.0f, kMagazinePlatformCount - 1.0f, 1.0f, 0, "",
+     -1, nullptr, nullptr, kRowBothModes, nullptr, 0, true},
+    {kProfileGroup, "Magazine grab box right", nullptr, &g_magazineGrabOffset[0], -0.4f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box up", nullptr, &g_magazineGrabOffset[1], -0.4f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box forward", nullptr, &g_magazineGrabOffset[2], -0.4f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box half width", nullptr, &g_magazineGrabHalfSize[0], 0.01f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box half height", nullptr, &g_magazineGrabHalfSize[1], 0.01f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine grab box half depth", nullptr, &g_magazineGrabHalfSize[2], 0.01f, 0.4f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine aim point right", nullptr, &g_magazineAimPoint[0], -0.5f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine aim point up", nullptr, &g_magazineAimPoint[1], -0.5f, 1.0f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine aim point forward", nullptr, &g_magazineAimPoint[2], -0.5f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine starts turning at", nullptr, &g_magazineRange, 0.02f, 0.8f, 0.01f, 2, "m"},
+    {kProfileGroup, "Magazine locks horizontal at", nullptr, &g_magazineLockRange, 0.005f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Magazine seats within", nullptr, &g_magazineSeatRange, 0.002f, 0.1f, 0.002f, 3, "m"},
+    // The equipped gun's magazine platform (2026-11-14): shared by every gun on it; the title names it.
+    // The pouch grab's snap (2026-11-21, "Mag taken from the pouch"): the magazine's top from the controller, left hand
+    // (mirrored in the right). With "Snapped, vertical from the grip", up is an offset from where the grip had it.
+    {kPlatformGroup, "Mag in hand X (right)", nullptr, &g_magPlatform[kPfHoldRight], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Mag in hand Y (up; offset from the grip)", nullptr, &g_magPlatform[kPfHoldUp], -0.3f, 0.3f, 0.005f,
+     3, "m"},
+    {kPlatformGroup, "Mag in hand Z (forward)", nullptr, &g_magPlatform[kPfHoldForward], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Mag in hand pitch", nullptr, &g_magPlatform[kPfHoldPitch], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {kPlatformGroup, "Mag in hand yaw", nullptr, &g_magPlatform[kPfHoldYaw], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {kPlatformGroup, "Mag in hand roll", nullptr, &g_magPlatform[kPfHoldRoll], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {kPlatformGroup, "Travel to clear the magwell", nullptr, &g_magPlatform[kPfTravel], 0.005f, 0.25f, 0.005f, 3, "m"},
+    {kPlatformGroup, "Pull force out (stretch before it moves)", nullptr, &g_magPlatform[kPfPullForce], 0.0f, 0.1f, 0.005f,
+     3, "m"},
+    {kPlatformGroup, "Needs the magazine release button", nullptr, &g_magPlatform[kPfNeedsRelease], 0.0f, 1.0f, 1.0f, 0,
+     "", -1, nullptr, nullptr, kRowBothModes, kYesNoChoices, 2},
+
+    // ---- Right: body and IK ----
+    // Weapon placement, layer 1: the controller pose itself (vr_input.cpp ApplyHandOffset). Mirrored for the left hand.
+    {kCalibrationGroup, "Point right", nullptr, &g_handOffsetPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kCalibrationGroup, "Point up", nullptr, &g_handOffsetPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kCalibrationGroup, "Point forward", nullptr, &g_handOffsetPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kCalibrationGroup, "Turn pitch (+ up)", nullptr, &g_handOffsetRotDeg[0], -45.0f, 45.0f, 0.5f, 1, "deg"},
+    {kCalibrationGroup, "Turn yaw (+ right)", nullptr, &g_handOffsetRotDeg[1], -45.0f, 45.0f, 0.5f, 1, "deg"},
+    {kCalibrationGroup, "Turn roll (+ right)", nullptr, &g_handOffsetRotDeg[2], -45.0f, 45.0f, 0.5f, 1, "deg"},
+    // Layer 2: the model's hands on the calibrated controllers (first_person_rig.cpp HandOnController); the gun rides
+    // the gun hand (camera_matrix_test_hook.cpp GripInCamera).
+    {kHandsGroup, "Gun hand right", nullptr, &g_rightHandIkPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kHandsGroup, "Gun hand up", nullptr, &g_rightHandIkPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kHandsGroup, "Gun hand forward", nullptr, &g_rightHandIkPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kHandsGroup, "Gun hand pitch", nullptr, &g_rightHandIkRotDeg[0], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kHandsGroup, "Gun hand yaw", nullptr, &g_rightHandIkRotDeg[1], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kHandsGroup, "Gun hand roll", nullptr, &g_rightHandIkRotDeg[2], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kHandsGroup, "Off hand right", nullptr, &g_leftHandIkPos[0], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kHandsGroup, "Off hand up", nullptr, &g_leftHandIkPos[1], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kHandsGroup, "Off hand forward", nullptr, &g_leftHandIkPos[2], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kHandsGroup, "Off hand pitch", nullptr, &g_leftHandIkRotDeg[0], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kHandsGroup, "Off hand yaw", nullptr, &g_leftHandIkRotDeg[1], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kHandsGroup, "Off hand roll", nullptr, &g_leftHandIkRotDeg[2], -180.0f, 180.0f, 1.0f, 0, "deg"},
+    {kHandsGroup, "Hold hands and gun still (no idle animations)", &g_holdHandPose, nullptr, 0, 0, 0, 0, ""},
+    // Layer 3: the gun inside the gun hand.
+    {kGunInHandGroup, "Gun right (all guns)", nullptr, &g_gunSocketOffset[0], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kGunInHandGroup, "Gun up", nullptr, &g_gunSocketOffset[1], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kGunInHandGroup, "Gun forward", nullptr, &g_gunSocketOffset[2], -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kGunInHandGroup, "Show weapon sockets (debug lines)", &g_showWeaponSockets, nullptr, 0, 0, 0, 0, ""},
+    {"Arm IK", "Arms follow the controllers", &g_armIkEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Arm IK", "Left shoulder outward", nullptr, &g_shoulderOffset[0][0], -0.5f, 0.5f, 0.005f, 3, "m"},
+    {"Arm IK", "Left shoulder up", nullptr, &g_shoulderOffset[0][1], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Arm IK", "Left shoulder forward", nullptr, &g_shoulderOffset[0][2], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Arm IK", "Right shoulder outward", nullptr, &g_shoulderOffset[1][0], -0.5f, 0.5f, 0.005f, 3, "m"},
+    {"Arm IK", "Right shoulder up", nullptr, &g_shoulderOffset[1][1], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Arm IK", "Right shoulder forward", nullptr, &g_shoulderOffset[1][2], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Arm IK", "Forearm twist share", nullptr, &g_forearmTwist, 0.0f, 1.0f, 0.05f, 2, ""},
+    {"Arm IK", "Natural elbow model", &g_naturalElbow, nullptr, 0, 0, 0, 0, ""},
+    {"Arm IK", "Elbow swivel (natural model off)", nullptr, &g_elbowSwivelDeg, -90.0f, 90.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow follows wrist roll", nullptr, &g_elbowFollow, 0.0f, 1.0f, 0.05f, 2, ""},
+    {"Arm IK", "Elbow inward: exact up to", nullptr, &g_elbowInKneeDeg, 0.0f, 150.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow inward: at most", nullptr, &g_elbowInMaxDeg, 0.0f, 170.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow inward near the body", nullptr, &g_elbowInNearBody, 0.0f, 1.0f, 0.05f, 2, "x"},
+    {"Arm IK", "Elbow outward: exact up to", nullptr, &g_elbowOutKneeDeg, 0.0f, 150.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow outward: at most", nullptr, &g_elbowOutMaxDeg, 0.0f, 170.0f, 1.0f, 0, "deg"},
+    {"Arm IK", "Elbow smoothing", nullptr, &g_elbowSmoothingMs, 0.0f, 300.0f, 10.0f, 0, "ms"},
+    {kHolstersGroup, "Show grab zones (setup)", &g_showGrabZones, nullptr, 0, 0, 0, 0, ""},
+    {kHolstersGroup, "Hold grip to keep weapon", &g_holsterHoldToKeep, nullptr, 0, 0, 0, 0, ""},
+    {kHolstersGroup, "Holster size", nullptr, &g_holsterRadius, 0.05f, 0.4f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Holster height offset (+ lower)", nullptr, &g_holsterDrop, -0.4f, 0.4f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Stomach X (each side)", nullptr, &g_holsterPos[0][0], 0.0f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Stomach Y", nullptr, &g_holsterPos[0][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Stomach Z", nullptr, &g_holsterPos[0][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Hip X (each side)", nullptr, &g_holsterPos[1][0], 0.0f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Hip Y", nullptr, &g_holsterPos[1][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Hip Z", nullptr, &g_holsterPos[1][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Chest X", nullptr, &g_holsterPos[2][0], -0.6f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Chest Y", nullptr, &g_holsterPos[2][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Chest Z", nullptr, &g_holsterPos[2][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Left shoulder X", nullptr, &g_holsterPos[3][0], -0.6f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Left shoulder Y", nullptr, &g_holsterPos[3][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Left shoulder Z", nullptr, &g_holsterPos[3][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Right shoulder X", nullptr, &g_holsterPos[4][0], -0.6f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Right shoulder Y", nullptr, &g_holsterPos[4][1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Right shoulder Z", nullptr, &g_holsterPos[4][2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Mag pouch X", nullptr, &g_magazinePouch[0], -0.6f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Mag pouch Y", nullptr, &g_magazinePouch[1], -1.2f, 0.3f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Mag pouch Z", nullptr, &g_magazinePouch[2], -0.5f, 0.6f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Mag pouch grab radius", nullptr, &g_magazinePouchRadius, 0.03f, 0.4f, 0.01f, 2, "m"},
+    {kHolstersGroup, "Mag in pouch pitch", nullptr, &g_magazinePouchRot[0], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {kHolstersGroup, "Mag in pouch yaw", nullptr, &g_magazinePouchRot[1], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {kHolstersGroup, "Mag in pouch roll", nullptr, &g_magazinePouchRot[2], -180.0f, 180.0f, 5.0f, 0, "deg"},
+    {kHolstersGroup, "Mag taken from the pouch", nullptr, &g_magazinePouchGrab, 0.0f, 2.0f, 1.0f, 0, "", -1, nullptr,
+     nullptr, kRowBothModes, kPouchGrabChoices, 3},
+    {"Holster actions", "Stomach", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterStomach},
+    {"Holster actions", "Hips", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterHip},
+    {"Holster actions", "Chest", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterChest},
+    {"Holster actions", "Left shoulder", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterLeftShoulder},
+    {"Holster actions", "Right shoulder", nullptr, nullptr, 0, 0, 0, 0, "", kHolsterRightShoulder},
+    // Last, so the body-part rows (after the table, "Body: parts hidden") follow it.
+    {"Body", "Body right", nullptr, &g_bodyOffset[0], -1.0f, 1.0f, 0.005f, 3, "m"},
+    {"Body", "Body up", nullptr, &g_bodyOffset[1], -2.0f, 2.0f, 0.005f, 3, "m"},
+    {"Body", "Body forward", nullptr, &g_bodyOffset[2], -2.0f, 2.0f, 0.005f, 3, "m"},
+    {"Body", "Keep body upright (no tilt with the view)", &g_bodyUpright, nullptr, 0, 0, 0, 0, ""},
+    {"Body", "Keep body and gun steady on head turns", &g_stabilizeRig, nullptr, 0, 0, 0, 0, ""},
 };
 constexpr int kMenuCount = static_cast<int>(sizeof(kMenu) / sizeof(kMenu[0]));
 
@@ -2605,9 +2632,9 @@ bool GetBodyPartMenuInfo(int part, MenuSettingInfo* out)
         return false;
     int seen = g_bodyPartCountSeen.load(std::memory_order_relaxed);
     if (seen > 0)
-        snprintf(g_bodyPartGroup, sizeof(g_bodyPartGroup), "Weapon: body parts hidden (%d in this level)", seen);
+        snprintf(g_bodyPartGroup, sizeof(g_bodyPartGroup), "Body: parts hidden (%d in this level)", seen);
     else
-        snprintf(g_bodyPartGroup, sizeof(g_bodyPartGroup), "Weapon: body parts hidden (no body drawn yet)");
+        snprintf(g_bodyPartGroup, sizeof(g_bodyPartGroup), "Body: parts hidden (no body drawn yet)");
     // Names from the first rifle / pistol (2026-09-19); other levels may order the parts differently.
     const char* knownAs[] = {" (legs, 1st rifle)", " (arms, 1st rifle)", " (hands, 1st rifle)"};
     snprintf(out->labelBuffer, sizeof(out->labelBuffer), "Hide part %d%s%s", part + 1, part < 3 ? knownAs[part] : "",

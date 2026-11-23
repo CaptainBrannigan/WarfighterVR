@@ -107,10 +107,9 @@ void SetHeadPositionInvertHorizontal(bool value);
 // those 30Hz ticks, so several consecutive render frames see an identical,
 // frozen rotation before jumping all at once -- a staircase, perceived as
 // head-turn jitter. Interpolates the OUTPUT rotation between the last two
-// distinct ticks instead of snapping. Defaults OFF, same as every other
-// brand-new/not-yet-live-validated feature in this project.
+// distinct ticks instead of snapping. Always on (2026-11-23: its switch, which said "keep on", is gone -- the pair
+// publish's right eye needs it).
 bool GetRotationSmoothingEnabled();
-void SetRotationSmoothingEnabled(bool value);
 
 // How long (in milliseconds) SmoothCameraRotation spreads a detected tick's
 // rotation change over, i.e. roughly how many render frames the transition
@@ -302,8 +301,19 @@ struct ScopeSettings
     // Per weapon (ScopeNeedsMagnifier, 2026-11-17): the scope only while the game's flip magnifier is switched on
     // (hooks/weapon_identity.h GetEquippedOpticState), for red dots with a magnifier behind them.
     bool needsMagnifier;
+    // Per weapon (SightType, 2026-11-22): a red dot instead of the scope (hooks/scope_view.h RED DOT SIGHT), and the
+    // dot's size in view (RedDotSize, deg).
+    bool redDot;
+    float redDotSizeDeg;
 };
 ScopeSettings GetScopeSettings();
+// While a red dot sight is up, the laser's beam and dot are hidden (RedDotHidesLaser, default on): the laser still runs,
+// it's where the dot and the shots go.
+bool GetRedDotHidesLaser();
+// Per weapon (AimRayHidden, 2026-11-23): this gun's laser beam and dot hidden. Only the drawing: the laser keeps running
+// and the shots follow it from the shot line start (GetLaserBeamStartOffset), so with the start set at the sight the
+// gun aims with its sight alone.
+bool GetAimRayHidden();
 // Secondary grip offset (per weapon, SetWeaponProfile): where the off hand holds relative to the barrel line, metres
 // in the gun's frame (+ right, + up, + forward). The two-handed aim targets the off hand's point moved by it, so a hand
 // below the bore (a vertical foregrip) doesn't tilt the gun; forward (2026-11-21) moves that point along the barrel,
@@ -329,7 +339,7 @@ float GetUiLayoutScale(int screenWidth);
 float GetMenuScreenDepth();
 
 // Driving missions (game\MOHWD.exe, hooks/driving_camera_hook.cpp): which camera through UpdateMatrices gets head
-// look by hand -- 0 = auto (GetDrivingHeadLookAuto), 1.. = by call rate, busiest first (logged to mohwvr_drivingcamera.log). Session only, not saved.
+// look by hand -- 0 = auto (GetDrivingHeadLookAuto), 1.. = by call rate, busiest first (logged to mohwvr_drivingcamera.log). Always 0 since 2026-11-23 (the debug rows are gone).
 // DrivingHeadLookInvert flips the head rotation, in case the axis mapping is backwards.
 int GetDrivingCameraIndex();
 // End of the manual range (views ranked GetDrivingCameraIndex()..this get head look and stereo); 0 = only the "from"
@@ -380,9 +390,6 @@ void GetDrivingWheelPlacement(float* forward, float* down, float* right, float* 
 // (0 = not drawn). Looks only -- steering goes by the hand's angle around the centre. DrivingWheelRadius / Thickness /
 // Opacity.
 void GetDrivingWheelLook(float* radius, float* thickness, float* opacity);
-// Live debugging: this draw number of the final 2D pass is not drawn, to see which element it is. 0 = off.
-// DebugHideDraw.
-int GetDebugHideDraw();
 // Hides the game's screen-centre reticle (draws 2..7 of the frame's final backbuffer pass, gameplay only). Menus draw
 // into the same pass, so while it's on an in-game (pause) menu can lose the elements at those draw positions.
 // HideReticle, default on.
@@ -496,7 +503,7 @@ bool GetThumbTapBumpers();
 bool GetGamepadWithoutFocus();
 
 // Controller aim offset (sdk/motion_controller_aim.h ApplyControllerAimOffset), degrees in the controller's own frame:
-// + up, + right. Turns the shots and the aim-ray dot, not the gun (and so not the optic dot). ControllerAimUp /
+// + up, + right. Turns the shots and the aim-ray dot, not the gun. ControllerAimUp /
 // ControllerAimRight, default 0: the aim comes straight from the controller's rotation, this is for an edge case.
 void GetControllerAimOffsetDeg(float* up, float* right);
 
@@ -506,14 +513,11 @@ float GetAdsSwayScale();
 float GetSightZeroDistance();
 float GetSightDotSizeDeg();
 
-// Optic dot (openvr_direct/vr_overlay.cpp): fixed to the weapon hand like a sight on the gun -- at the hand's position,
-// raised by the zero (height, + up), moved by windage (+ right) and forward by OpticDistance, meters, all in the hand's
-// own frame. Zeroed by eye against where shots land. Ini OpticHeight / OpticWindageOffset / OpticDistance.
-bool GetOpticDotEnabled();
+// The optic zero, the gun's sight line (hooks/scope_view.h: the scopes and the red dot sight start from it): from the
+// weapon hand, height (+ up) and windage (+ right), meters in the hand's own frame. Ini OpticHeight / OpticWindageOffset.
+// (The optic dot drawn there was removed on 2026-11-22.)
 void GetOpticOffset(float* height, float* windage);
-float GetOpticDistance();
-// Dot colours: green when on, red when off (OpticDotGreen default off, RayDotGreen default on).
-bool GetOpticDotGreen();
+// The aim ray dot's colour: green when on, red when off (RayDotGreen, default on).
 bool GetRayDotGreen();
 // The laser (hooks/laser_raycast.h): the aim-ray dot sits where the shot line first hits (or at SightZeroDistance, the
 // max range, when nothing is hit), and a beam in the dot's colour runs from the hand to it. LaserBeam (on),
@@ -526,9 +530,9 @@ int GetLaserRaycastEveryFrames();
 // laser can't hit the gun). The raycast starts there; the drawn beam starts that far forward too. LaserStart, default
 // 0.15.
 float GetLaserStartMeters();
-// The drawn beam's start, beside the shot line (per weapon, purely visual -- a laser module mounted off the bore): metres
-// in the gun's frame, + right / + up, at LaserStart forward. The beam runs from there to the dot, which stays on the
-// shot line. LaserBeamStartRight / LaserBeamStartUp, default 0.
+// Where the shot line starts, beside the hand (per weapon): metres in the gun's frame, + right / + up. Purely the drawn
+// beam's start until 2026-11-22; since then it moves the laser's cast, its dot and the shots too (hooks/laser_raycast.cpp),
+// so set at the sight a gun held low still shoots over cover. LaserBeamStartRight / LaserBeamStartUp, default 0.
 void GetLaserBeamStartOffset(float* right, float* up);
 
 // Menu table for the SteamVR dashboard tab (openvr_direct/vr_overlay.cpp): every setting a player can adjust, in
@@ -564,7 +568,7 @@ void SetHolsterActionChoices(const std::vector<std::string>& actions);
 // (SetWeaponProfile).
 void GetWeaponGripRotationDeg(float out[3]);
 
-// WEAPON PROFILES (2026-10-15): the grip rotation, the optic dot's zero (height / windage / forward), the controller
+// WEAPON PROFILES (2026-10-15): the grip rotation, the optic zero (height / windage), the sight, the controller
 // aim offset, the secondary grip offset, the laser's start and the magazine's grab settings are per weapon (the grip
 // position was too, until 2026-11-09). Called with the equipped weapon's blueprint name (hooks/weapon_identity.h;
 // display = its short name for the menu), or nullptr when none is identified: the settings switch to that weapon's

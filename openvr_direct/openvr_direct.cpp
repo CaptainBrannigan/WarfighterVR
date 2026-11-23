@@ -1,4 +1,5 @@
 #include "openvr_direct.h"
+#include "../sdk/hotkeys.h"
 #include "openvr_types.h"
 #include "vr_input.h"
 #include "vr_overlay.h"
@@ -833,7 +834,7 @@ void SubmitThreadProc()
 
     for (;;)
     {
-        bool submitBurstKeyDown = (GetAsyncKeyState(VK_NUMPAD5) & 0x8000) != 0;
+        bool submitBurstKeyDown = ModKeyDown(VK_NUMPAD5);
         if (submitBurstKeyDown && !submitBurstKeyWasDown)
         {
             submitBurstRemaining = 300;
@@ -841,13 +842,13 @@ void SubmitThreadProc()
         }
         submitBurstKeyWasDown = submitBurstKeyDown;
 
-        bool perturbKeyDown = (GetAsyncKeyState(VK_NUMPAD7) & 0x8000) != 0;
+        bool perturbKeyDown = ModKeyDown(VK_NUMPAD7);
         bool perturbModeChanged = perturbKeyDown && !perturbKeyWasDown;
         if (perturbModeChanged)
             perturbMode = (perturbMode + 1) % 3;
         perturbKeyWasDown = perturbKeyDown;
 
-        bool stampFlipKeyDown = (GetAsyncKeyState(VK_NUMPAD6) & 0x8000) != 0;
+        bool stampFlipKeyDown = ModKeyDown(VK_NUMPAD6);
         if (stampFlipKeyDown && !stampFlipKeyWasDown)
         {
             stampFromRightSlot = !stampFromRightSlot;
@@ -856,7 +857,7 @@ void SubmitThreadProc()
         }
         stampFlipKeyWasDown = stampFlipKeyDown;
 
-        bool pairKeyDown = (GetAsyncKeyState(VK_NUMPAD3) & 0x8000) != 0;
+        bool pairKeyDown = ModKeyDown(VK_NUMPAD3);
         if (pairKeyDown && !pairKeyWasDown)
         {
             bool enabled = !g_pairPublishEnabled.load(std::memory_order_relaxed);

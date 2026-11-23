@@ -195,7 +195,10 @@ void LaserCaptureGameCamera(const float* gameTransform)
 
 void LaserOnCommit(const float* renderTransform)
 {
-    if (g_drivingExe || !renderTransform || (!GetSightDotEnabled() && !GetLaserBeamEnabled()) ||
+    // Whether or not it's drawn (2026-11-23): the laser is the shot line -- the shots start at its start and aim at its
+    // point, the red dot and the scopes' crosshair sit on it -- so hiding the beam and dot (globally, per gun, or for a
+    // red dot sight) mustn't send the shots back to the hand.
+    if (g_drivingExe || !renderTransform ||
         !GetWeaponDriveEnabled() || !IsPlayerAimActive() || // the soldier's gun only (not the robot's camera, menus)
         GetPlayerAimDriveWeight() < 0.5f) // nor while the gun is back in the game's animation (a scripted scene)
         return;
@@ -235,10 +238,23 @@ void LaserOnCommit(const float* renderTransform)
     forwardLocal.x = 0.0f;
     forwardLocal.y = 0.0f;
     forwardLocal.z = -1.0f;
+    // THE SHOT LINE STARTS AT THE LASER'S START (2026-11-22, the user: "wherever the dot aim is moved to we should also
+    // offset where our bullet ray starts by the same. It would negate the issue I was having before where the weapon
+    // was too close to the ground to aim"). The profile's laser start right / up (in the hand's frame, as the beam is
+    // drawn: openvr_direct/vr_overlay.cpp UpdateSightDot) moves the cast's origin, so the dot, and the shots, which start
+    // at GetLaserShotStart and aim at the dot, move with it: set at the sight, a gun held low shoots over cover.
+    float lineRight = 0.0f, lineUp = 0.0f;
+    GetLaserBeamStartOffset(&lineRight, &lineUp);
+    Vec3 lineLocal;
+    lineLocal.x = lineRight;
+    lineLocal.y = lineUp;
+    lineLocal.z = 0.0f;
+    const Vec3 lineShift =
+        QuatRotateVector(Quat{hand.orientationX, hand.orientationY, hand.orientationZ, hand.orientationW}, lineLocal);
     Vec3 handRelative;
-    handRelative.x = hand.positionX - headP[0];
-    handRelative.y = hand.positionY - headP[1];
-    handRelative.z = hand.positionZ - headP[2];
+    handRelative.x = hand.positionX + lineShift.x - headP[0];
+    handRelative.y = hand.positionY + lineShift.y - headP[1];
+    handRelative.z = hand.positionZ + lineShift.z - headP[2];
     Vec3 handInHead = QuatRotateVector(headInverse, handRelative);
     Vec3 dirInHead = QuatRotateVector(headInverse, QuatRotateVector(aim, forwardLocal));
     // The camera's rows line up with the head's axes AS THEY ARE: row 0 = the head's +x (right), row 1 = +y (up),

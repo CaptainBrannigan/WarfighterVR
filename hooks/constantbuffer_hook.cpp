@@ -1,4 +1,5 @@
 #include "constantbuffer_hook.h"
+#include "../sdk/hotkeys.h"
 #include "draw_trace_diag.h"
 #include "eye_matched_fov.h"
 
@@ -2001,7 +2002,7 @@ constexpr int kSingleBoneStepUpHotkey = VK_NUMPAD2;
 void CheckBoneHideHotkeys()
 {
     static bool captureKeyWasDown = false;
-    bool captureKeyDown = (GetAsyncKeyState(kPlayerBoneCaptureHotkey) & 0x8000) != 0;
+    bool captureKeyDown = ModKeyDown(kPlayerBoneCaptureHotkey);
     if (captureKeyDown && !captureKeyWasDown)
     {
         g_captureRequested.store(true, std::memory_order_relaxed);
@@ -2030,7 +2031,7 @@ void CheckBoneHideHotkeys()
     captureKeyWasDown = captureKeyDown;
 
     static bool toggleKeyWasDown = false;
-    bool toggleKeyDown = (GetAsyncKeyState(kBoneHideToggleHotkey) & 0x8000) != 0;
+    bool toggleKeyDown = ModKeyDown(kBoneHideToggleHotkey);
     if (toggleKeyDown && !toggleKeyWasDown)
     {
         bool newValue = !GetBoneHideEnabled();
@@ -2041,7 +2042,7 @@ void CheckBoneHideHotkeys()
     toggleKeyWasDown = toggleKeyDown;
 
     static bool startDownKeyWasDown = false;
-    bool startDownKeyDown = (GetAsyncKeyState(kBoneHideRangeStartDownHotkey) & 0x8000) != 0;
+    bool startDownKeyDown = ModKeyDown(kBoneHideRangeStartDownHotkey);
     if (startDownKeyDown && !startDownKeyWasDown)
     {
         float newValue = GetBoneHideRangeStart() - 1.0f;
@@ -2052,7 +2053,7 @@ void CheckBoneHideHotkeys()
     startDownKeyWasDown = startDownKeyDown;
 
     static bool startUpKeyWasDown = false;
-    bool startUpKeyDown = (GetAsyncKeyState(kBoneHideRangeStartUpHotkey) & 0x8000) != 0;
+    bool startUpKeyDown = ModKeyDown(kBoneHideRangeStartUpHotkey);
     if (startUpKeyDown && !startUpKeyWasDown)
     {
         float newValue = GetBoneHideRangeStart() + 1.0f;
@@ -2063,7 +2064,7 @@ void CheckBoneHideHotkeys()
     startUpKeyWasDown = startUpKeyDown;
 
     static bool endDownKeyWasDown = false;
-    bool endDownKeyDown = (GetAsyncKeyState(kBoneHideRangeEndDownHotkey) & 0x8000) != 0;
+    bool endDownKeyDown = ModKeyDown(kBoneHideRangeEndDownHotkey);
     if (endDownKeyDown && !endDownKeyWasDown)
     {
         float newValue = GetBoneHideRangeEnd() - 1.0f;
@@ -2074,7 +2075,7 @@ void CheckBoneHideHotkeys()
     endDownKeyWasDown = endDownKeyDown;
 
     static bool endUpKeyWasDown = false;
-    bool endUpKeyDown = (GetAsyncKeyState(kBoneHideRangeEndUpHotkey) & 0x8000) != 0;
+    bool endUpKeyDown = ModKeyDown(kBoneHideRangeEndUpHotkey);
     if (endUpKeyDown && !endUpKeyWasDown)
     {
         float newValue = GetBoneHideRangeEnd() + 1.0f;
@@ -2085,7 +2086,7 @@ void CheckBoneHideHotkeys()
     endUpKeyWasDown = endUpKeyDown;
 
     static bool distanceDownKeyWasDown = false;
-    bool distanceDownKeyDown = (GetAsyncKeyState(kPlayerBoneDistanceDownHotkey) & 0x8000) != 0;
+    bool distanceDownKeyDown = ModKeyDown(kPlayerBoneDistanceDownHotkey);
     if (distanceDownKeyDown && !distanceDownKeyWasDown)
     {
         float newValue = GetPlayerBoneDistanceThreshold() - kPlayerBoneDistanceStep;
@@ -2098,7 +2099,7 @@ void CheckBoneHideHotkeys()
     distanceDownKeyWasDown = distanceDownKeyDown;
 
     static bool distanceUpKeyWasDown = false;
-    bool distanceUpKeyDown = (GetAsyncKeyState(kPlayerBoneDistanceUpHotkey) & 0x8000) != 0;
+    bool distanceUpKeyDown = ModKeyDown(kPlayerBoneDistanceUpHotkey);
     if (distanceUpKeyDown && !distanceUpKeyWasDown)
     {
         float newValue = GetPlayerBoneDistanceThreshold() + kPlayerBoneDistanceStep;
@@ -2109,7 +2110,7 @@ void CheckBoneHideHotkeys()
     distanceUpKeyWasDown = distanceUpKeyDown;
 
     static bool cycleKeyWasDown = false;
-    bool cycleKeyDown = (GetAsyncKeyState(kEntityCandidateCycleHotkey) & 0x8000) != 0;
+    bool cycleKeyDown = ModKeyDown(kEntityCandidateCycleHotkey);
     if (cycleKeyDown && !cycleKeyWasDown)
     {
         std::lock_guard<std::mutex> lock(g_entityCandidatesMutex);
@@ -2134,7 +2135,7 @@ void CheckBoneHideHotkeys()
     cycleKeyWasDown = cycleKeyDown;
 
     static bool boneStepDownKeyWasDown = false;
-    bool boneStepDownKeyDown = (GetAsyncKeyState(kSingleBoneStepDownHotkey) & 0x8000) != 0;
+    bool boneStepDownKeyDown = ModKeyDown(kSingleBoneStepDownHotkey);
     if (boneStepDownKeyDown && !boneStepDownKeyWasDown)
     {
         float newValue = GetBoneHideRangeStart() - 1.0f;
@@ -2146,7 +2147,7 @@ void CheckBoneHideHotkeys()
     boneStepDownKeyWasDown = boneStepDownKeyDown;
 
     static bool boneStepUpKeyWasDown = false;
-    bool boneStepUpKeyDown = (GetAsyncKeyState(kSingleBoneStepUpHotkey) & 0x8000) != 0;
+    bool boneStepUpKeyDown = ModKeyDown(kSingleBoneStepUpHotkey);
     if (boneStepUpKeyDown && !boneStepUpKeyWasDown)
     {
         float newValue = GetBoneHideRangeStart() + 1.0f;

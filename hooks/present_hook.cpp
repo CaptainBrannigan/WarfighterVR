@@ -1,4 +1,5 @@
 #include "present_hook.h"
+#include "../sdk/hotkeys.h"
 #include "boat_seat.h"
 
 #include "../third_party/minhook/include/MinHook.h"
@@ -226,6 +227,7 @@ struct LensResources
     ID3D11PixelShader* ps = nullptr;
     ID3D11Buffer* constants = nullptr;
     ID3D11SamplerState* sampler = nullptr;
+    ID3D11BlendState* blend = nullptr; // alpha blending: the red dot's soft edge (the picture writes alpha 1)
     ID3D11ShaderResourceView* source = nullptr;
     ID3D11Texture2D* sourceFor = nullptr;
     bool failed = false;
@@ -242,6 +244,8 @@ void ReleaseLensResources()
         g_lens.constants->Release();
     if (g_lens.sampler)
         g_lens.sampler->Release();
+    if (g_lens.blend)
+        g_lens.blend->Release();
     if (g_lens.source)
         g_lens.source->Release();
     g_lens = LensResources{};
@@ -261,11 +265,21 @@ bool EnsureLensResources(ID3D11Device* device, ID3D11Texture2D* frame)
         sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
         sd.MaxLOD = D3D11_FLOAT32_MAX;
+        D3D11_BLEND_DESC bd{};
+        bd.RenderTarget[0].BlendEnable = TRUE;
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
         const bool ok =
             SUCCEEDED(device->CreateVertexShader(g_scopeLensVs, sizeof(g_scopeLensVs), nullptr, &g_lens.vs)) &&
             SUCCEEDED(device->CreatePixelShader(g_scopeLensPs, sizeof(g_scopeLensPs), nullptr, &g_lens.ps)) &&
             SUCCEEDED(device->CreateBuffer(&cb, nullptr, &g_lens.constants)) &&
-            SUCCEEDED(device->CreateSamplerState(&sd, &g_lens.sampler));
+            SUCCEEDED(device->CreateSamplerState(&sd, &g_lens.sampler)) &&
+            SUCCEEDED(device->CreateBlendState(&bd, &g_lens.blend));
         g_lens.failed = !ok;
         MOHW_LOG(kLogFile, "scope lens picture: shaders and states %s", ok ? "made" : "FAILED -- no lens picture");
     }
@@ -370,7 +384,7 @@ void DrawLensPictures(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11
     context->PSSetSamplers(0, 1, &g_lens.sampler);
     context->PSSetConstantBuffers(0, 1, &g_lens.constants);
     context->RSSetState(nullptr);
-    context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFFu);
+    context->OMSetBlendState(g_lens.blend, nullptr, 0xFFFFFFFFu);
     context->OMSetDepthStencilState(nullptr, 0);
     for (int eye = 0; eye < 2; ++eye)
     {
@@ -604,7 +618,7 @@ void CheckLogMarkerHotkey()
 {
     static bool wasDown = false;
     static std::atomic<int> counter{0};
-    bool down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    bool down = ModKeyDown(VK_F11);
     if (down && !wasDown)
     {
         int n = ++counter;

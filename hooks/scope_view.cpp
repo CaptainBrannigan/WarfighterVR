@@ -195,7 +195,81 @@ void UpdateLensPictures(const ScopeSettings& s, const Quat& headQ, const Vec3& h
     g_lensMs = GetTickCount64();
 }
 
+// RED DOT SIGHT (2026-11-22, scope_view.h): each eye gets a red dot where IT sees the impact point -- the laser's point
+// at its true direction from that eye, as the holographic crosshair (the sight line's vanishing point without the laser)
+// -- drawn only inside the lens disc as that eye sees it: the lens is the sight's window. No picture, no magnification.
+// Kept in g_lens with reticle.w = 2 (hooks/shaders/scope_lens.hlsl draws the dot) and reticle.z = the dot's radius.
+std::atomic<unsigned long long> g_redDotMs{0};
+
+void UpdateRedDots(const ScopeSettings& s, const Quat& headQ, const Vec3& headP, float scale, const Vec3& lensPos,
+                   const Vec3& forward, const float eyeTan[2][4], const float centre[16])
+{
+    ScopeLensPicture dots[2];
+    const Quat inv = QuatConjugate(headQ);
+    const Vec3 dirInEye = QuatRotateVector(inv, forward);
+    if (dirInEye.z < -0.2f)
+    {
+        float dotX[2], dotY[2];
+        dotX[0] = dotX[1] = dirInEye.x / -dirInEye.z;
+        dotY[0] = dotY[1] = dirInEye.y / -dirInEye.z;
+        float aim[3];
+        if (GetLaserAimPoint(aim))
+        {
+            const float d[3] = {aim[0] - centre[12], aim[1] - centre[13], aim[2] - centre[14]};
+            const float right = d[0] * centre[0] + d[1] * centre[1] + d[2] * centre[2];
+            const float up = d[0] * centre[4] + d[1] * centre[5] + d[2] * centre[6];
+            const float back = d[0] * centre[8] + d[1] * centre[9] + d[2] * centre[10];
+            if (back < -0.05f)
+                for (int e = 0; e < 2; ++e)
+                {
+                    dotX[e] = (right - GetEyeOffsetAlongRow0(e == 1)) / -back;
+                    dotY[e] = up / -back;
+                }
+        }
+        float size = s.redDotSizeDeg;
+        if (!(size > 0.0f))
+            size = 0.15f;
+        const float dotTan = std::tan(size * 0.5f * 3.14159265f / 180.0f);
+        for (int e = 0; e < 2; ++e)
+        {
+            const Vec3 eyePos = VecAdd(headP, QuatRotateVector(headQ, V(GetEyeOffsetAlongRow0(e == 1) / scale, 0.0f, 0.0f)));
+            const Vec3 p = QuatRotateVector(inv, VecSub(lensPos, eyePos));
+            const float dist = Length(p);
+            if (p.z > -0.05f || dist < 0.05f)
+                continue;
+            const float lx = p.x / -p.z, ly = p.y / -p.z, lr = s.lensRadius / dist;
+            const float tL = eyeTan[e][0], tR = eyeTan[e][1], tU = eyeTan[e][2], tD = eyeTan[e][3];
+            if (!(tR - tL > 0.05f && tU - tD > 0.05f))
+                continue;
+            // Only when the dot is in the window (with its own radius of slack): the shader clips it to the lens anyway.
+            const float ox = (dotX[e] - lx) / lr, oy = (dotY[e] - ly) / lr, slack = 1.0f + dotTan / lr;
+            if (ox * ox + oy * oy > slack * slack)
+                continue;
+            ScopeLensPicture& dot = dots[e];
+            dot.circle[0] = (lx - tL) / (tR - tL);
+            dot.circle[1] = (tU - ly) / (tU - tD);
+            dot.circle[2] = lr / (tR - tL);
+            dot.circle[3] = (tR - tL) / (tU - tD);
+            dot.reticle[0] = (dotX[e] - tL) / (tR - tL);
+            dot.reticle[1] = (tU - dotY[e]) / (tU - tD);
+            dot.reticle[2] = dotTan / (tR - tL);
+            dot.reticle[3] = 2.0f;
+            dot.on = true;
+        }
+    }
+    g_redDotMs.store(GetTickCount64(), std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_maskMutex);
+    g_lens[0] = dots[0];
+    g_lens[1] = dots[1];
+    g_lensMs = GetTickCount64();
+}
+
 } // namespace
+
+bool IsRedDotSightUp()
+{
+    return GetTickCount64() - g_redDotMs.load(std::memory_order_relaxed) <= kRecentMs;
+}
 
 bool GetScopeLensPictures(ScopeLensPicture out[2])
 {
@@ -218,6 +292,10 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], ScopeEye
     const bool magnifierOff = s.needsMagnifier && !(magnifierKnown && magnifierOn);
     if (magnifierOff)
         magnification = 0.0f;
+    // A red dot sight (the profile's SightType, 2026-11-22): the dot, unless the game's magnifier turns it into the scope
+    // ("Scope shows: only with the game's magnifier on", with a magnification).
+    const bool magnified = s.needsMagnifier && magnifierKnown && magnifierOn && s.magnification >= 1.0f;
+    const bool redDot = s.redDot && !magnified;
 
     static int lastEye = -2;
     static unsigned long long nextLogMs = 0;
@@ -229,12 +307,13 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], ScopeEye
         return true;
     };
 
-    if ((!s.enabled && !s.lensPicture) || magnification < 1.0f || !GetWeaponDriveEnabled() || !IsPlayerAimActive() ||
-        GetPlayerAimDriveWeight() < 1.0f)
+    if ((!redDot && ((!s.enabled && !s.lensPicture) || magnification < 1.0f)) || !GetWeaponDriveEnabled() ||
+        !IsPlayerAimActive() || GetPlayerAimDriveWeight() < 1.0f)
     {
         if (lastEye != -1)
             MOHW_LOG(kLogFile, "scope off (%s)",
-                     (!s.enabled && !s.lensPicture) ? "settings off"
+                     redDot                          ? "red dot: gun not on the controller"
+                     : (!s.enabled && !s.lensPicture) ? "settings off"
                      : magnifierOff                ? "the game's magnifier is off"
                      : magnification < 1.0f        ? "this gun has no scope magnification"
                                                    : "gun not on the controller");
@@ -262,6 +341,19 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], ScopeEye
     GetOpticOffset(&height, &windage);
     const Vec3 origin = VecAdd(V(hand.positionX, hand.positionY, hand.positionZ), QuatRotateVector(handQ, V(windage, height, 0.0f)));
     const Vec3 forward = Normalized(QuatRotateVector(handQ, V(0.0f, 0.0f, -1.0f)));
+
+    if (redDot)
+    {
+        if (lastEye != -3)
+            MOHW_LOG(kLogFile, "RED DOT SIGHT (lens %.1f cm right / %.1f cm up of the optic zero, %.1f cm ahead of the "
+                     "hand, radius %.1f cm; dot %.2f deg)", s.lensRight * 100.0f, s.lensUp * 100.0f,
+                     s.lensForward * 100.0f, s.lensRadius * 100.0f, s.redDotSizeDeg);
+        lastEye = -3;
+        ClearScope();
+        const Vec3 window = VecAdd(origin, QuatRotateVector(handQ, V(s.lensRight, s.lensUp, -s.lensForward)));
+        UpdateRedDots(s, headQ, headP, scale, window, forward, eyeTan, centre);
+        return false;
+    }
 
     // Which eye is behind it: the one nearest the line, within the eye box, behind the hand. HYSTERESIS (2026-11-18, the
     // user: standing still "caused the camera to flicker in and out until I moved"): the eye already behind the scope

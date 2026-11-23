@@ -1,4 +1,5 @@
 #include "fov_scale_hook.h"
+#include "../sdk/hotkeys.h"
 
 #include "../third_party/minhook/include/MinHook.h"
 #include "../sdk/logging.h"
@@ -674,10 +675,8 @@ bool InstallFovScaleHook()
 
     MOHW_LOG(kLogFile,
               "FovScale hook installed @ %p -- FOV + head-roll (%s, F2 to toggle) + alternating-eye offset "
-              "(always on) + rotation smoothing (%s, HOME to toggle) + ordering probe, "
-              "yaw/pitch untouched",
-              g_hookAddress, GetHeadRollEnabled() ? "ENABLED" : "disabled",
-              GetRotationSmoothingEnabled() ? "ENABLED" : "disabled");
+              "(always on) + rotation smoothing (always on) + ordering probe, yaw/pitch untouched",
+              g_hookAddress, GetHeadRollEnabled() ? "ENABLED" : "disabled");
     return true;
 }
 
@@ -702,11 +701,8 @@ constexpr float kFovScaleMin = 1.0f; // below 1x the game's own native FOV, no r
 // aiming_controller_hook.cpp's own hotkey comments).
 constexpr int kHeadRollToggleHotkey = VK_F2;
 constexpr int kHeadRollInvertHotkey = VK_F12;
-// F1-F12 all claimed elsewhere, VK_INSERT claimed by alternating_eye.cpp's
-// own toggle -- VK_HOME is unused and, like VK_INSERT, very unlikely to
-// double as a real gameplay bind for a first-person shooter.
-constexpr int kRotationSmoothingToggleHotkey = VK_HOME;
-// PageUp/PageDown -- both unused elsewhere, same reasoning as VK_HOME.
+// (VK_HOME toggled rotation smoothing until 2026-11-23; it's always on now.)
+// PageUp/PageDown -- both unused elsewhere, unlikely to be gameplay binds.
 constexpr int kRotationSmoothingWindowUpHotkey = VK_PRIOR;   // PageUp
 constexpr int kRotationSmoothingWindowDownHotkey = VK_NEXT;  // PageDown
 constexpr float kRotationSmoothingWindowStepMs = 2.0f;
@@ -723,7 +719,7 @@ void CheckFovScaleHotkeys()
     const bool trueFrustumMode = GetHmdView(&hv) && hv.viewMode == mohwvr::ipc::kViewModeTrueFrustum;
 
     static bool downKeyWasDown = false;
-    bool downKeyDown = (GetAsyncKeyState(kFovScaleDownHotkey) & 0x8000) != 0;
+    bool downKeyDown = ModKeyDown(kFovScaleDownHotkey);
     if (downKeyDown && !downKeyWasDown)
     {
         if (trueFrustumMode)
@@ -746,7 +742,7 @@ void CheckFovScaleHotkeys()
     downKeyWasDown = downKeyDown;
 
     static bool upKeyWasDown = false;
-    bool upKeyDown = (GetAsyncKeyState(kFovScaleUpHotkey) & 0x8000) != 0;
+    bool upKeyDown = ModKeyDown(kFovScaleUpHotkey);
     if (upKeyDown && !upKeyWasDown)
     {
         if (trueFrustumMode)
@@ -767,7 +763,7 @@ void CheckFovScaleHotkeys()
     upKeyWasDown = upKeyDown;
 
     static bool rollToggleKeyWasDown = false;
-    bool rollToggleKeyDown = (GetAsyncKeyState(kHeadRollToggleHotkey) & 0x8000) != 0;
+    bool rollToggleKeyDown = ModKeyDown(kHeadRollToggleHotkey);
     if (rollToggleKeyDown && !rollToggleKeyWasDown)
     {
         bool newValue = !GetHeadRollEnabled();
@@ -778,7 +774,7 @@ void CheckFovScaleHotkeys()
     rollToggleKeyWasDown = rollToggleKeyDown;
 
     static bool rollInvertKeyWasDown = false;
-    bool rollInvertKeyDown = (GetAsyncKeyState(kHeadRollInvertHotkey) & 0x8000) != 0;
+    bool rollInvertKeyDown = ModKeyDown(kHeadRollInvertHotkey);
     if (rollInvertKeyDown && !rollInvertKeyWasDown)
     {
         bool newValue = !GetHeadRollInvert();
@@ -788,19 +784,9 @@ void CheckFovScaleHotkeys()
     }
     rollInvertKeyWasDown = rollInvertKeyDown;
 
-    static bool smoothingToggleKeyWasDown = false;
-    bool smoothingToggleKeyDown = (GetAsyncKeyState(kRotationSmoothingToggleHotkey) & 0x8000) != 0;
-    if (smoothingToggleKeyDown && !smoothingToggleKeyWasDown)
-    {
-        bool newValue = !GetRotationSmoothingEnabled();
-        SetRotationSmoothingEnabled(newValue);
-        MOHW_LOG(kLogFile, "HOME pressed -- rotation smoothing now %s (saved to mohwvr_settings.ini)",
-                  newValue ? "ENABLED" : "disabled");
-    }
-    smoothingToggleKeyWasDown = smoothingToggleKeyDown;
 
     static bool windowUpKeyWasDown = false;
-    bool windowUpKeyDown = (GetAsyncKeyState(kRotationSmoothingWindowUpHotkey) & 0x8000) != 0;
+    bool windowUpKeyDown = ModKeyDown(kRotationSmoothingWindowUpHotkey);
     if (windowUpKeyDown && !windowUpKeyWasDown)
     {
         float newWindow = GetRotationSmoothingWindowMs() + kRotationSmoothingWindowStepMs;
@@ -817,7 +803,7 @@ void CheckFovScaleHotkeys()
     windowUpKeyWasDown = windowUpKeyDown;
 
     static bool windowDownKeyWasDown = false;
-    bool windowDownKeyDown = (GetAsyncKeyState(kRotationSmoothingWindowDownHotkey) & 0x8000) != 0;
+    bool windowDownKeyDown = ModKeyDown(kRotationSmoothingWindowDownHotkey);
     if (windowDownKeyDown && !windowDownKeyWasDown)
     {
         float newWindow = GetRotationSmoothingWindowMs() - kRotationSmoothingWindowStepMs;

@@ -53,9 +53,9 @@ struct SocketDebugLine
 // Render thread, every frame while the view is on, and once to clear it.
 void UpdateSocketDebug(const SocketDebugLine lines[kSocketDebugSlots], const float headPos[3]);
 
-// Submit thread, every frame: places the optic dot (the weapon hand's forward turned by the optic zero, at
-// OpticDistance) and the aim ray dot (straight along it, at SightZeroDistance), facing the head, all tracking space;
-// or hides them (visible false, or each dot's own setting off).
+// Submit thread, every frame: places the aim ray dot (on the shot line where the laser hits, else at SightZeroDistance)
+// and the laser beam, facing the head, all tracking space; or hides them (visible false, their settings off, or a red
+// dot sight up).
 void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientation, const float headPos[3]);
 
 // Submit thread, every input update in the driving missions: the steering wheel (openvr_direct/vr_steering.cpp) -- a

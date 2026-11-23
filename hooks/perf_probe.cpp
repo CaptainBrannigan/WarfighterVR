@@ -14,9 +14,11 @@ constexpr double kDetailPeriodMs = 1000.0;
 constexpr double kQuietPeriodMs = 10000.0;
 
 const char* const kSlotNames[kPerfSlotCount] = {"batches", "eyes", "commit", "present", "scope", "pair",
-                                                "vrinput", "submit", "shown", "late", "dropped"};
+                                                "vrinput", "submit", "shown", "late", "dropped", "world"};
 // Counted, not timed: printed as the count alone.
-const bool kCountOnly[kPerfSlotCount] = {false, false, false, false, false, false, false, false, true, true, true};
+const bool kCountOnly[kPerfSlotCount] = {false, false, false, false, false, false, false, false, true, true, true, true};
+// Counted, and printed per frame.
+const bool kPerFrame[kPerfSlotCount] = {false, false, false, false, false, false, false, false, false, false, false, true};
 
 std::atomic<long long> g_ticks[kPerfSlotCount];
 std::atomic<long> g_calls[kPerfSlotCount];
@@ -91,7 +93,10 @@ void PerfOnPresent()
     {
         const long long ticks = g_ticks[s].exchange(0, std::memory_order_relaxed);
         const long calls = g_calls[s].exchange(0, std::memory_order_relaxed);
-        if (kCountOnly[s])
+        if (kPerFrame[s])
+            used += sprintf_s(slots + used, sizeof(slots) - used, "%s%s %.0f/frame", s ? ", " : "", kSlotNames[s],
+                              static_cast<double>(calls) / frames);
+        else if (kCountOnly[s])
             used += sprintf_s(slots + used, sizeof(slots) - used, "%s%s %ld", s ? ", " : "", kSlotNames[s], calls);
         else
             used += sprintf_s(slots + used, sizeof(slots) - used, "%s%s %.2f (%ld)", s ? ", " : "", kSlotNames[s],

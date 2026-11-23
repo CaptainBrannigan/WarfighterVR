@@ -1,5 +1,6 @@
 #pragma once
-// Built-in default settings (last taken 2026-11-22): the author's own mohwvr_settings.ini at the time -- every setting
+// Built-in default settings (last taken 2026-11-22; the OBR 7.62's profile again on 2026-11-23, its shot line starting at
+// its optic, with its aim ray hidden): the author's own mohwvr_settings.ini at the time -- every setting
 // and the weapon profiles tuned so far (not every weapon in the game has one yet: the campaign hasn't been played all
 // the way through). Two differences from that ini: no grip has roll (the user, 2026-11-22: "no grip should have roll
 // unless a user specifies"; keep it so when this is taken again), and the UI layout size is 1, automatic by resolution
@@ -18,7 +19,6 @@ HeadAimInvertPitch=1
 HeadAimClampPitch=1
 HeadRollEnabled=1
 HeadRollInvert=0
-RotationSmoothingEnabled=1
 RotationSmoothingWindowMs=34.0000
 VrTurnSpeed=2.0000
 VrStickFullDeflection=0.9000
@@ -83,7 +83,6 @@ SequenceZodiacWheelTilt=10
 SequenceZodiacWheelRadius=0.10
 SequenceZodiacWheelThickness=0.030
 SequenceZodiacWheelOpacity=0.15
-DebugHideDraw=0
 HudIpdScale=0.2000
 HudDepth=0.1000
 HudOffsetX=0.0000
@@ -175,6 +174,10 @@ ScopeLensUp=0.0000
 ScopeLensForward=0.0600
 ScopeLensRadius=0.0180
 ScopeNeedsMagnifier=0
+SightType=0
+AimRayHidden=0
+RedDotHidesLaser=1
+RedDotSize=0.150
 MagazinePlatform0=0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,1.0000,0.0600,0.0350,0.0000,22.0000,0.0120,1.0000
 MagazinePlatform1=0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0100,0.0350,0.0000,2.0000,0.0100,0.0000
 MagazinePlatform2=0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0700,0.0350,0.0000,20.0000,0.0150,1.0000
@@ -203,11 +206,8 @@ ThumbTapBumpers=1
 GamepadWithoutFocus=0
 SightZeroDistance=1000.0000
 SightDotSize=0.1500
-OpticDotEnabled=0
 OpticHeight=0.2060
 OpticWindageOffset=-0.0260
-OpticDistance=0.0400
-OpticDotGreen=0
 RayDotGreen=0
 LaserBeam=1
 LaserBeamOpacity=0.35
@@ -228,7 +228,7 @@ WeaponProfile2=MOHW/Weapons/ASSAULT/SUCHKA/SUCHKA|0.0000|0.0000|0.0000|0.2060|-0
 WeaponProfile2=MOHW/Weapons/LMG/PKP/PKP|0.0000|0.0000|0.0000|0.2050|-0.0260|0.0400|0.0000|0.0000|-0.0500|0.0000|0.7500|0.0000|0.0000|0.0000|-0.0600|0.0000|0.0800|0.1000|0.0800|0.0000|0.2000|0.0000|0.2500|0.0600|0.0200|-1.0000|0.0000|0.0000|0.0000|0.0600|0.0180|0.0000|0.0000
 WeaponProfile2=MOHW/Weapons/PISTOL/HK45C/spec/HK45C__SP|0.0000|0.0000|0.0000|0.2060|-0.0260|0.0400|0.0000|0.0000|0.0000|0.0000|0.1500|0.0000|0.0000|0.0000|-0.0600|0.0000|0.0800|0.1000|0.0800|0.0000|0.2000|0.0000|0.2500|0.0600|0.0200|-1.0000|0.0000|0.0000|0.0000|0.0600|0.0180|0.0000|0.0000
 WeaponProfile2=MOHW/Weapons/SMG/MP7/MP7|0.0000|0.0000|0.0000|0.2060|-0.0260|0.0400|0.0000|0.0000|-0.0100|0.0600|0.1500|0.0000|0.0000|0.0000|-0.0600|0.0000|0.0800|0.1000|0.0800|0.0000|0.2000|0.0000|0.2500|0.0600|0.0200|-1.0000|0.0000|0.0000|0.0000|0.0600|0.0180|0.0000|0.0000
-WeaponProfile2=MOHW/Weapons/SNIPER/OBR_762/OBR_762|0.0000|0.0000|0.0000|0.2060|-0.0260|0.0400|0.0000|0.0000|0.0000|0.0000|0.1500|0.0000|0.0000|0.0000|-0.0600|0.0000|0.0800|0.1000|0.0800|0.0000|0.2000|0.0000|0.2500|0.0600|0.0200|-1.0000|4.5000|-0.0600|-0.0200|0.0600|0.0250|0.0000|0.0000
+WeaponProfile2=MOHW/Weapons/SNIPER/OBR_762/OBR_762|0.0000|0.0000|0.0000|0.2060|-0.0260|0.0400|0.0000|0.0000|0.0000|0.0000|0.1500|-0.0800|0.2000|0.0000|-0.0600|0.0000|0.0800|0.1000|0.0800|0.0000|0.2000|0.0000|0.2500|0.0600|0.0200|-1.0000|5.5000|-0.0600|-0.0200|0.0600|0.0250|0.0000|0.0000|0.0000|1.0000
 WeaponProfile2=MOHW/Weapons/SNIPER/TAC300/TAC300|0.0000|0.0000|0.0000|0.2060|-0.0260|0.0400|0.0000|0.0000|-0.0250|0.0000|0.1500|0.0000|0.0000|0.0000|-0.0600|0.0000|0.0800|0.1000|0.0800|0.0000|0.2000|0.0000|0.2500|0.0600|0.0200|-1.0000|4.5000|0.0130|-0.0740|0.0500|0.0180|0.0000|0.0000
 )MOHWVR";
 

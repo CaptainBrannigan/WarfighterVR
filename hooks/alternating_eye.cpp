@@ -1,4 +1,5 @@
 #include "alternating_eye.h"
+#include "../sdk/hotkeys.h"
 
 #include "../sdk/logging.h"
 #include "../sdk/settings.h"
@@ -150,7 +151,7 @@ void CheckAlternatingEyeHotkeys()
     constexpr float kIpdScaleMax = 1.5f;
 
     static bool ipdDownWasDown = false;
-    bool ipdDownDown = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
+    bool ipdDownDown = ModKeyDown(VK_F7);
     if (ipdDownDown && !ipdDownWasDown)
     {
         float newScale = GetIpdScale() - kIpdScaleStep;
@@ -162,7 +163,7 @@ void CheckAlternatingEyeHotkeys()
     ipdDownWasDown = ipdDownDown;
 
     static bool ipdUpWasDown = false;
-    bool ipdUpDown = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+    bool ipdUpDown = ModKeyDown(VK_F8);
     if (ipdUpDown && !ipdUpWasDown)
     {
         float newScale = GetIpdScale() + kIpdScaleStep;
@@ -177,7 +178,7 @@ void CheckAlternatingEyeHotkeys()
     // comment. Caps Lock is a toggle key itself, but GetAsyncKeyState's high bit still reflects physical down/up
     // state fine for edge detection, and it's essentially never a real gameplay bind in an FPS.
     static bool capsWasDown = false;
-    bool capsDown = (GetAsyncKeyState(VK_CAPITAL) & 0x8000) != 0;
+    bool capsDown = ModKeyDown(VK_CAPITAL);
     if (capsDown && !capsWasDown)
     {
         bool newValue = !g_stalenessIsolationTestActive.load(std::memory_order_relaxed);

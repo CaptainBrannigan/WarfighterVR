@@ -1,4 +1,5 @@
 #include "companion_bridge.h"
+#include "../sdk/hotkeys.h"
 
 #include "../shared/ipc_protocol.h"
 #include "../sdk/logging.h"
@@ -108,7 +109,7 @@ void CheckHeadPoseStalenessBurstHotkey()
 {
     static bool wasDown = false;
     constexpr int kBurstCount = 300; // ~4-5 real seconds at the confirmed ~62-66Hz call rate
-    bool down = (GetAsyncKeyState(VK_NUMPAD5) & 0x8000) != 0;
+    bool down = ModKeyDown(VK_NUMPAD5);
     if (down && !wasDown)
     {
         g_verboseLogRemaining.store(kBurstCount, std::memory_order_relaxed);

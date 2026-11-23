@@ -1,4 +1,5 @@
 #include "render_pose_stamp.h"
+#include "../sdk/hotkeys.h"
 
 #include "aiming_controller_hook.h"
 #include "alternating_eye.h"
@@ -293,7 +294,7 @@ bool GetPendingRenderPoseStamp(bool rightEye, float outQuat[4], float outPos[3],
 void CheckRenderPoseStampDebugHotkey()
 {
     static bool wasDown = false;
-    bool down = (GetAsyncKeyState(VK_NUMPAD4) & 0x8000) != 0;
+    bool down = ModKeyDown(VK_NUMPAD4);
     if (down && !wasDown)
     {
         bool newValue = !g_stampDebugEnabled.load(std::memory_order_relaxed);

@@ -12,6 +12,7 @@
 #include "driving_camera_hook.h"
 #include "ui_pass.h"
 #include "native_stereo.h"
+#include "perf_probe.h"
 #include "../sdk/mohw_offsets.h"
 #include "../sdk/d3d_util.h"
 
@@ -81,6 +82,28 @@ DWORD g_traceThread = 0;
 // same as the rest of this file (the game's real rendering happens on one D3D11 immediate context).
 bool g_curTargetIsBackbuffer = false;
 int g_backbufferDrawCount = 0;
+
+// WORLD DRAWS (2026-11-22, the user: "Is there not a way to detect a lack of 3d objects ... We need better 2d
+// identification than frames"). The world's geometry goes into the deferred G-buffer, bound as 4 render targets at once
+// (3 for a lighter pass). Traced frames: every 3D one drew 132-822 times into it (single view 132-218, two-view
+// 225-822, 3D cutscenes with the soldier's aim running included), the one movie/menu frame on record 0: it draws only
+// into the backbuffer. Unlike the camera-rebuild rate this doesn't scale with the frame rate. Render thread counts.
+constexpr int kMinWorldDrawsPerFrame = 40;
+// A frame counts as the world for this long after one that drew it: the backbuffer is also bound early in a frame,
+// before the G-buffer pass, and a hitch mustn't flip the HUD placement for a frame.
+constexpr unsigned long long kWorldFrameRecentMs = 500;
+int g_curRtvCount = 0; // render targets in the current bind
+std::atomic<int> g_worldDrawsThisFrame{0};
+std::atomic<int> g_worldDrawsLastFrame{0};
+std::atomic<unsigned long long> g_lastWorldFrameMs{0};
+
+bool WorldDrawnRecently()
+{
+    if (g_worldDrawsThisFrame.load(std::memory_order_relaxed) >= kMinWorldDrawsPerFrame)
+        return true;
+    const unsigned long long last = g_lastWorldFrameMs.load(std::memory_order_relaxed);
+    return last != 0 && GetTickCount64() - last < kWorldFrameRecentMs;
+}
 constexpr int kUiSnapshotAfterDraw = 1; // snapshot after this many draws land under a backbuffer bind -- see the .h comment
 ID3D11Texture2D* g_uiSnapshotTex = nullptr;
 UINT g_uiSnapshotW = 0, g_uiSnapshotH = 0;
@@ -255,7 +278,12 @@ bool Is2DFrame()
         twoD = !DrivingStereoActive();
     else
     {
-        bool world = WorldRenderedRecently(kWorldRecentMs);
+        // The world drawn into the G-buffer (WorldDrawnRecently, 2026-11-22). It replaced the camera-rebuild rate
+        // (WorldRenderedRecently, still measured and logged), which scales with the frame rate: at ~25 fps a level's two
+        // views fell under its 2,500/s and flipped in and out of stereo, each switch a 150-240 ms target rebuild. "The
+        // aim is running" was tried in between and is no good: it runs through the game's 2D cutscenes as well.
+        WorldRenderedRecently(kWorldRecentMs);
+        bool world = WorldDrawnRecently();
         bool noPlayer = NoPlayerForAWhile(world); // every frame, so its level tracking sees the 2D stretches
         twoD = !world || noPlayer;
     }
@@ -554,6 +582,9 @@ void STDMETHODCALLTYPE Hook_OM(ID3D11DeviceContext* ctx, UINT n, ID3D11RenderTar
         }
         return isBb;
     }() : false;
+    g_curRtvCount = 0;
+    for (UINT i = 0; rtvs && i < n; ++i)
+        g_curRtvCount += rtvs[i] ? 1 : 0;
     g_backbufferDrawCount = 0;
     g_placedVpValid = false; // a new bind places again (KeepPlacedViewport)
     if (g_curTargetIsBackbuffer)
@@ -620,6 +651,11 @@ void CountDraw(ID3D11DeviceContext* ctx, UINT verts)
 {
     if (g_curTargetIsBackbuffer)
         g_finalPassStarted.store(true, std::memory_order_relaxed);
+    if (g_curRtvCount >= 3) // the G-buffer (WorldDrawnRecently)
+    {
+        g_worldDrawsThisFrame.fetch_add(1, std::memory_order_relaxed);
+        PerfAdd(kPerfWorldDraws, 0);
+    }
     if (OnTraceThread())
     {
         const bool first = g_curDraws == 0;
@@ -871,14 +907,6 @@ void LogPassDraw(ID3D11DeviceContext* ctx, UINT count, bool indexed, bool skippe
         ps->Release();
 }
 
-// Live debugging (DebugHideDraw): one draw number of the final pass is skipped, in gameplay only, to see which element
-// it is. Still counted, like the reticle skip. Not while paused: everything hidden comes back for the in-game menu.
-bool IsDebugHiddenDraw()
-{
-    int hide = GetDebugHideDraw();
-    return hide > 0 && g_curTargetIsBackbuffer && g_backbufferDrawCount + 1 == hide && !Is2DFrame() &&
-           !IsSimulationPaused();
-}
 
 // Before each final-pass draw: the capture. (The in-world markers used to get the full frame back here, by draw
 // number or by texture; replaced 2026-10-16 by projecting them into the HUD rectangle at the source,
@@ -904,7 +932,7 @@ void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* c, UINT n, UINT s, 
         MaybePlaceWhole2DFrame(c);
         KeepPlacedViewport(c);
     }
-    bool skip = ShouldSkipAsReticle(c, nativeDraw) || IsDebugHiddenDraw();
+    bool skip = ShouldSkipAsReticle(c, nativeDraw);
     BeforeBackbufferDraw(c, n, true, skip);
     if (!skip && !DrawIntoBothHalves(c, [&] { g_origDrawIndexed(c, n, s, b); }))
         g_origDrawIndexed(c, n, s, b);
@@ -921,7 +949,7 @@ void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* c, UINT n, UINT s)
         MaybePlaceWhole2DFrame(c);
         KeepPlacedViewport(c);
     }
-    bool skip = ShouldSkipAsReticle(c, nativeDraw) || IsDebugHiddenDraw();
+    bool skip = ShouldSkipAsReticle(c, nativeDraw);
     BeforeBackbufferDraw(c, n, false, skip);
     if (!skip && !DrawIntoBothHalves(c, [&] { g_origDraw(c, n, s); }))
         g_origDraw(c, n, s);
@@ -1134,6 +1162,11 @@ bool GetNativeHudRectsForMarkers(float rects[2][4])
     return true;
 }
 
+int GetLastFrameWorldDraws()
+{
+    return g_worldDrawsLastFrame.load(std::memory_order_relaxed);
+}
+
 bool IsWhole2DFrameNow(unsigned long long* forMs)
 {
     const unsigned long long since = g_whole2DSinceMs.load(std::memory_order_relaxed);
@@ -1154,13 +1187,17 @@ void DrawTraceOnPresent(ID3D11Device* device, ID3D11Texture2D* backbuffer)
     InstallOnce(device);
     g_backbuffer = backbuffer;
     g_finalPassStarted.store(false, std::memory_order_relaxed); // the next frame starts
+    const int worldDraws = g_worldDrawsThisFrame.exchange(0, std::memory_order_relaxed);
+    g_worldDrawsLastFrame.store(worldDraws, std::memory_order_relaxed);
+    if (worldDraws >= kMinWorldDrawsPerFrame)
+        g_lastWorldFrameMs.store(GetTickCount64(), std::memory_order_relaxed);
 
     // POLLING TABLE DISABLED (2026-09-25), PERFORMANCE TEST -- see present_hook.cpp's identical comment. This
     // disables the Scroll Lock arm-a-trace trigger; g_armed can be hardcoded to true directly if this capture is
     // needed again before it's restored. The rest of this function's per-frame work (g_tracing dump-if-armed
     // below) is untouched.
     // static bool wasDown = false;
-    // bool down = (GetAsyncKeyState(VK_SCROLL) & 0x8000) != 0;
+    // bool down = ModKeyDown(VK_SCROLL);
     // if (down && !wasDown)
     // {
     //     g_armed.store(true, std::memory_order_relaxed);

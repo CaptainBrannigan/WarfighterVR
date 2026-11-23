@@ -6,7 +6,7 @@ from inside the game: stereo rendering at the headset's real field of view, head
 controllers for aiming, a gun held in your hand, arms that follow your hands, manual magazine reloads, body holsters,
 and an in-headset settings menu.
 
-**Status: v1.3, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
+**Status: v1.5, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
 hasn't been played all the way through yet; see [Known issues](#known-issues).
 
 ## Requirements
@@ -52,9 +52,14 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
 ## Features
 
 ### Rendering
-- Stereo rendering at each eye's **real, asymmetric field of view**, taken from the headset, with correct IPD. Eyes
-  are rendered on alternating frames and submitted to SteamVR as matched pairs, with the pose each frame was rendered
-  for, so SteamVR can reproject cleanly.
+- Stereo rendering at each eye's **real, asymmetric field of view**, taken from the headset, with correct IPD. By
+  default both eyes are rendered in one frame through the game's own two-view path (or one eye per frame, see the
+  render modes below), and submitted to SteamVR as a matched pair with the pose they were rendered for, so SteamVR can
+  reproject cleanly.
+- **2D or 3D is told by what's drawn** (2026-11-22): a frame that draws the 3D world into the game's G-buffer is 3D,
+  one that doesn't (a movie, a menu, a loading screen, a 2D cutscene) gets the floating screen. Unlike the old test
+  (how busy the game's cameras were per second) it doesn't depend on the frame rate, so a heavy level running slowly
+  no longer drops in and out of stereo.
 - Rotation smoothing for the game's 30 Hz simulation tick, head roll, and positional head tracking.
 - First-person weapon and body are rendered with the same per-eye projection and parallax as the world, and the body
   keeps level when you tilt your head.
@@ -118,28 +123,33 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
 ### Head look
 - Head yaw is **added** to the game's own turning (right stick or mouse), and head pitch is absolute; the game's own
   pitch input is removed so the view never fights your head.
-- Recenter from the settings menu (or F3); the headset's own recenter is also picked up.
+- Recenter from the settings menu; the headset's own recenter is also picked up.
 
 ### Motion controllers
 - **Aim with the controller:** shots leave from your hand along the controller's direction, independent of where you
   look. The weapon's random spread is removed.
-- **The gun follows your hand** (on by default, Numpad . or "Gun + shots follow controller" toggles), with adjustable
-  grip offset and rotation. Turning it off also hands the shots back to the game's own aim (see
+- **Motion Controls** (on by default; Weapon > "Motion Controls" in the settings): the gun follows your hand and the
+  shots follow the controller. Turning it off hands the gun and the shots back to the game's own aim (see
   [Known issues](#known-issues)).
-- **Hand calibration** (all weapons): "Hand offset right / up / forward" and "Hand rotation pitch / yaw / roll" in
-  the Hands settings move and turn the hand itself before anything uses it -- the gun, the laser and shots, the dots,
-  holsters and two-handed aim -- mirrored for the left hand. Per-weapon settings come on top.
-- **The gun sits at its own hand socket:** each gun is placed in the arm IK's weapon hand by the point the game's own
-  animation holds the right hand on (its IK_Joint_RightHand), so no per-gun grip position is needed (the profiles'
-  grip positions were removed, 2026-11-09). The hand sits on its controller ("Right hand ..." in Arm IK), and "Gun
-  offset in the hand right / up / forward" fine-tunes the gun in it for all guns. The profiles' grip rotation still
-  applies. Details: [docs/weapons_sockets_magazines.md](docs/weapons_sockets_magazines.md).
-- **No idle animations under your hands** (Arm IK > "Hold hands and gun still (no idle animations)", on by default,
+- **Where the hands and gun sit: three layers**, each its own group in the settings' right-hand column, applied in
+  this order:
+  1. **Controller calibration (moves the aim too):** "Point right / up / forward" and "Turn pitch / yaw / roll" move
+     and turn the tracked controller point itself, before anything uses it: the aim and shots, the laser, the gun,
+     the hands, holsters and two-handed grab. Mirrored for the left hand. Use it when the aim itself sits wrong in your
+     hand.
+  2. **Hands on the controllers (looks only):** "Gun hand ..." and "Off hand ..." place the model's hands on the
+     (calibrated) controllers. The gun rides the gun hand, so this moves the hand and the gun you see, never the aim.
+  3. **Gun in the hand (looks only):** "Gun right / up / forward" moves the gun inside the gun hand, for all guns.
+
+  Each gun is held at its own hand socket, the point the game's own animation holds the right hand on (its
+  IK_Joint_RightHand), so no per-gun grip position is needed; a weapon profile's grip rotation turns the gun about
+  that socket. Details: [docs/weapons_sockets_magazines.md](docs/weapons_sockets_magazines.md).
+- **No idle animations under your hands** ("Hold hands and gun still (no idle animations)", on by default,
   2026-11-21): about a second after a weapon comes in, once you're not aiming down sights and the pose is still, the
   mod takes that pose (the hands, fingers, the gun in the hand, and the support hand on the gun) and holds it while
   you have control. Idle fidgets, breathing and walking bob no longer move the hands against the controllers or the
   gun in the hand. If it's ever taken at a bad moment, switch weapons (or the setting off and on) to take it again.
-- **Weapon socket view** (Hands > "Show weapon sockets (debug lines)", off by default): every bone of the gun's
+- **Weapon socket view** (Gun in the hand > "Show weapon sockets (debug lines)", off by default): every bone of the gun's
   skeleton drawn in the headset as a line from its parent to itself, with its name, plus each hand's weapon bone. For
   checking where the gun's grip points are against the hands.
 - **Two-handed aiming:** grip with your other hand on the barrel to aim along the line between your hands. Only the
@@ -152,10 +162,10 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
 - **Left-handed mode.** With the gun in the left hand the game's arms swap roles, each hand mirroring the other's pose.
 - **Arms on your hands:** the first-person arms follow the controllers, with two-bone IK and an elbow model that
   follows your wrist. Each hand follows its own controller, the weapon hand included (it used to ride the gun); the
-  other hand stays on the gun when two-handed. With "Gun held at its hand socket" the gun follows the weapon hand.
-  Hand offsets, each shoulder's position and the elbow limits are in the **Arm IK** settings.
+  other hand stays on the gun when two-handed; the gun follows the weapon hand. The hands' places on the controllers
+  are in **Hands on the controllers**; each shoulder's position and the elbow limits are in **Arm IK**.
 - **Body:** the body and legs can be moved under your view, and kept upright when you look up or down, in the **Body**
-  settings. The hands stay on the controllers. Which other parts are drawn is set by the "Hide part" rows in Weapon.
+  settings. The hands stay on the controllers. Which other parts are drawn is set by the "Hide part" rows under Body.
 - **Scripted moments** (a breach's door kick, cutscenes, a locked camera): while the game has taken your aim away, the
   gun and arms go back to the game's own animation, the shots and laser go back to the game's aim, and the reticle
   returns. They glide back onto your hands a quarter second after you have control again.
@@ -209,6 +219,14 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
     where the shots land, whatever your eye's offset from the sight line: it moves a little inside the eyepiece or lens
     instead of drifting off the target. Without the laser running it marks the sight line. The game's own zoom-optic
     reticle isn't used ("Crosshair on the impact point" in the Scope group turns ours off).
+- **Holographic red dot sight (new in v1.5, engine two-view):** set a gun's profile "Sight" to "Red dot
+  (no magnification)". Nothing is drawn but a glowing dot on the impact point: each eye sees it where that eye sees the
+  laser's point, so it's zeroed at whatever range you aim at, with no parallax. The dot only shows while that eye looks
+  through the sight's window (the profile's scope lens position and radius, set on the sight's glass), so it comes and
+  goes as you bring the gun up to your eye, and the window itself is never drawn. While it's up, the laser's beam and
+  dot are hidden ("Red dot sight hides the laser" in the Scope group; the laser still runs, the shots go where the dot
+  is). "Red dot size" sets the dot's size in view. With "Scope shows: only with the game's magnifier on" and a
+  magnification, flipping the game's magnifier turns the red dot into the scope.
 - **Body holsters:** press grip with a hand at a body position to trigger an action. That hand also takes the weapon
   if the action is a weapon.
 
@@ -227,18 +245,19 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   line hits (found with the game's own collision, so it lands on walls, cover and enemies at the right depth), with a
   semi-transparent beam in the same colour from your hand to it. Shots and tracers are aimed at the dot, so they land
   where it sits. A per-weapon "Laser start" moves the laser's beginning out to the muzzle so the gun can't block it,
-  and "Beam start right / up" move where the drawn beam starts (purely visual, e.g. a laser module beside the barrel;
-  the dot stays on the shot line). Beam on/off, opacity and width, the max range, and how often the raycast runs
-  (every N frames) are in the settings menu.
-- **Optic dot:** fixed to the gun like a sight -- zero it against the laser with its height and windage settings. Each
-  dot red or green. Caveat: It's best to use the new tracer in place of this optic dot, as the optic dot is tied to the
-  right hand tracking, prone to tracking jitter.
+  and "Shot line start right / up" move the whole line, beam, dot and shots together (2026-11-22; it only moved the
+  drawn beam before). Set it at the gun's sight and the shots leave from there, so a gun held low (behind a boat's side,
+  low cover) still shoots over it. Once a gun's shot line starts where you want it (at its sight), its profile's
+  **"Aim ray: Hidden"** hides that gun's beam and dot and you aim with the sight alone: the laser still runs underneath,
+  so the shots, a scope's crosshair and a red dot still sit on the same point (the OBR 7.62's default profile comes set
+  up this way). Beam on/off, opacity and width, the max range, and how often the raycast runs (every N frames) are in
+  the settings menu; turning the beam and dot off there only hides them too.
 - **Peek and lean:** hold LB (double-tap the left thumbrest, or "Gamepad: LB" in the SteamVR bindings) and push the
   move stick: analog lean left / right and peek up / down, as on a gamepad. LB stays on while your thumb moves to the
   stick, and for as long as the stick is off centre. Turn off the game's
   own **Auto ADS** option to lean without aiming down sights (with it on, a full lean aims down sights by itself).
 - **Weapon profiles:** the grip rotation, the optic zero, the controller aim offset, the secondary
-  (two-handed) grip offset, the laser / beam start and the magazine's setup (grab box, aim point, turn, lock and seat
+  (two-handed) grip offset, the laser / shot line start and the magazine's setup (grab box, aim point, turn, lock and seat
   distances) are kept per weapon
   and switch automatically with the weapon in your hand (picked-up weapons included). The settings menu's "Weapon
   profile: <weapon>" section edits the weapon you're holding; a weapon you haven't set up yet starts from the default
@@ -354,27 +373,35 @@ own SteamVR action, listed as "Keyboard: ...", alongside "Gamepad: ..." for the 
 ### Settings menu
 Open the SteamVR dashboard in the headset and select the **MOHW VR** tab. It's an overlay inside SteamVR, so it works
 over the running game. Point with SteamVR's laser, and scroll with the stick or the title bar's buttons. Every setting
-is there, applies immediately and saves by itself. There is also a Recenter button.
+is there, applies immediately and saves by itself. There is also a Recenter button. Three columns (2026-11-23):
+rendering on the left, hands and weapons in the middle, body and arm details on the right.
 
-| Group | What's in it |
-|---|---|
-| Head | Head look, its sensitivity and direction, head roll, head position |
-| View | Render mode (alternating eye or engine two-view), IPD, world scale, rotation smoothing, keeping the game out of exclusive fullscreen, exact sky rays, scripted scenes from the game's input locks; two-view only: screen effects in both eyes, depth of field, backbuffer at SteamVR eye size |
-| Controls | Turn speed, stick range, two-handed grab, shot spread, fire as mouse or triggers, double-tap bumpers, controllers without window focus |
-| Hands | Left-handed, holster size, hand calibration, sight dots, laser beam |
-| Holsters | The grab zone view, each zone's position, the magazine pouch |
-| Holster actions | What each zone does |
-| Arm IK | Arms on or off, hand offsets, each shoulder's position, elbow behaviour |
-| Body | Body position, keeping it upright, steadying it on head turns |
-| Weapon | Gun follows the controller, manual reload, the magazine grip's break distance, which body parts are hidden |
-| Scope (engine two-view) | What every scope shares: the scoped eye on / off, eye box, eye relief, eyepiece size, the drawn crosshair; the lens picture on / off |
-| Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand, including its magazine platform, its scope's magnification and where its lens sits |
-| Magazine platform: *platform* | Travel to clear the magwell, pull force out, the release |
-| HUD | The HUD panel on or off, its size, depth, IPD and offset, Hud Element Scale, the menu and movie screen size and distance, hiding the reticle (the numbers are kept per render mode) |
-| Driving | Head look, stereo and the steering wheel in the driving missions |
-| Specialized sequences | Use 6DoF Motion For Specialized Sequences: the switch over every sequence profile |
-| Sequence profile: Zodiac Sequence | 6DoF in the RHIB's seats, the grenade launcher's grip aim and how hard it follows, the wheel with its own lock, placement and look, stick deadzone compensation |
-| Diagnostics | Write log files: off by default, since logging costs frames; turn it on to report a problem (see [Troubleshooting](#troubleshooting)) |
+**No keyboard hotkeys** (since v1.5): the mod reads no keys at all, so nothing changes a setting by accident. Earlier
+versions had keys such as F7 / F8 for the IPD scale and Numpad . for the motion controls; the settings menu replaces
+them. If an IPD, FOV or head setting changed by itself on an older version, check it in the menu.
+
+| Column | Group | What's in it |
+|---|---|---|
+| Left | View | Render mode (alternating eye or engine two-view), IPD, world scale, rotation smoothing window, keeping the game out of exclusive fullscreen, exact sky rays, scripted scenes from the game's input locks; two-view only: screen effects in both eyes, depth of field, backbuffer at SteamVR eye size |
+| Left | Head | Head look, its sensitivity and direction, head roll, head position |
+| Left | HUD | The HUD panel on or off, its size, depth, IPD and offset, Hud Element Scale, the menu and movie screen size and distance, hiding the reticle (the numbers are kept per render mode) |
+| Left | Driving | Head look, stereo and the steering wheel in the driving missions |
+| Left | Specialized sequences | Use 6DoF Motion For Specialized Sequences: the switch over every sequence profile |
+| Left | Sequence profile: Zodiac Sequence | 6DoF in the RHIB's seats, the grenade launcher's grip aim and how hard it follows, the wheel with its own lock, placement and look, stick deadzone compensation |
+| Left | Diagnostics | Write log files: off by default, since logging costs frames; turn it on to report a problem (see [Troubleshooting](#troubleshooting)) |
+| Middle | Weapon | Motion Controls, manual reload, the magazine grip's break distance |
+| Middle | Controls | Left-handed, turn speed, stick range, two-handed grab, shot spread, fire as mouse or triggers, double-tap bumpers, controllers without window focus |
+| Middle | Aim ray (laser) | The laser's dot and beam, their look, whether they show only while gripping, the max range, how often it casts |
+| Middle | Sights (engine two-view) | What every sight shares: the scoped eye on / off, eye box, eye relief, eyepiece size, the drawn crosshair; the lens picture on / off; the red dot's size and whether it hides the laser |
+| Middle | Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand: grip rotation, aim offset, shot line start and whether its aim ray shows, its sight (scope or red dot) and where its lens sits, the secondary grip, the magazine |
+| Middle | Magazine platform: *platform* | Travel to clear the magwell, pull force out, the release |
+| Right | Controller calibration (moves the aim too) | The controller point moved and turned: moves everything, the aim included |
+| Right | Hands on the controllers (looks only) | Where the model's gun hand and off hand sit on their controllers; holding the hands and gun still |
+| Right | Gun in the hand (looks only) | The gun moved inside the gun hand (all guns); the weapon socket view |
+| Right | Arm IK | Arms on or off, each shoulder's position, elbow behaviour |
+| Right | Holsters | The grab zone view, holding grip to keep a weapon, holster size and height, each zone's position, the magazine pouch |
+| Right | Holster actions | What each zone does |
+| Right | Body | Body position, keeping it upright, steadying it on head turns, which body parts are hidden |
 
 **Grab zone view:** turn on **Show grab zones (setup)** in Holsters to see everywhere a grip does something, drawn in
 the headset at its real position, so you can adjust it with the view on. Anything your hand is inside turns green.
@@ -424,16 +451,21 @@ The rough edges known so far:
   tuning its profile.
 - **Shore Leave's sniping section** is wonky: the inconsistent hit detection above, and the game force-hiding the
   weapon mesh there.
+- **Shooting from the boat at the start of Hat Trick:** the boat's side is too high to
+  aim over from where a recenter puts you, and the controllers can't lift the gun above it. Before you shoot, crouch
+  or lower your head and recenter there, then straighten up: your standing height is then above the recentered one,
+  and you can aim over the side. Raising the gun's "Shot line start up" (its weapon profile) to the sight also helps:
+  the shots then leave from there.
 - **Not every weapon has a profile yet** (the campaign hasn't been played all the way through); those use the default
   grip until you set them up.
 - **Default bindings other than Touch are untested on real hardware**, including Index and Touch presented as Index by
   Virtual Desktop. The hand calibration and weapon profiles were tuned on Touch, so other controllers may need
-  "Hand offset" / "Hand rotation" and the grip offsets adjusted. Controllers whose grip is bound as a button have no
+  "Controller calibration" and the hand placements adjusted. Controllers whose grip is bound as a button have no
   analog grip, and on HP, Cosmos and WMR two-handed aiming uses the controller's tip instead of the palm.
 - **Manual reload works but is unrefined,** and has only been tested on a few rifles. Going in is the first version's
   again (2026-11-18); a weapon profile's "Magazine locks horizontal at" is measured from the seat, as it was before
   2026-11-14, so a value tuned since then may want widening.
-- **The scoped eye is a prototype** (2026-11-14, untested in the headset): engine two-view only; the HUD shows inside
+- **The scopes are a prototype** (2026-11-14): engine two-view only; the HUD shows inside
   the eyepiece; the eyepiece's edge is hard. The switch between the eye's view and the scope can be a frame off. The
   lens picture is drawn over everything (a hand in front of the lens doesn't hide it). The magnifier switch was found
   on one gun (the OBR's) with one toggle each way.
@@ -446,8 +478,11 @@ The rough edges known so far:
   exit.
 - **The robot-control section** shows the robot's camera head-locked (no head look on it yet); the right stick
   looks around.
+- **Some trucks in Connect the Dots** won't register being shot with motion controller aim: the game's aim check only
+  counts its own aim. Turn off **Motion Controls** (Weapon group) in the settings while you take them out,
+  then turn it back on (the next point has the details).
 - **Objectives where you shoot something that isn't a soldier** (a target, a device) only count the game's own aim,
-  not the controller's. Until the objective is done, turn off **Gun + shots follow controller** (Numpad .) in the
+  not the controller's. Until the objective is done, turn off **Motion Controls** (Weapon group) in the
   settings and aim with your head (head look can stay on): the shots then go where the game aims, at the reticle,
   which comes back while it is off. Turn it on again afterwards. With Head aim off as well, the right stick pitches
   as well as turns.

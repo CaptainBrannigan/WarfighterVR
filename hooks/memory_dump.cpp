@@ -1,4 +1,5 @@
 #include "memory_dump.h"
+#include "../sdk/hotkeys.h"
 
 #include "../sdk/logging.h"
 #include "../sdk/mohw_offsets.h"
@@ -214,7 +215,7 @@ void CheckModuleRegistryDumpHotkey()
 {
     if (g_moduleRegistryAlreadyDumped.load() || !LogsEnabled()) // dumps only with the log files on (sdk/logging.h)
         return;
-    if (!(GetAsyncKeyState(kModuleRegistryDumpHotkey) & 0x8000))
+    if (!ModKeyDown(kModuleRegistryDumpHotkey))
         return;
 
     bool expected = false;
@@ -229,7 +230,7 @@ void CheckMemoryDumpHotkey()
 {
     if (g_alreadyDumped.load() || !LogsEnabled()) // dumps only with the log files on (sdk/logging.h)
         return;
-    if (!(GetAsyncKeyState(kDumpHotkey) & 0x8000))
+    if (!ModKeyDown(kDumpHotkey))
         return;
 
     // Claim the one-shot BEFORE dumping, not after -- the hotkey can read

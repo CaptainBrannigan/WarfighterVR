@@ -1,4 +1,5 @@
 #include "head_position.h"
+#include "../sdk/hotkeys.h"
 
 #include "aiming_controller_hook.h"
 #include "companion_bridge.h"
@@ -54,7 +55,7 @@ bool SehWriteTrans(void* p, float x, float y, float z)
 void PollToggle()
 {
     static bool wasDown = false;
-    bool down = (GetAsyncKeyState(VK_PAUSE) & 0x8000) != 0; // Pause/Break: unused by the game and every other mod hotkey
+    bool down = ModKeyDown(VK_PAUSE); // Pause/Break: unused by the game and every other mod hotkey
     if (down && !wasDown)
     {
         bool v = !GetHeadPositionEnabled();

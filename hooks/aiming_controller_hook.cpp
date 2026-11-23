@@ -1,4 +1,5 @@
 #include "aiming_controller_hook.h"
+#include "../sdk/hotkeys.h"
 #include "boat_seat.h"
 
 #include "../third_party/minhook/include/MinHook.h"
@@ -666,7 +667,7 @@ void CheckAimingControllerHotkeys()
     // Same edge-detected repeatable-toggle pattern as draw_duplication_hook.cpp's
     // CheckStereoDebugHotkeys -- fire once per press, not once per frame held down.
     static bool toggleKeyWasDown = false;
-    bool toggleKeyDown = (GetAsyncKeyState(kHeadAimToggleHotkey) & 0x8000) != 0;
+    bool toggleKeyDown = ModKeyDown(kHeadAimToggleHotkey);
     if (toggleKeyDown && !toggleKeyWasDown)
     {
         bool newValue = !GetHeadAimEnabled();
@@ -679,7 +680,7 @@ void CheckAimingControllerHotkeys()
     toggleKeyWasDown = toggleKeyDown;
 
     static bool sensDownKeyWasDown = false;
-    bool sensDownKeyDown = (GetAsyncKeyState(kHeadAimSensitivityDownHotkey) & 0x8000) != 0;
+    bool sensDownKeyDown = ModKeyDown(kHeadAimSensitivityDownHotkey);
     if (sensDownKeyDown && !sensDownKeyWasDown)
     {
         float newValue = GetHeadAimSensitivity() - kHeadAimSensitivityStep;
@@ -691,7 +692,7 @@ void CheckAimingControllerHotkeys()
     sensDownKeyWasDown = sensDownKeyDown;
 
     static bool sensUpKeyWasDown = false;
-    bool sensUpKeyDown = (GetAsyncKeyState(kHeadAimSensitivityUpHotkey) & 0x8000) != 0;
+    bool sensUpKeyDown = ModKeyDown(kHeadAimSensitivityUpHotkey);
     if (sensUpKeyDown && !sensUpKeyWasDown)
     {
         float newValue = GetHeadAimSensitivity() + kHeadAimSensitivityStep;
@@ -702,13 +703,13 @@ void CheckAimingControllerHotkeys()
 #endif
 
     static bool recenterKeyWasDown = false;
-    bool recenterKeyDown = (GetAsyncKeyState(kRecenterHotkey) & 0x8000) != 0;
+    bool recenterKeyDown = ModKeyDown(kRecenterHotkey);
     if (recenterKeyDown && !recenterKeyWasDown)
         RequestRecenter("F3");
     recenterKeyWasDown = recenterKeyDown;
 
     static bool invertYawKeyWasDown = false;
-    bool invertYawKeyDown = (GetAsyncKeyState(kInvertYawHotkey) & 0x8000) != 0;
+    bool invertYawKeyDown = ModKeyDown(kInvertYawHotkey);
     if (invertYawKeyDown && !invertYawKeyWasDown)
     {
         bool newValue = !GetHeadAimInvertYaw();
@@ -719,7 +720,7 @@ void CheckAimingControllerHotkeys()
     invertYawKeyWasDown = invertYawKeyDown;
 
     static bool invertPitchKeyWasDown = false;
-    bool invertPitchKeyDown = (GetAsyncKeyState(kInvertPitchHotkey) & 0x8000) != 0;
+    bool invertPitchKeyDown = ModKeyDown(kInvertPitchHotkey);
     if (invertPitchKeyDown && !invertPitchKeyWasDown)
     {
         bool newValue = !GetHeadAimInvertPitch();

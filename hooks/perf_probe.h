@@ -18,6 +18,8 @@
 //   late      submit loops where newer pairs existed but the GPU hadn't finished any (the shown pair went out again)
 //   dropped   game frames that never reached the headset's queue: overwritten before they were finished and taken,
 //             or not handed over at all (no slot, or a slot's lock not free at once)
+// Per frame (2026-11-22):
+//   world     draws into the G-buffer, the 3D world: under 40 a frame is a whole 2D frame (hooks/draw_trace_diag.cpp)
 
 namespace mohw {
 
@@ -34,6 +36,7 @@ enum PerfSlot
     kPerfShown,
     kPerfLate,
     kPerfDropped,
+    kPerfWorldDraws, // per frame: draws into the G-buffer, the 3D world (hooks/draw_trace_diag.cpp WorldDrawnRecently)
     kPerfSlotCount
 };
 

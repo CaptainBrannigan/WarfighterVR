@@ -54,4 +54,7 @@ bool GetNativeHudRectsForMarkers(float rects[2][4]);
 // get the floating screen in both eyes instead of being split between the halves (2026-11-08).
 bool IsWhole2DFrameNow(unsigned long long* forMs);
 
+// Any thread: the last finished frame's draws into the G-buffer (the 3D world; Is2DFrame's test), for the logs.
+int GetLastFrameWorldDraws();
+
 } // namespace mohw

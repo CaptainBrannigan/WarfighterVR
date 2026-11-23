@@ -4,6 +4,7 @@
 #include "../sdk/settings.h"
 #include "../hooks/aiming_controller_hook.h"
 #include "../hooks/laser_raycast.h"
+#include "../hooks/scope_view.h"
 
 #include <windows.h>
 #include <cmath>
@@ -162,13 +163,16 @@ void ScrollBy(int px)
 int ColumnForGroup(const char* group)
 {
     auto is = [group](const char* name) { return strncmp(group, name, strlen(name)) == 0; };
-    // HUD under View (2026-11-12, the user). The specialized sequences and their profiles under that (2026-11-22): in
-    // the right column they came after everything else in the longest one.
-    if (is("Head") || is("View") || is("HUD") || is("Legacy") || is("Diagnostics") || is("Specialized") || is("Sequence"))
+    // THE LAYOUT (2026-11-23, the user: "fit all rendering type settings on the left, hands and weapons center, then body
+    // and ik details on the right"; sdk/settings.cpp kMenu's comment). Left: rendering and the special modes.
+    if (is("View") || is("Head") || is("HUD") || is("Driving") || is("Specialized") || is("Sequence") ||
+        is("Diagnostics"))
         return 0;
-    if (is("Weapon") || is("Holster") || is("Driving"))
+    // Right: where the hands and gun sit, the arms, the body and what's on it.
+    if (is("Controller calibration") || is("Hands on") || is("Gun in the hand") || is("Arm IK") || is("Holster") ||
+        is("Body"))
         return 2;
-    return 1; // Controls, Hands
+    return 1; // centre: Weapon, Controls, Aim ray, Sights, the weapon profile, the magazine platform
 }
 
 class Canvas
@@ -490,18 +494,16 @@ void OverlayThreadProc()
     }
 }
 
-// ---- Sight dots (2026-09-28) ----------------------------------------------------------------------------------------
-// Two small world-placed overlays, drawn over the scene like a real sight:
-//  - the OPTIC dot: fixed to the weapon hand like a sight mounted on the gun -- at the hand, raised by the zero
-//    (OpticHeight), moved right by windage and forward by OpticDistance, in the hand's own frame. Zeroed by eye:
-//    raise or lower it until eye, dot and impacts line up at the range you care about.
-//  - the AIM RAY dot: straight along the hand's forward at SightZeroDistance.
-// Each is red, or green with its ...Green setting on.
+// ---- Sight dot (2026-09-28) -----------------------------------------------------------------------------------------
+// A small world-placed overlay, drawn over the scene: the AIM RAY dot (the laser's), on the shot line where it hits.
+// Red, or green with RayDotGreen on.
+// The OPTIC dot -- fixed to the weapon hand like a sight on the gun, at the optic zero -- was removed on 2026-11-22 (the
+// user: "get rid of the original red dot we were drawing that was simply a dot offset from the hand"): the red dot sight
+// (hooks/scope_view.h) replaces it.
 // The submit thread only stores the latest placement; this thread makes the SteamVR calls, woken once per frame, so
 // they never delay eye submission.
-constexpr int kDotOptic = 0;
-constexpr int kDotRay = 1;
-constexpr int kDotCount = 2;
+constexpr int kDotRay = 0;
+constexpr int kDotCount = 1;
 
 struct DotPlacement
 {
@@ -543,7 +545,7 @@ SightState g_sightState; // guarded by g_sightMutex
 WheelPlacement g_wheelState; // guarded by g_sightMutex
 BeamPlacement g_beamState;   // guarded by g_sightMutex
 HANDLE g_sightEvent = nullptr;
-uint64_t g_dotHandles[kDotCount] = {0, 0}; // written once before g_sightReady
+uint64_t g_dotHandles[kDotCount] = {0}; // written once before g_sightReady
 uint64_t g_wheelHandle = 0;                // written once before g_sightReady; 0 if it couldn't be created
 uint64_t g_beamHandle = 0;                 // likewise
 
@@ -1101,11 +1103,11 @@ void SightThreadProc()
     int debugTint[kGrabDebugSlotCount];
     for (int& t : debugTint)
         t = -1;
-    bool green[kDotCount] = {GetOpticDotGreen(), GetRayDotGreen()};
+    bool green[kDotCount] = {GetRayDotGreen()};
     for (int d = 0; d < kDotCount; ++d)
         UploadDotColour(d, green[d]);
 
-    bool shown[kDotCount] = {false, false};
+    bool shown[kDotCount] = {false};
     bool wheelShown = false;
     float wheelLook[3] = {-1.0f, -1.0f, -1.0f}; // radius, thickness, opacity of the uploaded texture
     bool beamShown = false;
@@ -1179,7 +1181,7 @@ void SightThreadProc()
                 wheelShown = false;
             }
         }
-        bool wantGreen[kDotCount] = {GetOpticDotGreen(), GetRayDotGreen()};
+        bool wantGreen[kDotCount] = {GetRayDotGreen()};
         for (int d = 0; d < kDotCount; ++d)
             if (wantGreen[d] != green[d])
             {
@@ -1227,11 +1229,6 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
     if (!(sizeDeg > 0.0f))
         sizeDeg = 0.35f;
     float halfTan = tanf(sizeDeg * 0.5f * 3.14159265f / 180.0f);
-    float height = 0.0f, windage = 0.0f;
-    GetOpticOffset(&height, &windage);
-    float opticForward = GetOpticDistance();
-    if (!(opticForward >= 0.0f))
-        opticForward = 0.0f;
     // The laser's distance: where the shot line first hits (hooks/laser_raycast.h), else the max range.
     float rayDistance = GetSightZeroDistance();
     if (!(rayDistance >= 0.5f))
@@ -1241,14 +1238,9 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
         rayDistance = hitDistance;
 
     // Offsets in the hand's own frame (x right, y up, -z forward), rotated into tracking space.
-    Vec3 opticLocal{};
-    opticLocal.x = windage;
-    opticLocal.y = height;
-    opticLocal.z = -opticForward;
     // The aim ray dot (the laser): exactly the shots' line -- the hand's forward turned by the controller aim offset, as
     // the shots are (sdk/motion_controller_aim.h ApplyControllerAimOffset: yaw right, then pitch up, in the hand's
-    // frame). No offset of its own (2026-10-15, removed RayDotElevation / RayDotWindage): the optic dot is zeroed
-    // against it.
+    // frame). No offset of its own (2026-10-15, removed RayDotElevation / RayDotWindage).
     float rayUpDeg = 0.0f, rayRightDeg = 0.0f;
     GetControllerAimOffsetDeg(&rayUpDeg, &rayRightDeg);
     const float kRad = 3.14159265f / 180.0f;
@@ -1257,8 +1249,17 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
     rayLocal.x = sinf(w) * cosf(e) * rayDistance;
     rayLocal.y = sinf(e) * rayDistance;
     rayLocal.z = -cosf(w) * cosf(e) * rayDistance;
-    Vec3 offsets[kDotCount] = {QuatRotateVector(aimOrientation, opticLocal), QuatRotateVector(aimOrientation, rayLocal)};
-    bool enabled[kDotCount] = {GetOpticDotEnabled(), GetSightDotEnabled()};
+    // The shot line starts at the laser start's right / up offset (2026-11-22, hooks/laser_raycast.cpp: the cast and the
+    // shots start there), so the dot is that far over too.
+    float lineRight = 0.0f, lineUp = 0.0f;
+    GetLaserBeamStartOffset(&lineRight, &lineUp);
+    rayLocal.x += lineRight;
+    rayLocal.y += lineUp;
+    Vec3 offsets[kDotCount] = {QuatRotateVector(aimOrientation, rayLocal)};
+    // A red dot sight up hides the laser's dot and beam (2026-11-22, hooks/scope_view.h): the sight's dot is the aim. So
+    // does the gun's own "Aim ray: hidden" (2026-11-23).
+    const bool laserHidden = GetAimRayHidden() || (GetRedDotHidesLaser() && IsRedDotSightUp());
+    bool enabled[kDotCount] = {GetSightDotEnabled() && !laserHidden};
 
     SightState s;
     for (int i = 0; i < 3; ++i)
@@ -1272,14 +1273,15 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
         dot.pos[0] = origin[0] + offsets[d].x;
         dot.pos[1] = origin[1] + offsets[d].y;
         dot.pos[2] = origin[2] + offsets[d].z;
-        // Constant angular size as seen from the head (the optic dot can sit right at the hand).
+        // Constant angular size as seen from the head.
         float dx = dot.pos[0] - headPos[0], dy = dot.pos[1] - headPos[1], dz = dot.pos[2] - headPos[2];
         float fromHead = sqrtf(dx * dx + dy * dy + dz * dz);
         dot.width = 2.0f * (fromHead > 0.05f ? fromHead : 0.05f) * halfTan;
     }
 
-    // The beam: from its start (LaserStart forward of the hand, the muzzle, moved by the beam start offset in the gun's
-    // frame -- purely visual) to the aim-ray dot, its flat side turned to the head (x along the beam, z towards the head).
+    // The beam: from its start (LaserStart forward of the hand, the muzzle, moved by the laser start's right / up offset
+    // in the gun's frame, where the shot line starts) to the aim-ray dot, its flat side turned to the head (x along the
+    // beam, z towards the head).
     BeamPlacement beam;
     float beamForward = GetLaserStartMeters();
     float beamRight = 0.0f, beamUp = 0.0f;
@@ -1291,7 +1293,7 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
     Vec3 startOffset = QuatRotateVector(aimOrientation, startLocal);
     Vec3 beamVec = VecSub(offsets[kDotRay], startOffset); // start -> dot
     float beamLength = sqrtf(VecDot(beamVec, beamVec));
-    beam.visible = visible && GetLaserBeamEnabled() && g_beamHandle != 0 && rayDistance - beamForward > 0.05f &&
+    beam.visible = visible && GetLaserBeamEnabled() && !laserHidden && g_beamHandle != 0 && rayDistance - beamForward > 0.05f &&
                    beamLength > 0.05f;
     if (beam.visible)
     {
@@ -1451,8 +1453,8 @@ bool InitVrOverlay(void* overlay, int trackingUniverse)
     g_hide = reinterpret_cast<PFN_ShowHideOverlay>(vtable[kHideOverlayIndex]);
     auto createOverlay = reinterpret_cast<PFN_CreateOverlay>(vtable[kCreateOverlayIndex]);
     g_createOverlay = createOverlay;
-    const char* keys[kDotCount] = {"mohwvr.optic", "mohwvr.sight"};
-    const char* names[kDotCount] = {"MOHW VR optic dot", "MOHW VR aim ray dot"};
+    const char* keys[kDotCount] = {"mohwvr.sight"};
+    const char* names[kDotCount] = {"MOHW VR aim ray dot"};
     bool allCreated = true;
     for (int d = 0; d < kDotCount; ++d)
     {
