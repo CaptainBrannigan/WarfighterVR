@@ -4,7 +4,6 @@
 #include "../sdk/settings.h"
 #include "../hooks/aiming_controller_hook.h"
 #include "../hooks/laser_raycast.h"
-#include "../hooks/scope_view.h"
 
 #include <windows.h>
 #include <cmath>
@@ -1256,9 +1255,9 @@ void UpdateSightDot(bool visible, const float origin[3], const Quat& aimOrientat
     rayLocal.x += lineRight;
     rayLocal.y += lineUp;
     Vec3 offsets[kDotCount] = {QuatRotateVector(aimOrientation, rayLocal)};
-    // A red dot sight up hides the laser's dot and beam (2026-11-22, hooks/scope_view.h): the sight's dot is the aim. So
-    // does the gun's own "Aim ray: hidden" (2026-11-23).
-    const bool laserHidden = GetAimRayHidden() || (GetRedDotHidesLaser() && IsRedDotSightUp());
+    // The gun's own "Aim ray: hidden" (2026-11-23) hides the laser's dot and beam; the only switch for it (the global
+    // "red dot sight hides the laser" was removed the same day: per weapon only).
+    const bool laserHidden = GetAimRayHidden();
     bool enabled[kDotCount] = {GetSightDotEnabled() && !laserHidden};
 
     SightState s;

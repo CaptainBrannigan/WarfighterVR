@@ -7,6 +7,7 @@
 #include "render_pose_stamp.h"
 #include "weapon_identity.h"
 #include "../sdk/logging.h"
+#include "../sdk/motion_controller_aim.h"
 #include "../sdk/settings.h"
 #include "../sdk/vr_math.h"
 
@@ -114,8 +115,8 @@ void ClearLens()
     g_lens[0].on = g_lens[1].on = false;
 }
 
-// Each eye but the scoped one: the lens disc (ScopeLensRadius at lensPos: the gun profile's lens offset from the optic
-// zero) in its view, filled from the other eye's half around the laser's point as that eye sees it (x0, y0), angles
+// Each eye but the scoped one: the lens disc (ScopeLensRadius at lensPos: on the zero, ScopeLensForward along it) in its
+// view, filled from the other eye's half around the laser's point as that eye sees it (x0, y0), angles
 // divided by the magnification, anchored where THIS eye sees the laser's point (ax, ay; holographic, 2026-11-17).
 //   this half: tangent x = tL + u (tR - tL), y = tU - v (tU - tD); source tangent = (x0, y0) + (x - ax, y - ay) / m
 //   source frame uv: u = ((xs - tLs) / (tRs - tLs) + src) / 2, v = (tUs - ys) / (tUs - tDs)
@@ -185,9 +186,8 @@ void UpdateLensPictures(const ScopeSettings& s, const Quat& headQ, const Vec3& h
     static bool lastOn = false;
     const bool on = pictures[0].on || pictures[1].on;
     if (on != lastOn)
-        MOHW_LOG(kLogFile, "lens picture %s (%.2fx, lens %.1f cm right / %.1f cm up of the optic zero, %.1f cm ahead of the "
-                 "hand, radius %.1f cm)", on ? "ON" : "off", m, s.lensRight * 100.0f, s.lensUp * 100.0f,
-                 s.lensForward * 100.0f, s.lensRadius * 100.0f);
+        MOHW_LOG(kLogFile, "lens picture %s (%.2fx, lens on the zero %.1f cm along it, radius %.1f cm)", on ? "ON" : "off",
+                 m, s.lensForward * 100.0f, s.lensRadius * 100.0f);
     lastOn = on;
     std::lock_guard<std::mutex> lock(g_maskMutex);
     g_lens[0] = pictures[0];
@@ -197,12 +197,11 @@ void UpdateLensPictures(const ScopeSettings& s, const Quat& headQ, const Vec3& h
 
 // RED DOT SIGHT (2026-11-22, scope_view.h): each eye gets a red dot where IT sees the impact point -- the laser's point
 // at its true direction from that eye, as the holographic crosshair (the sight line's vanishing point without the laser)
-// -- drawn only inside the lens disc as that eye sees it: the lens is the sight's window. No picture, no magnification.
+// -- drawn only inside the red dot's window (a disc on the zero, RedDotWindowForward along it, RedDotWindowRadius) as
+// that eye sees it. No picture, no magnification.
 // Kept in g_lens with reticle.w = 2 (hooks/shaders/scope_lens.hlsl draws the dot) and reticle.z = the dot's radius.
-std::atomic<unsigned long long> g_redDotMs{0};
-
 void UpdateRedDots(const ScopeSettings& s, const Quat& headQ, const Vec3& headP, float scale, const Vec3& lensPos,
-                   const Vec3& forward, const float eyeTan[2][4], const float centre[16])
+                   float lensRadius, const Vec3& forward, const float eyeTan[2][4], const float centre[16])
 {
     ScopeLensPicture dots[2];
     const Quat inv = QuatConjugate(headQ);
@@ -237,7 +236,7 @@ void UpdateRedDots(const ScopeSettings& s, const Quat& headQ, const Vec3& headP,
             const float dist = Length(p);
             if (p.z > -0.05f || dist < 0.05f)
                 continue;
-            const float lx = p.x / -p.z, ly = p.y / -p.z, lr = s.lensRadius / dist;
+            const float lx = p.x / -p.z, ly = p.y / -p.z, lr = lensRadius / dist;
             const float tL = eyeTan[e][0], tR = eyeTan[e][1], tU = eyeTan[e][2], tD = eyeTan[e][3];
             if (!(tR - tL > 0.05f && tU - tD > 0.05f))
                 continue;
@@ -257,7 +256,6 @@ void UpdateRedDots(const ScopeSettings& s, const Quat& headQ, const Vec3& headP,
             dot.on = true;
         }
     }
-    g_redDotMs.store(GetTickCount64(), std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(g_maskMutex);
     g_lens[0] = dots[0];
     g_lens[1] = dots[1];
@@ -265,11 +263,6 @@ void UpdateRedDots(const ScopeSettings& s, const Quat& headQ, const Vec3& headP,
 }
 
 } // namespace
-
-bool IsRedDotSightUp()
-{
-    return GetTickCount64() - g_redDotMs.load(std::memory_order_relaxed) <= kRecentMs;
-}
 
 bool GetScopeLensPictures(ScopeLensPicture out[2])
 {
@@ -337,21 +330,25 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], ScopeEye
         scale = 1.0f;
     // The sight line, tracking space: the weapon hand's optic zero, along its forward.
     const Quat handQ{hand.orientationX, hand.orientationY, hand.orientationZ, hand.orientationW};
-    float height = 0.0f, windage = 0.0f;
-    GetOpticOffset(&height, &windage);
-    const Vec3 origin = VecAdd(V(hand.positionX, hand.positionY, hand.positionZ), QuatRotateVector(handQ, V(windage, height, 0.0f)));
-    const Vec3 forward = Normalized(QuatRotateVector(handQ, V(0.0f, 0.0f, -1.0f)));
+    // THE SIGHT LINE IS THE ZERO (2026-11-23, the user: "get rid of optic zero and windage, center both the red dot and
+    // scope windows on the shot line"): the shot line exactly as the laser casts it (hooks/laser_raycast.cpp) -- from
+    // the profile's Zero right / up beside the hand (in the hand's frame), along the hand's forward turned by the
+    // controller aim offset. Both windows are discs centred on it, each only moved along it.
+    float zeroRight = 0.0f, zeroUp = 0.0f;
+    GetLaserBeamStartOffset(&zeroRight, &zeroUp);
+    const Vec3 origin = VecAdd(V(hand.positionX, hand.positionY, hand.positionZ), QuatRotateVector(handQ, V(zeroRight, zeroUp, 0.0f)));
+    const Vec3 forward = Normalized(QuatRotateVector(ApplyControllerAimOffset(handQ), V(0.0f, 0.0f, -1.0f)));
 
     if (redDot)
     {
         if (lastEye != -3)
-            MOHW_LOG(kLogFile, "RED DOT SIGHT (lens %.1f cm right / %.1f cm up of the optic zero, %.1f cm ahead of the "
-                     "hand, radius %.1f cm; dot %.2f deg)", s.lensRight * 100.0f, s.lensUp * 100.0f,
-                     s.lensForward * 100.0f, s.lensRadius * 100.0f, s.redDotSizeDeg);
+            MOHW_LOG(kLogFile, "RED DOT SIGHT (window on the zero %.1f cm right / %.1f cm up of the hand, %.1f cm along "
+                     "it, radius %.1f cm; dot %.2f deg)", zeroRight * 100.0f, zeroUp * 100.0f, s.redDotForward * 100.0f,
+                     s.redDotRadius * 100.0f, s.redDotSizeDeg);
         lastEye = -3;
         ClearScope();
-        const Vec3 window = VecAdd(origin, QuatRotateVector(handQ, V(s.lensRight, s.lensUp, -s.lensForward)));
-        UpdateRedDots(s, headQ, headP, scale, window, forward, eyeTan, centre);
+        const Vec3 window = VecAdd(origin, VecScale(forward, s.redDotForward));
+        UpdateRedDots(s, headQ, headP, scale, window, s.redDotRadius, forward, eyeTan, centre);
         return false;
     }
 
@@ -385,9 +382,8 @@ bool ComputeScopedEye(const float centre[16], const float eyeTan[2][4], ScopeEye
             MOHW_LOG(kLogFile, "scoped eye: no eye behind the scope (%.2fx ready)", magnification);
         lastEye = eye;
     }
-    // The lens disc on this gun: from the optic zero, ScopeLensRight / ScopeLensUp in the hand's frame, and ScopeLensForward
-    // ahead of the hand (the gun's profile).
-    const Vec3 lensPos = VecAdd(origin, QuatRotateVector(handQ, V(s.lensRight, s.lensUp, -s.lensForward)));
+    // The lens disc on this gun: on the zero, ScopeLensForward along it (the gun's profile).
+    const Vec3 lensPos = VecAdd(origin, VecScale(forward, s.lensForward));
     UpdateLensPictures(s, headQ, headP, scale, lensPos, forward, magnification, eyeTan, eye, centre);
     if (eye < 0)
     {

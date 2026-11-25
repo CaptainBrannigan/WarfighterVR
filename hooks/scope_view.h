@@ -2,8 +2,9 @@
 // SCOPED EYE (2026-11-14, PROTOTYPE; "the scoped eye can be used for high power magnification when the scope is brought
 // close to an eye (and is out of view of the other)"). Engine two-view only (hooks/native_stereo.h).
 //
-// The gun's sight line is the weapon profile's optic zero: from the weapon hand, OpticHeight up and OpticWindageOffset
-// right, along the hand's forward. When one eye is within ScopeEyeBox of that line and up
+// The gun's sight line is the ZERO (2026-11-23; the optic zero / windage were removed): the shot line exactly as the
+// laser casts it, from the weapon profile's Zero right / up beside the hand, along the hand's forward turned by the
+// controller aim offset. When one eye is within ScopeEyeBox of that line and up
 // to ScopeEyeRelief behind the hand, and the gun has a scope -- its profile's ScopeMagnification (2026-11-17: no longer
 // the game's ADS zoom as a fallback; it needs no ADS) -- that eye's view becomes the scope:
 //   - its camera moves onto the sight line, level with the eye's own up, looking along the line;
@@ -46,8 +47,8 @@ bool GetScopeMask(int* eye, float* cx, float* cy, float* radiusX, float* radiusY
 int GetScopeHiddenEye();
 
 // SCREEN-SPACE LENS PICTURE (2026-11-14, prototype, ScopeLensPicture): each eye that isn't looking through the scope sees
-// a magnified picture in the scope's lens (a disc of the gun profile's ScopeLensRadius, at ScopeLensRight / ScopeLensUp
-// from the optic zero and ScopeLensForward ahead of the hand), filled from the other eye's half of the frame around the
+// a magnified picture in the scope's lens (a disc of the gun profile's ScopeLensRadius, centred on the
+// zero ScopeLensForward along it), filled from the other eye's half of the frame around the
 // laser's point (2026-11-17: where the shots land, as
 // that eye sees it; the sight line's vanishing point when the laser isn't running) -- the other eye, 6 cm to the side,
 // sees that far field past the scope instead of through it. Present draws it (hooks/present_hook.cpp,
@@ -71,12 +72,10 @@ bool GetScopeLensPictures(ScopeLensPicture out[2]);
 // could hide the laser and have a more natural aiming experience that's perfectly zeroed"). A gun whose profile's Sight
 // is "Red dot" gets no scoped eye and no lens picture: each eye sees a red dot (RedDotSize across) where IT sees the
 // impact point -- the laser's point at its true direction from that eye, the sight line's vanishing point without the
-// laser -- drawn only inside the lens disc (the profile's ScopeLens* settings) as that eye sees it, so the lens is the
-// sight's window. Zeroed at whatever range the laser hits, with no parallax. Passed to Present as ScopeLensPictures with
-// reticle = {x, y, dot radius in uv x, 2}. With "Scope shows: only with the game's magnifier on" and a magnification,
-// the game's magnifier turns it into the scope. Engine two-view only, as the scope.
-// Any thread: a red dot sight is up (the gun has one and it was worked out this frame), for hiding the laser's beam and
-// dot (settings.h GetRedDotHidesLaser).
-bool IsRedDotSightUp();
+// laser -- drawn only inside the red dot's own window (2026-11-23: a disc of the profile's RedDotWindowRadius, centred on
+// the zero RedDotWindowForward along it) as that eye sees it. Zeroed at whatever range the laser hits, with no parallax.
+// Passed to Present as ScopeLensPictures with reticle = {x, y, dot radius in uv x, 2}. With "Scope shows: only with
+// the game's magnifier on" and a magnification, the game's magnifier turns it into the scope. Engine two-view only, as
+// the scope.
 
 } // namespace mohw

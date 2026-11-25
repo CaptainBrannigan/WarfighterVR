@@ -6,7 +6,9 @@
 // unless a user specifies"; keep it so when this is taken again), and the UI layout size is 1, automatic by resolution
 // (settings.h GetUiLayoutScale), which is the author's own size. sdk/settings.cpp LoadSettings: a first launch (no ini)
 // starts from this text, and an existing ini picks up these weapon profiles for weapons it has none for. Same format as
-// the ini; one string literal, so under 16380 bytes.
+// the ini; one string literal, so under 16380 bytes. 2026-11-23: the optic zero (OpticHeight / OpticWindageOffset) and the
+// scope lens's right / up are gone -- the profile lines' values in those places (4th, 5th, 28th, 29th) are ignored -- and a
+// red dot's window comes from the line's scope lens when the line doesn't give its own; grip double-tap is off.
 
 namespace mohw {
 
@@ -169,14 +171,13 @@ ScopeApparentFov=24.00
 ScopeReticle=1
 ScopeMagnification=0.00
 ScopeLensPicture=1
-ScopeLensRight=0.0000
-ScopeLensUp=0.0000
 ScopeLensForward=0.0600
 ScopeLensRadius=0.0180
 ScopeNeedsMagnifier=0
 SightType=0
 AimRayHidden=0
-RedDotHidesLaser=1
+RedDotWindowForward=0.0600
+RedDotWindowRadius=0.0180
 RedDotSize=0.150
 MagazinePlatform0=0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,1.0000,0.0600,0.0350,0.0000,22.0000,0.0120,1.0000
 MagazinePlatform1=0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0100,0.0350,0.0000,2.0000,0.0100,0.0000
@@ -201,13 +202,11 @@ HolsterLeftShoulderPos=-0.2000,-0.4000,-0.1000
 HolsterRightShoulderPos=0.2000,-0.1000,-0.1000
 SightDotEnabled=1
 DotsOnlyWithGrip=1
-GripDoubleTapBumpers=1
+GripDoubleTapBumpers=0
 ThumbTapBumpers=1
 GamepadWithoutFocus=0
 SightZeroDistance=1000.0000
 SightDotSize=0.1500
-OpticHeight=0.2060
-OpticWindageOffset=-0.0260
 RayDotGreen=0
 LaserBeam=1
 LaserBeamOpacity=0.35

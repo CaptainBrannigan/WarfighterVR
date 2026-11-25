@@ -280,16 +280,16 @@ const char* GetMagazinePlatformName(int index);
 // How far the controller can get from a hand stuck on a magazine before the grip lets go, metres. MagazineGripBreak.
 float GetMagazineGripBreak();
 // SCOPED EYE (2026-11-14, prototype, hooks/scope_view.h): in engine two-view, an eye brought behind the gun's sight
-// line (the weapon profile's optic zero: height / windage above the hand) sees through a magnified scope instead of its
-// own view. enabled: ScopeEyeEnabled (default on). eyeBox: how close to the sight line the eye has to be, m; relief: how
+// line (2026-11-23: the zero -- the shot line, from the profile's Zero right / up beside the hand, GetLaserBeamStartOffset)
+// sees through a magnified scope instead of its own view. enabled: ScopeEyeEnabled (default on). eyeBox: how close to the
+// sight line the eye has to be, m; relief: how
 // far behind the hand along it, m; apparentFovDeg: the eyepiece's size in view; reticle (ScopeReticle): a crosshair on
 // the impact point in the scoped eye and the lens picture, holographic (where each eye sees the laser's point; the game's
 // own zoom-optic reticle isn't used). lensPicture (ScopeLensPicture, default on): the screen-space prototype -- each eye not
 // looking through the scope sees a magnified picture in the scope's lens, filled from the other eye's view.
 // Per weapon (the profile, 2026-11-17): magnification (ScopeMagnification, 0 = the gun has no scope; it no longer falls
-// back to the game's ADS zoom, and needs no ADS); the lens disc: lensRadius (ScopeLensRadius, m), its centre lensRight /
-// lensUp from the optic zero (ScopeLensRight / ScopeLensUp, m, in the hand's frame) and lensForward ahead of the hand
-// (ScopeLensForward, m).
+// back to the game's ADS zoom, and needs no ADS); the lens disc: lensRadius (ScopeLensRadius, m), centred on the zero
+// lensForward along it ahead of the hand (ScopeLensForward, m; its right / up offsets were removed on 2026-11-23).
 struct ScopeSettings
 {
     bool enabled;
@@ -297,22 +297,21 @@ struct ScopeSettings
     bool reticle;
     float magnification;
     bool lensPicture;
-    float lensRight, lensUp, lensForward, lensRadius;
+    float lensForward, lensRadius;
     // Per weapon (ScopeNeedsMagnifier, 2026-11-17): the scope only while the game's flip magnifier is switched on
     // (hooks/weapon_identity.h GetEquippedOpticState), for red dots with a magnifier behind them.
     bool needsMagnifier;
     // Per weapon (SightType, 2026-11-22): a red dot instead of the scope (hooks/scope_view.h RED DOT SIGHT), and the
-    // dot's size in view (RedDotSize, deg).
+    // dot's size in view (RedDotSize, deg). Per weapon (2026-11-23): the red dot's own window, a disc of redDotRadius
+    // (RedDotWindowRadius, m) on the zero redDotForward along it ahead of the hand (RedDotWindowForward, m).
     bool redDot;
     float redDotSizeDeg;
+    float redDotForward, redDotRadius;
 };
 ScopeSettings GetScopeSettings();
-// While a red dot sight is up, the laser's beam and dot are hidden (RedDotHidesLaser, default on): the laser still runs,
-// it's where the dot and the shots go.
-bool GetRedDotHidesLaser();
 // Per weapon (AimRayHidden, 2026-11-23): this gun's laser beam and dot hidden. Only the drawing: the laser keeps running
-// and the shots follow it from the shot line start (GetLaserBeamStartOffset), so with the start set at the sight the
-// gun aims with its sight alone.
+// and the shots follow it from the zero (GetLaserBeamStartOffset), so with the zero set at the sight the gun aims with
+// its sight alone. (The global RedDotHidesLaser was removed on 2026-11-23: this is the only switch.)
 bool GetAimRayHidden();
 // Secondary grip offset (per weapon, SetWeaponProfile): where the off hand holds relative to the barrel line, metres
 // in the gun's frame (+ right, + up, + forward). The two-handed aim targets the off hand's point moved by it, so a hand
@@ -492,7 +491,7 @@ bool GetSightDotEnabled();
 // by a weapon-hand grip press (off). See openvr_direct/vr_hands.h HandsResult::weaponGripped.
 bool GetDotsOnlyWithGrip();
 // A grip double-tap holds that hand's bumper (left LB, right RB) for the second press (openvr_direct/vr_input.cpp).
-// GripDoubleTapBumpers, default on.
+// GripDoubleTapBumpers, default off (2026-11-23).
 bool GetGripDoubleTapBumpers();
 // A double tap of the thumbrest = that hand's bumper (openvr_direct/vr_input.cpp UpdateThumbTap), and with it on, Touch
 // grips no longer double-tap. ThumbTapBumpers, default on.
@@ -513,10 +512,6 @@ float GetAdsSwayScale();
 float GetSightZeroDistance();
 float GetSightDotSizeDeg();
 
-// The optic zero, the gun's sight line (hooks/scope_view.h: the scopes and the red dot sight start from it): from the
-// weapon hand, height (+ up) and windage (+ right), meters in the hand's own frame. Ini OpticHeight / OpticWindageOffset.
-// (The optic dot drawn there was removed on 2026-11-22.)
-void GetOpticOffset(float* height, float* windage);
 // The aim ray dot's colour: green when on, red when off (RayDotGreen, default on).
 bool GetRayDotGreen();
 // The laser (hooks/laser_raycast.h): the aim-ray dot sits where the shot line first hits (or at SightZeroDistance, the
@@ -530,9 +525,11 @@ int GetLaserRaycastEveryFrames();
 // laser can't hit the gun). The raycast starts there; the drawn beam starts that far forward too. LaserStart, default
 // 0.15.
 float GetLaserStartMeters();
-// Where the shot line starts, beside the hand (per weapon): metres in the gun's frame, + right / + up. Purely the drawn
+// THE ZERO (the menu's "Zero right / up"; "Shot line start" until 2026-11-23): where the shot line starts, beside the
+// hand (per weapon): metres in the gun's frame, + right / + up. Purely the drawn
 // beam's start until 2026-11-22; since then it moves the laser's cast, its dot and the shots too (hooks/laser_raycast.cpp),
-// so set at the sight a gun held low still shoots over cover. LaserBeamStartRight / LaserBeamStartUp, default 0.
+// so set at the sight a gun held low still shoots over cover. Both sight windows (the scope lens, the red dot's
+// window) sit on it too, hooks/scope_view.h. LaserBeamStartRight / LaserBeamStartUp, default 0.
 void GetLaserBeamStartOffset(float* right, float* up);
 
 // Menu table for the SteamVR dashboard tab (openvr_direct/vr_overlay.cpp): every setting a player can adjust, in
@@ -568,7 +565,7 @@ void SetHolsterActionChoices(const std::vector<std::string>& actions);
 // (SetWeaponProfile).
 void GetWeaponGripRotationDeg(float out[3]);
 
-// WEAPON PROFILES (2026-10-15): the grip rotation, the optic zero (height / windage), the sight, the controller
+// WEAPON PROFILES (2026-10-15): the grip rotation, the zero, the sight, the controller
 // aim offset, the secondary grip offset, the laser's start and the magazine's grab settings are per weapon (the grip
 // position was too, until 2026-11-09). Called with the equipped weapon's blueprint name (hooks/weapon_identity.h;
 // display = its short name for the menu), or nullptr when none is identified: the settings switch to that weapon's

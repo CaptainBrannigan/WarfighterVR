@@ -201,13 +201,13 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   existed has nothing on it: then the gripping hand's X / A (left / right) works as the release and stays away from
   the game while you hold the magazine. Re-select "MOHW VR defaults" in SteamVR's bindings to get it bound properly.
 - **Scopes (prototype, engine two-view), set up per gun:** a gun has a scope when its weapon profile gives it a "Scope
-  magnification" (0 = no scope). It works without aiming down sights in the game. The profile also places the scope's
-  lens on that gun: "Scope lens right" / "Scope lens up" from the optic zero, "Scope lens forward" from the hand, and
-  its "Scope lens radius". For a red dot with a flip-to-side magnifier, set "Scope shows" to "Only with the game's
+  magnification" (0 = no scope). It works without aiming down sights in the game. The scope's lens is a disc centred
+  on the gun's **zero** (the shot line, below): the profile sets only how far along it the lens sits ("Scope lens
+  forward") and its size ("Scope lens radius"). For a red dot with a flip-to-side magnifier, set "Scope shows" to "Only with the game's
   magnifier on": the scope then appears only while the game's magnifier is switched on (ADS and click the right stick
   to flip it; it stays flipped after you let go of ADS). The **Scope** group holds what every scope shares (the scoped
   eye's eye box, eye relief, eyepiece size, drawn crosshair, and the lens picture on / off).
-  - **Scoped eye** (off by default; the lens picture is on): bring one eye behind the sight line (the profile's optic zero: within "Eye box" of it, up to "Eye
+  - **Scoped eye** (off by default; the lens picture is on): bring one eye behind the zero (within "Eye box" of it, up to "Eye
     relief" behind your hand) and that eye sees through the scope, magnified, inside an eyepiece that narrows as your
     eye leaves the line, black around it. The other eye keeps its own view, the gun included. It costs nothing extra:
     the scoped view replaces that eye's normal one.
@@ -222,10 +222,10 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
 - **Holographic red dot sight (new in v1.5, engine two-view):** set a gun's profile "Sight" to "Red dot
   (no magnification)". Nothing is drawn but a glowing dot on the impact point: each eye sees it where that eye sees the
   laser's point, so it's zeroed at whatever range you aim at, with no parallax. The dot only shows while that eye looks
-  through the sight's window (the profile's scope lens position and radius, set on the sight's glass), so it comes and
-  goes as you bring the gun up to your eye, and the window itself is never drawn. While it's up, the laser's beam and
-  dot are hidden ("Red dot sight hides the laser" in the Scope group; the laser still runs, the shots go where the dot
-  is). "Red dot size" sets the dot's size in view. With "Scope shows: only with the game's magnifier on" and a
+  through the sight's window, a disc centred on the gun's zero with its own "Red dot window forward" (how far along the
+  zero) and "Red dot window radius" in the profile, separate from the scope lens's. So it comes and goes as you bring
+  the gun up to your eye, and the window itself is never drawn. To aim with the dot alone, set the gun's "Aim ray" to
+  Hidden (below). "Red dot size" sets the dot's size in view. With "Scope shows: only with the game's magnifier on" and a
   magnification, flipping the game's magnifier turns the red dot into the scope.
 - **Body holsters:** press grip with a hand at a body position to trigger an action. That hand also takes the weapon
   if the action is a weapon.
@@ -245,19 +245,20 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   line hits (found with the game's own collision, so it lands on walls, cover and enemies at the right depth), with a
   semi-transparent beam in the same colour from your hand to it. Shots and tracers are aimed at the dot, so they land
   where it sits. A per-weapon "Laser start" moves the laser's beginning out to the muzzle so the gun can't block it,
-  and "Shot line start right / up" move the whole line, beam, dot and shots together (2026-11-22; it only moved the
-  drawn beam before). Set it at the gun's sight and the shots leave from there, so a gun held low (behind a boat's side,
-  low cover) still shoots over it. Once a gun's shot line starts where you want it (at its sight), its profile's
-  **"Aim ray: Hidden"** hides that gun's beam and dot and you aim with the sight alone: the laser still runs underneath,
-  so the shots, a scope's crosshair and a red dot still sit on the same point (the OBR 7.62's default profile comes set
-  up this way). Beam on/off, opacity and width, the max range, and how often the raycast runs (every N frames) are in
-  the settings menu; turning the beam and dot off there only hides them too.
+  and the gun's **zero** ("Zero right / up" in its profile, where the shot line starts beside your hand) moves the whole
+  line: beam, dot, shots, and both sight windows (the scope lens and the red dot's window are centred on it). Set it at
+  the gun's sight and the shots leave from there, so a gun held low (behind a boat's side, low cover) still shoots over
+  it. Once a gun's zero is where you want it (at its sight), its profile's **"Aim ray: Hidden"** hides that gun's beam
+  and dot and you aim with the sight alone: the laser still runs underneath, so the shots, a scope's crosshair and a red
+  dot still sit on the same point (the OBR 7.62's default profile comes set up this way). The aim laser on/off, its
+  opacity and width, the max range, and how often the raycast runs (every N frames) are in the settings menu; turning
+  the aim laser and dot off there only hides them too.
 - **Peek and lean:** hold LB (double-tap the left thumbrest, or "Gamepad: LB" in the SteamVR bindings) and push the
   move stick: analog lean left / right and peek up / down, as on a gamepad. LB stays on while your thumb moves to the
   stick, and for as long as the stick is off centre. Turn off the game's
   own **Auto ADS** option to lean without aiming down sights (with it on, a full lean aims down sights by itself).
-- **Weapon profiles:** the grip rotation, the optic zero, the controller aim offset, the secondary
-  (two-handed) grip offset, the laser / shot line start and the magazine's setup (grab box, aim point, turn, lock and seat
+- **Weapon profiles:** the grip rotation, the zero, the controller aim offset, the sight and its window, the secondary
+  (two-handed) grip offset, the laser start and the magazine's setup (grab box, aim point, turn, lock and seat
   distances) are kept per weapon
   and switch automatically with the weapon in your hand (picked-up weapons included). The settings menu's "Weapon
   profile: <weapon>" section edits the weapon you're holding; a weapon you haven't set up yet starts from the default
@@ -318,8 +319,8 @@ Steer with your hands on a virtual wheel instead of the thumbstick.
   works anywhere around the centre). It's hidden in the menu and on loading screens.
 - The turn goes to the game as the left stick, so the game's own steering response applies. If small turns don't
   register, raise "Stick deadzone compensation".
-- In the driving missions the grips only steer: holsters and two-handed aiming are off there. Grip double-tap still
-  gives LB / RB.
+- In the driving missions the grips only steer: holsters and two-handed aiming are off there. Grip double-tap, when
+  turned on, still gives LB / RB.
 
 All of it is in the settings menu's **Driving** section; "Steering wheel (hold grip)" switches it off.
 
@@ -349,8 +350,8 @@ vehicles, the Apache, menus). Default layout:
 On Index controllers the layout is the same, with the left hand's A / B in place of X / Y (left A = Touch X, left B =
 Touch Y, double presses and the long press included). The grips use squeeze force rather than finger position, because
 an Index grip reads as nearly full just from holding the controller. The Index has no thumbrest, so LB / RB are a double
-tap of the trackpad, and a double-tap of the grip also works. Controllers with neither use the grip double-tap (setting:
-"Grip double-tap = LB / RB").
+tap of the trackpad. Controllers with neither can use a double-tap of the grip: turn on Controls > "Grip double-tap =
+LB / RB" (off by default since 2026-11-23).
 
 Other controllers use the same actions, moved to what each one has:
 
@@ -391,9 +392,9 @@ them. If an IPD, FOV or head setting changed by itself on an older version, chec
 | Left | Diagnostics | Write log files: off by default, since logging costs frames; turn it on to report a problem (see [Troubleshooting](#troubleshooting)) |
 | Middle | Weapon | Motion Controls, manual reload, the magazine grip's break distance |
 | Middle | Controls | Left-handed, turn speed, stick range, two-handed grab, shot spread, fire as mouse or triggers, double-tap bumpers, controllers without window focus |
-| Middle | Aim ray (laser) | The laser's dot and beam, their look, whether they show only while gripping, the max range, how often it casts |
-| Middle | Sights (engine two-view) | What every sight shares: the scoped eye on / off, eye box, eye relief, eyepiece size, the drawn crosshair; the lens picture on / off; the red dot's size and whether it hides the laser |
-| Middle | Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand: grip rotation, aim offset, shot line start and whether its aim ray shows, its sight (scope or red dot) and where its lens sits, the secondary grip, the magazine |
+| Middle | Aim ray (laser) | The aim laser and its dot, their look, whether they show only while gripping, the max range, how often it casts |
+| Middle | Sights (engine two-view) | What every sight shares: the scoped eye on / off, eye box, eye relief, eyepiece size, the drawn crosshair; the lens picture on / off; the red dot's size |
+| Middle | Weapon profile: *weapon* | Everything kept per weapon, for the weapon in your hand: grip rotation, aim offset, its zero (where the shot line starts) and whether its aim ray shows, its sight (scope or red dot) and how far along the zero its window sits and how big, the secondary grip, the magazine |
 | Middle | Magazine platform: *platform* | Travel to clear the magwell, pull force out, the release |
 | Right | Controller calibration (moves the aim too) | The controller point moved and turned: moves everything, the aim included |
 | Right | Hands on the controllers (looks only) | Where the model's gun hand and off hand sit on their controllers; holding the hands and gun still |
@@ -454,7 +455,7 @@ The rough edges known so far:
 - **Shooting from the boat at the start of Hat Trick:** the boat's side is too high to
   aim over from where a recenter puts you, and the controllers can't lift the gun above it. Before you shoot, crouch
   or lower your head and recenter there, then straighten up: your standing height is then above the recentered one,
-  and you can aim over the side. Raising the gun's "Shot line start up" (its weapon profile) to the sight also helps:
+  and you can aim over the side. Raising the gun's "Zero up" (its weapon profile) to the sight also helps:
   the shots then leave from there.
 - **Not every weapon has a profile yet** (the campaign hasn't been played all the way through); those use the default
   grip until you set them up.

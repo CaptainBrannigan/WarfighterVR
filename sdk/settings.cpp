@@ -89,10 +89,6 @@ constexpr bool kDefaultSightDotEnabled = true;
 constexpr bool kDefaultDotsOnlyWithGrip = false; // true = the aim ray dot and beam only while the weapon grip is on
 constexpr float kDefaultSightZeroDistance = 600.0f; // meters: the laser's max range
 constexpr float kDefaultSightDotSizeDeg = 0.35f;
-// The optic zero: the gun's sight line, from the weapon hand, raised by OpticHeight and moved by OpticWindageOffset,
-// meters in the hand's own frame (the scopes and the red dot sight start from it, hooks/scope_view.h).
-constexpr float kDefaultOpticHeight = 0.05f; // + = up
-constexpr float kDefaultOpticWindage = 0.0f; // + = right
 constexpr bool kDefaultRayDotGreen = true;
 // Holster zone -> game action (a GstKeyBinding.infantry concept name from the game's profile; empty = unassigned).
 const char* const kHolsterZoneKeys[kHolsterZoneCount] = {"HolsterStomach", "HolsterHip", "HolsterChest",
@@ -257,10 +253,14 @@ std::atomic<bool> g_scopeLensPicture{true};     // the screen-space lens picture
 // Per weapon (2026-11-17, the user: one scope set up per gun, "we need an offset for the scope"). The game's ADS zoom no
 // longer stands in for a magnification: a gun has a scope when its profile gives one, and it works without ADS.
 std::atomic<float> g_scopeMagnification{0.0f};  // 0 = no scope
-std::atomic<float> g_scopeLensRight{0.0f};      // m, the lens disc's centre from the optic zero, + right
-std::atomic<float> g_scopeLensUp{0.0f};         // m, + up
-std::atomic<float> g_scopeLensForward{0.06f};   // m ahead of the hand
+// THE WINDOWS SIT ON THE ZERO (2026-11-23, the user: "get rid of optic zero and windage, center both the red dot and scope
+// windows on the shot line ... allow an offset of the red dot and scope seperately on the forward axis only, and separate
+// lens radius"): the scope's lens and the red dot's window are discs centred on the zero (the shot line, from the
+// profile's Zero right / up), each only moved along it, each with its own radius.
+std::atomic<float> g_scopeLensForward{0.06f};   // m along the zero, ahead of the hand
 std::atomic<float> g_scopeLensRadius{0.018f};   // m
+std::atomic<float> g_redDotWindowForward{0.06f}; // m along the zero, ahead of the hand
+std::atomic<float> g_redDotWindowRadius{0.018f}; // m
 // 1 = the scope only while the game's flip magnifier is switched on (the user: "optics that have a secondary toggle, such
 // as a flip to side magnifier that the scope only appears when that is toggled on in game"), 0 = always.
 std::atomic<float> g_scopeNeedsMagnifier{0.0f};
@@ -271,7 +271,6 @@ const char* const kScopeShowChoices[] = {"Always", "Only with the game's magnifi
 // game's magnifier on" and a magnification, the magnifier turns the red dot into the scope.
 std::atomic<float> g_sightType{0.0f};
 const char* const kSightTypeChoices[] = {"Scope (magnified)", "Red dot (no magnification)"};
-std::atomic<bool> g_redDotHidesLaser{true}; // the laser's beam and dot hidden while a red dot sight is up
 // Per weapon (2026-11-23, the user: "you can turn off the aim ray once the start point is configured to a place the user
 // is happy with"): 1 = this gun's laser beam and dot hidden. Only the drawing: the laser keeps running (the shots follow
 // it, from the shot line start), so a gun whose shot line starts at its sight aims with the sight alone.
@@ -444,16 +443,26 @@ std::atomic<float> g_holsterRadius{kDefaultHolsterRadius};
 std::atomic<float> g_holsterDrop{kDefaultHolsterDrop};
 std::atomic<bool> g_sightDotEnabled{kDefaultSightDotEnabled};
 std::atomic<bool> g_dotsOnlyWithGrip{kDefaultDotsOnlyWithGrip};
-std::atomic<bool> g_gripDoubleTapBumpers{true}; // openvr_direct/vr_input.cpp UpdateGripGesture
+std::atomic<bool> g_gripDoubleTapBumpers{false}; // openvr_direct/vr_input.cpp UpdateGripGesture (off by default 2026-11-23)
 std::atomic<bool> g_thumbTapBumpers{true};      // openvr_direct/vr_input.cpp UpdateThumbTap
 std::atomic<bool> g_gamepadWithoutFocus{false}; // hooks/xinput_hook.cpp GamepadFocusOnPresent
 std::atomic<float> g_sightZeroDistance{kDefaultSightZeroDistance};
 std::atomic<float> g_sightDotSizeDeg{kDefaultSightDotSizeDeg};
-std::atomic<float> g_opticHeight{kDefaultOpticHeight};
-std::atomic<float> g_opticWindage{kDefaultOpticWindage};
-// The optic dot's forward distance (OpticDistance) had this place in the weapon profiles' lines: removed with the dot on
-// 2026-11-22 (the red dot sight replaces it), the place kept so saved lines keep their order. Not a setting.
-std::atomic<float> g_retiredProfileSlot5{0.0f};
+// RETIRED PROFILE PLACES: settings removed from the weapon profiles, their places kept so saved lines keep their order.
+// Not settings; whatever an old line holds there is ignored. kRetiredOpticHeight / kRetiredOpticWindage: the optic zero
+// (OpticHeight / OpticWindageOffset), and kRetiredLensRight / kRetiredLensUp: the scope lens's offset from it
+// (ScopeLensRight / ScopeLensUp), both removed 2026-11-23 (the windows sit on the zero now); kRetiredOpticDistance: the
+// optic dot's forward distance (OpticDistance), removed with the dot on 2026-11-22.
+enum
+{
+    kRetiredOpticHeight,
+    kRetiredOpticWindage,
+    kRetiredOpticDistance,
+    kRetiredLensRight,
+    kRetiredLensUp,
+    kRetiredCount
+};
+std::atomic<float> g_retiredProfileSlot[kRetiredCount] = {};
 std::atomic<bool> g_rayDotGreen{kDefaultRayDotGreen};
 // Laser (hooks/laser_raycast.cpp, openvr_direct/vr_overlay.cpp): the aim-ray dot at the first surface the shot line hits,
 // and a beam from the hand to it.
@@ -533,8 +542,9 @@ constexpr int kSequenceFieldCount = static_cast<int>(sizeof(kSequenceFields) / s
 // values skipped (kOldProfileGripValues), and saved again in the new one.
 constexpr int kOldProfileGripValues = 3;
 std::atomic<float>* const kProfileFields[] = {
-    &g_weaponGripPitchDeg,  &g_weaponGripYawDeg,   &g_weaponGripRollDeg, &g_opticHeight, &g_opticWindage,
-    &g_retiredProfileSlot5, &g_controllerAimUpDeg, &g_controllerAimRightDeg,
+    &g_weaponGripPitchDeg, &g_weaponGripYawDeg, &g_weaponGripRollDeg,
+    &g_retiredProfileSlot[kRetiredOpticHeight], &g_retiredProfileSlot[kRetiredOpticWindage],
+    &g_retiredProfileSlot[kRetiredOpticDistance], &g_controllerAimUpDeg, &g_controllerAimRightDeg,
     // Appended 2026-10-15 (lines saved before take the default for these).
     &g_secondaryGripRight, &g_secondaryGripUp, &g_laserStartMeters,
     &g_laserBeamStartRight, &g_laserBeamStartUp,
@@ -548,7 +558,8 @@ std::atomic<float>* const kProfileFields[] = {
     &g_weaponMagPlatform, &g_scopeMagnification,
     // Appended 2026-11-17: the scope's lens on this gun (forward and radius were global settings until then: the ini's
     // ScopeLensForward / ScopeLensRadius become the default profile's).
-    &g_scopeLensRight, &g_scopeLensUp, &g_scopeLensForward, &g_scopeLensRadius,
+    &g_retiredProfileSlot[kRetiredLensRight], &g_retiredProfileSlot[kRetiredLensUp], &g_scopeLensForward,
+    &g_scopeLensRadius,
     // Appended 2026-11-17: the scope only with the game's flip magnifier on.
     &g_scopeNeedsMagnifier,
     // Appended 2026-11-21: the secondary grip offset's forward part.
@@ -557,8 +568,14 @@ std::atomic<float>* const kProfileFields[] = {
     &g_sightType,
     // Appended 2026-11-23: the aim ray (laser beam and dot) hidden on this gun.
     &g_aimRayHidden,
+    // Appended 2026-11-23: the red dot's own window along the zero (until then it used the scope lens's): a line saved
+    // before takes this line's scope lens forward and radius (ParseWeaponProfileLine).
+    &g_redDotWindowForward, &g_redDotWindowRadius,
 };
 constexpr int kProfileFieldCount = static_cast<int>(sizeof(kProfileFields) / sizeof(kProfileFields[0]));
+constexpr int kScopeLensForwardField = 29, kScopeLensRadiusField = 30, kRedDotWindowForwardField = 35,
+              kRedDotWindowRadiusField = 36;
+static_assert(kRedDotWindowRadiusField == kProfileFieldCount - 1, "the red dot window's fields are the last two");
 constexpr int kGripRollField = 2; // &g_weaponGripRollDeg's place in kProfileFields
 struct WeaponProfile
 {
@@ -637,12 +654,23 @@ bool ParseWeaponProfileLine(const std::string& line)
     for (int i = 0; i < skip && bar != std::string::npos; ++i)
         bar = rest.find('|', bar + 1);
     WeaponProfile p = g_defaultProfile;
-    for (int i = 0; i < kProfileFieldCount && bar != std::string::npos; ++i)
+    int read = 0;
+    for (; read < kProfileFieldCount && bar != std::string::npos; ++read)
     {
         size_t next = rest.find('|', bar + 1);
-        p.v[i] = static_cast<float>(atof(rest.substr(bar + 1, next - bar - 1).c_str()));
+        p.v[read] = static_cast<float>(atof(rest.substr(bar + 1, next - bar - 1).c_str()));
         bar = next;
     }
+    // A line from before the red dot had its own window: it used the scope lens's.
+    if (read <= kRedDotWindowForwardField)
+    {
+        p.v[kRedDotWindowForwardField] = p.v[kScopeLensForwardField];
+        p.v[kRedDotWindowRadiusField] = p.v[kScopeLensRadiusField];
+    }
+    for (int i = 0; i < kRetiredCount; ++i) // ignored: kept at 0 so it never makes a profile differ
+        for (int f = 0; f < kProfileFieldCount; ++f)
+            if (kProfileFields[f] == &g_retiredProfileSlot[i])
+                p.v[f] = 0.0f;
     g_weaponProfiles[key] = p;
     return true;
 }
@@ -816,14 +844,13 @@ void WriteSettingsFileLocked()
     fprintf(f, "ScopeReticle=%d\n", g_scopeReticle.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "ScopeMagnification=%.2f\n", DefaultProfileValue(&g_scopeMagnification));
     fprintf(f, "ScopeLensPicture=%d\n", g_scopeLensPicture.load(std::memory_order_relaxed) ? 1 : 0);
-    fprintf(f, "ScopeLensRight=%.4f\n", DefaultProfileValue(&g_scopeLensRight));
-    fprintf(f, "ScopeLensUp=%.4f\n", DefaultProfileValue(&g_scopeLensUp));
     fprintf(f, "ScopeLensForward=%.4f\n", DefaultProfileValue(&g_scopeLensForward));
     fprintf(f, "ScopeLensRadius=%.4f\n", DefaultProfileValue(&g_scopeLensRadius));
     fprintf(f, "ScopeNeedsMagnifier=%.0f\n", DefaultProfileValue(&g_scopeNeedsMagnifier));
     fprintf(f, "SightType=%.0f\n", DefaultProfileValue(&g_sightType));
     fprintf(f, "AimRayHidden=%.0f\n", DefaultProfileValue(&g_aimRayHidden));
-    fprintf(f, "RedDotHidesLaser=%d\n", g_redDotHidesLaser.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "RedDotWindowForward=%.4f\n", DefaultProfileValue(&g_redDotWindowForward));
+    fprintf(f, "RedDotWindowRadius=%.4f\n", DefaultProfileValue(&g_redDotWindowRadius));
     fprintf(f, "RedDotSize=%.3f\n", g_redDotSizeDeg.load(std::memory_order_relaxed));
     CapturePlatformLocked();
     fprintf(f, "; MagazinePlatform<n>: in-hand right,up,forward (m), pitch,yaw,roll (deg), hinge (0 straight / 1 hinge),\n"
@@ -857,8 +884,6 @@ void WriteSettingsFileLocked()
     fprintf(f, "GamepadWithoutFocus=%d\n", g_gamepadWithoutFocus.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "SightZeroDistance=%.4f\n", g_sightZeroDistance.load(std::memory_order_relaxed));
     fprintf(f, "SightDotSize=%.4f\n", g_sightDotSizeDeg.load(std::memory_order_relaxed));
-    fprintf(f, "OpticHeight=%.4f\n", DefaultProfileValue(&g_opticHeight));
-    fprintf(f, "OpticWindageOffset=%.4f\n", DefaultProfileValue(&g_opticWindage));
     fprintf(f, "RayDotGreen=%d\n", g_rayDotGreen.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "LaserBeam=%d\n", g_laserBeamEnabled.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "LaserBeamOpacity=%.2f\n", g_laserBeamOpacity.load(std::memory_order_relaxed));
@@ -939,16 +964,23 @@ bool ParseSequenceSetting(const std::string& line, bool (&seen)[kSequenceFieldCo
 }
 
 // The red dot sight's keys (2026-11-22), read ahead of LoadSettings' long else-if chain (the compiler's nesting limit).
+// g_redDotWindowSeen: the ini has the red dot's own window (2026-11-23); without it the default profile's red dot window
+// starts as its scope lens (LoadSettings), which the red dot used until then.
+bool g_redDotWindowSeen = false;
 bool ParseSightSetting(const std::string& line)
 {
     float value = 0.0f;
-    bool boolValue = false;
     if (ParseFloatSetting(line, "SightType", &value))
         g_sightType.store(value, std::memory_order_relaxed);
     else if (ParseFloatSetting(line, "AimRayHidden", &value))
         g_aimRayHidden.store(value, std::memory_order_relaxed);
-    else if (ParseBoolSetting(line, "RedDotHidesLaser", &boolValue))
-        g_redDotHidesLaser.store(boolValue, std::memory_order_relaxed);
+    else if (ParseFloatSetting(line, "RedDotWindowForward", &value))
+    {
+        g_redDotWindowForward.store(value, std::memory_order_relaxed);
+        g_redDotWindowSeen = true;
+    }
+    else if (ParseFloatSetting(line, "RedDotWindowRadius", &value))
+        g_redDotWindowRadius.store(value, std::memory_order_relaxed);
     else if (ParseFloatSetting(line, "RedDotSize", &value))
         g_redDotSizeDeg.store(value, std::memory_order_relaxed);
     else
@@ -1039,6 +1071,7 @@ void LoadSettings()
     std::vector<std::string> profileLines;
     bool twoViewSeen[kPerModeCount] = {};
     bool sequenceSeen[kSequenceFieldCount] = {};
+    g_redDotWindowSeen = false;
     bool layoutSizeSeen = false; // UiLayoutSize, new on 2026-11-22: without it the ini is from before
     char lineBuf[512];
     while (fgets(lineBuf, sizeof(lineBuf), f))
@@ -1238,10 +1271,6 @@ void LoadSettings()
             g_sightZeroDistance.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "SightDotSize", &value))
             g_sightDotSizeDeg.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "OpticHeight", &value))
-            g_opticHeight.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "OpticWindageOffset", &value))
-            g_opticWindage.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "RayDotGreen", &boolValue))
             g_rayDotGreen.store(boolValue, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "LaserBeam", &boolValue))
@@ -1333,10 +1362,6 @@ void LoadSettings()
             g_scopeMagnification.store(value, std::memory_order_relaxed);
         else if (ParseBoolSetting(line, "ScopeLensPicture", &boolValue))
             g_scopeLensPicture.store(boolValue, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "ScopeLensRight", &value))
-            g_scopeLensRight.store(value, std::memory_order_relaxed);
-        else if (ParseFloatSetting(line, "ScopeLensUp", &value))
-            g_scopeLensUp.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "ScopeNeedsMagnifier", &value))
             g_scopeNeedsMagnifier.store(value, std::memory_order_relaxed);
         else if (ParseFloatSetting(line, "ScopeLensForward", &value))
@@ -1382,6 +1407,12 @@ void LoadSettings()
     const auto oldRollArtifact = [](float deg) { return fabsf(deg + 10.0f) < 0.0005f; };
     if (!layoutSizeSeen && oldRollArtifact(g_weaponGripRollDeg.load(std::memory_order_relaxed)))
         g_weaponGripRollDeg.store(0.0f, std::memory_order_relaxed);
+    // An ini from before the red dot had its own window: it starts as the scope lens, which the red dot used.
+    if (!g_redDotWindowSeen)
+    {
+        g_redDotWindowForward.store(g_scopeLensForward.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        g_redDotWindowRadius.store(g_scopeLensRadius.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
     g_defaultProfile = ReadProfileFields();
     g_profileKey.clear();
     g_weaponProfiles.clear();
@@ -2082,19 +2113,14 @@ ScopeSettings GetScopeSettings()
     s.reticle = g_scopeReticle.load(std::memory_order_relaxed);
     s.magnification = g_scopeMagnification.load(std::memory_order_relaxed);
     s.lensPicture = g_scopeLensPicture.load(std::memory_order_relaxed);
-    s.lensRight = g_scopeLensRight.load(std::memory_order_relaxed);
-    s.lensUp = g_scopeLensUp.load(std::memory_order_relaxed);
     s.lensForward = g_scopeLensForward.load(std::memory_order_relaxed);
     s.lensRadius = g_scopeLensRadius.load(std::memory_order_relaxed);
     s.needsMagnifier = g_scopeNeedsMagnifier.load(std::memory_order_relaxed) >= 0.5f;
     s.redDot = g_sightType.load(std::memory_order_relaxed) >= 0.5f;
     s.redDotSizeDeg = g_redDotSizeDeg.load(std::memory_order_relaxed);
+    s.redDotForward = g_redDotWindowForward.load(std::memory_order_relaxed);
+    s.redDotRadius = g_redDotWindowRadius.load(std::memory_order_relaxed);
     return s;
-}
-
-bool GetRedDotHidesLaser()
-{
-    return g_redDotHidesLaser.load(std::memory_order_relaxed);
 }
 
 bool GetAimRayHidden()
@@ -2234,11 +2260,6 @@ float GetSightDotSizeDeg()
     return g_sightDotSizeDeg.load(std::memory_order_relaxed);
 }
 
-void GetOpticOffset(float* height, float* windage)
-{
-    *height = g_opticHeight.load(std::memory_order_relaxed);
-    *windage = g_opticWindage.load(std::memory_order_relaxed);
-}
 
 bool GetRayDotGreen()
 {
@@ -2456,16 +2477,16 @@ const MenuEntry kMenu[] = {
     {"Aim ray (laser)", "Aim ray dot", &g_sightDotEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Aim ray (laser)", "Dot green (off = red)", &g_rayDotGreen, nullptr, 0, 0, 0, 0, ""},
     {"Aim ray (laser)", "Dot size", nullptr, &g_sightDotSizeDeg, 0.05f, 2.0f, 0.05f, 2, "deg"},
-    {"Aim ray (laser)", "Laser beam", &g_laserBeamEnabled, nullptr, 0, 0, 0, 0, ""},
-    {"Aim ray (laser)", "Laser beam opacity", nullptr, &g_laserBeamOpacity, 0.05f, 1.0f, 0.05f, 2, ""},
-    {"Aim ray (laser)", "Laser beam width", nullptr, &g_laserBeamWidthMm, 1.0f, 20.0f, 0.5f, 1, "mm"},
+    {"Aim ray (laser)", "Aim laser", &g_laserBeamEnabled, nullptr, 0, 0, 0, 0, ""},
+    {"Aim ray (laser)", "Aim laser opacity", nullptr, &g_laserBeamOpacity, 0.05f, 1.0f, 0.05f, 2, ""},
+    {"Aim ray (laser)", "Aim laser width", nullptr, &g_laserBeamWidthMm, 1.0f, 20.0f, 0.5f, 1, "mm"},
     {"Aim ray (laser)", "Only while gripping the gun", &g_dotsOnlyWithGrip, nullptr, 0, 0, 0, 0, ""},
     {"Aim ray (laser)", "Max range (dot when nothing's hit)", nullptr, &g_sightZeroDistance, 5.0f, 1000.0f, 5.0f, 0, "m"},
     {"Aim ray (laser)", "Raycast every N frames", nullptr, &g_laserRaycastEveryFrames, 1.0f, 30.0f, 1.0f, 0, ""},
     // SIGHTS (scopes 2026-11-14, the red dot 2026-11-22): engine two-view only. Each gun's own sight is in its profile.
     {"Sights (engine two-view)", "Scoped eye: look through the scope", &g_scopeEyeEnabled, nullptr, 0, 0, 0, 0, "", -1,
      nullptr, nullptr, kRowTwoView},
-    {"Sights (engine two-view)", "Eye box (how close to the sight line)", nullptr, &g_scopeEyeBox, 0.01f, 0.1f, 0.005f, 3,
+    {"Sights (engine two-view)", "Eye box (how close to the zero)", nullptr, &g_scopeEyeBox, 0.01f, 0.1f, 0.005f, 3,
      "m", -1, nullptr, nullptr, kRowTwoView},
     {"Sights (engine two-view)", "Eye relief (how far behind the hand)", nullptr, &g_scopeEyeRelief, 0.1f, 1.0f, 0.01f, 2,
      "m", -1, nullptr, nullptr, kRowTwoView},
@@ -2475,8 +2496,6 @@ const MenuEntry kMenu[] = {
      -1, nullptr, nullptr, kRowTwoView},
     {"Sights (engine two-view)", "Lens picture (screen space, both eyes)", &g_scopeLensPicture, nullptr, 0, 0, 0, 0, "",
      -1, nullptr, nullptr, kRowTwoView},
-    {"Sights (engine two-view)", "Red dot sight hides the laser", &g_redDotHidesLaser, nullptr, 0, 0, 0, 0, "", -1,
-     nullptr, nullptr, kRowTwoView},
     {"Sights (engine two-view)", "Red dot size", nullptr, &g_redDotSizeDeg, 0.02f, 1.0f, 0.01f, 2, "deg", -1, nullptr,
      nullptr, kRowTwoView},
     // The equipped weapon's profile (SetWeaponProfile): the group title names the weapon. Grouped by what they set: the
@@ -2487,20 +2506,22 @@ const MenuEntry kMenu[] = {
     {kProfileGroup, "Controller aim offset up", nullptr, &g_controllerAimUpDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
     {kProfileGroup, "Controller aim offset right", nullptr, &g_controllerAimRightDeg, -10.0f, 10.0f, 0.1f, 1, "deg"},
     {kProfileGroup, "Laser start (forward of the hand)", nullptr, &g_laserStartMeters, 0.0f, 1.5f, 0.01f, 2, "m"},
-    {kProfileGroup, "Shot line start right", nullptr, &g_laserBeamStartRight, -0.3f, 0.3f, 0.005f, 3, "m"},
-    {kProfileGroup, "Shot line start up", nullptr, &g_laserBeamStartUp, -0.3f, 0.3f, 0.005f, 3, "m"},
+    // THE ZERO (2026-11-23, was "Shot line start"): where the shot line starts beside the hand -- the laser, its dot, the
+    // shots, and both sight windows sit on it.
+    {kProfileGroup, "Zero right", nullptr, &g_laserBeamStartRight, -0.3f, 0.3f, 0.005f, 3, "m"},
+    {kProfileGroup, "Zero up", nullptr, &g_laserBeamStartUp, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Aim ray", nullptr, &g_aimRayHidden, 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr, nullptr, kRowBothModes,
      kAimRayChoices, 2},
     {kProfileGroup, "Sight", nullptr, &g_sightType, 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr, nullptr, kRowBothModes,
      kSightTypeChoices, 2},
-    {kProfileGroup, "Optic zero / height (+ up)", nullptr, &g_opticHeight, -0.3f, 0.3f, 0.001f, 3, "m"},
-    {kProfileGroup, "Optic windage (+ right)", nullptr, &g_opticWindage, -0.3f, 0.3f, 0.001f, 3, "m"},
+    // Both windows sit on the zero (2026-11-23): only their distance along it and their size.
+    {kProfileGroup, "Red dot window forward (along the zero)", nullptr, &g_redDotWindowForward, -0.2f, 0.5f, 0.005f, 3,
+     "m"},
+    {kProfileGroup, "Red dot window radius", nullptr, &g_redDotWindowRadius, 0.005f, 0.05f, 0.001f, 3, "m"},
     {kProfileGroup, "Scope magnification (0 = no scope)", nullptr, &g_scopeMagnification, 0.0f, 30.0f, 0.25f, 2, "x"},
     {kProfileGroup, "Scope shows", nullptr, &g_scopeNeedsMagnifier, 0.0f, 1.0f, 1.0f, 0, "", -1, nullptr, nullptr,
      kRowBothModes, kScopeShowChoices, 2},
-    {kProfileGroup, "Scope lens right (from the optic zero)", nullptr, &g_scopeLensRight, -0.1f, 0.1f, 0.001f, 3, "m"},
-    {kProfileGroup, "Scope lens up (from the optic zero)", nullptr, &g_scopeLensUp, -0.1f, 0.1f, 0.001f, 3, "m"},
-    {kProfileGroup, "Scope lens forward (from the hand)", nullptr, &g_scopeLensForward, -0.2f, 0.5f, 0.005f, 3, "m"},
+    {kProfileGroup, "Scope lens forward (along the zero)", nullptr, &g_scopeLensForward, -0.2f, 0.5f, 0.005f, 3, "m"},
     {kProfileGroup, "Scope lens radius", nullptr, &g_scopeLensRadius, 0.005f, 0.05f, 0.001f, 3, "m"},
     {kProfileGroup, "Secondary grip offset right", nullptr, &g_secondaryGripRight, -0.3f, 0.3f, 0.005f, 3, "m"},
     {kProfileGroup, "Secondary grip offset up", nullptr, &g_secondaryGripUp, -0.3f, 0.3f, 0.005f, 3, "m"},
