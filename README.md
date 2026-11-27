@@ -6,7 +6,7 @@ from inside the game: stereo rendering at the headset's real field of view, head
 controllers for aiming, a gun held in your hand, arms that follow your hands, manual magazine reloads, body holsters,
 and an in-headset settings menu.
 
-**Status: v1.5, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
+**Status: v1.52, a hobby reverse-engineering project.** It's playable, but there are rough edges and the campaign
 hasn't been played all the way through yet; see [Known issues](#known-issues).
 
 ## Requirements
@@ -263,8 +263,10 @@ aim uses the controller's tip instead of your palm), and "Thumb tap - left / rig
   and switch automatically with the weapon in your hand (picked-up weapons included). The settings menu's "Weapon
   profile: <weapon>" section edits the weapon you're holding; a weapon you haven't set up yet starts from the default
   values, which are also used when no weapon is held. The mod ships with profiles for the weapons used so far (AK-103,
-  AKM, OBR 5.56, OBR 7.62, AKS-74U, HK416, Mk18, PKP, HK45C, MP7, TAC-300). The campaign hasn't been played all the way through yet, so later
-  weapons have no profile and use the defaults until you set them up.
+  AKM, OBR 5.56, OBR 7.62, AKS-74U (both versions), HK416, Mk18, SCAR-H, PKP, MG4, HK45C, P226, MP7, TAC-300, and the
+  M67 grenade; v1.52 added the SCAR-H, MG4, the second AKS-74U and the P226, and set up more of the rifles' optics).
+  The campaign hasn't been played all the way through yet, so later weapons have no profile and use the defaults until
+  you set them up.
 
 ### Driving missions
 The game runs its driving missions in a separate executable (`game\MOHWD.exe`, see [Installing](#installing)); the
@@ -442,6 +444,19 @@ doesn't count. With Virtual Desktop, start SteamVR from Virtual Desktop first.
 If, with the logs on, `mohwvr_startup.log` doesn't exist in either place, the DLL never loaded: check that `dxgi.dll` is
 next to `MOHW.exe`. When reporting a problem, include that log along with `mohwvr_proxy.log`, `mohwvr_master.log` and
 `mohwvr_openvr_direct.log`.
+
+**The motion controllers track but don't move or fire anything in the game** (new in v1.52's logs): the game isn't
+reading the mod's virtual gamepad. Two causes so far:
+- **The game window doesn't have keyboard focus** (Virtual Desktop, SteamVR's desktop window or another program has
+  it): the game only reads its gamepad while focused. Click the game's window, or turn on Controls > "Controllers work
+  without window focus". `mohwvr_xinput.log` logs every change of focus and which program took it.
+- **Another controller plugged in** (a wheel, joystick or pedals) was taken by the game as its gamepad. Controls >
+  "Hide other game controllers (wheels, joysticks)" (on by default) hides them while SteamVR runs; restart the game after
+  changing it. `mohwvr_dinput.log` lists every controller found and which were hidden.
+
+`mohwvr_xinput.log` also shows "the game's first poll of XInput slot 0" once the game reads the gamepad at all. The
+Quest / Index controllers never appear in Windows' own controller list (joy.cpl): the mod's gamepad exists only inside
+the game.
 
 For Steam Link "vrlink driver" errors at launch or exit, see [Known issues](#known-issues); `C:\Steam\logs\driver_vrlink.txt`
 (under your Steam folder) shows whether the stream reset.
