@@ -446,6 +446,7 @@ std::atomic<bool> g_dotsOnlyWithGrip{kDefaultDotsOnlyWithGrip};
 std::atomic<bool> g_gripDoubleTapBumpers{false}; // openvr_direct/vr_input.cpp UpdateGripGesture (off by default 2026-11-23)
 std::atomic<bool> g_thumbTapBumpers{true};      // openvr_direct/vr_input.cpp UpdateThumbTap
 std::atomic<bool> g_gamepadWithoutFocus{false}; // hooks/xinput_hook.cpp GamepadFocusOnPresent
+std::atomic<bool> g_hideOtherGameControllers{true}; // hooks/dinput_filter.h (2026-11-27)
 std::atomic<float> g_sightZeroDistance{kDefaultSightZeroDistance};
 std::atomic<float> g_sightDotSizeDeg{kDefaultSightDotSizeDeg};
 // RETIRED PROFILE PLACES: settings removed from the weapon profiles, their places kept so saved lines keep their order.
@@ -882,6 +883,7 @@ void WriteSettingsFileLocked()
     fprintf(f, "GripDoubleTapBumpers=%d\n", g_gripDoubleTapBumpers.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "ThumbTapBumpers=%d\n", g_thumbTapBumpers.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "GamepadWithoutFocus=%d\n", g_gamepadWithoutFocus.load(std::memory_order_relaxed) ? 1 : 0);
+    fprintf(f, "HideOtherGameControllers=%d\n", g_hideOtherGameControllers.load(std::memory_order_relaxed) ? 1 : 0);
     fprintf(f, "SightZeroDistance=%.4f\n", g_sightZeroDistance.load(std::memory_order_relaxed));
     fprintf(f, "SightDotSize=%.4f\n", g_sightDotSizeDeg.load(std::memory_order_relaxed));
     fprintf(f, "RayDotGreen=%d\n", g_rayDotGreen.load(std::memory_order_relaxed) ? 1 : 0);
@@ -963,13 +965,15 @@ bool ParseSequenceSetting(const std::string& line, bool (&seen)[kSequenceFieldCo
     return false;
 }
 
-// The red dot sight's keys (2026-11-22), read ahead of LoadSettings' long else-if chain (the compiler's nesting limit).
+// The red dot sight's keys (2026-11-22), and HideOtherGameControllers (2026-11-27), read ahead of LoadSettings' long
+// else-if chain (the compiler's nesting limit).
 // g_redDotWindowSeen: the ini has the red dot's own window (2026-11-23); without it the default profile's red dot window
 // starts as its scope lens (LoadSettings), which the red dot used until then.
 bool g_redDotWindowSeen = false;
 bool ParseSightSetting(const std::string& line)
 {
     float value = 0.0f;
+    bool boolValue = false;
     if (ParseFloatSetting(line, "SightType", &value))
         g_sightType.store(value, std::memory_order_relaxed);
     else if (ParseFloatSetting(line, "AimRayHidden", &value))
@@ -983,6 +987,8 @@ bool ParseSightSetting(const std::string& line)
         g_redDotWindowRadius.store(value, std::memory_order_relaxed);
     else if (ParseFloatSetting(line, "RedDotSize", &value))
         g_redDotSizeDeg.store(value, std::memory_order_relaxed);
+    else if (ParseBoolSetting(line, "HideOtherGameControllers", &boolValue))
+        g_hideOtherGameControllers.store(boolValue, std::memory_order_relaxed);
     else
         return false;
     return true;
@@ -2245,6 +2251,11 @@ bool GetGamepadWithoutFocus()
     return g_gamepadWithoutFocus.load(std::memory_order_relaxed);
 }
 
+bool GetHideOtherGameControllers()
+{
+    return g_hideOtherGameControllers.load(std::memory_order_relaxed);
+}
+
 bool GetGripDoubleTapBumpers()
 {
     return g_gripDoubleTapBumpers.load(std::memory_order_relaxed);
@@ -2473,6 +2484,7 @@ const MenuEntry kMenu[] = {
     {"Controls", "Thumbrest double-tap = LB / RB", &g_thumbTapBumpers, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "Grip double-tap = LB / RB (no thumbrest)", &g_gripDoubleTapBumpers, nullptr, 0, 0, 0, 0, ""},
     {"Controls", "Controllers work without window focus", &g_gamepadWithoutFocus, nullptr, 0, 0, 0, 0, ""},
+    {"Controls", "Hide other game controllers (wheels, joysticks)", &g_hideOtherGameControllers, nullptr, 0, 0, 0, 0, ""},
     // The laser: drawing only (hooks/laser_raycast.cpp keeps casting whatever these say, the shots follow it).
     {"Aim ray (laser)", "Aim ray dot", &g_sightDotEnabled, nullptr, 0, 0, 0, 0, ""},
     {"Aim ray (laser)", "Dot green (off = red)", &g_rayDotGreen, nullptr, 0, 0, 0, 0, ""},

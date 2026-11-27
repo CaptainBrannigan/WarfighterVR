@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <Xinput.h> // types only -- nothing from xinput is linked, the real function is reached through the hook
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -43,9 +44,16 @@ SHORT ToThumb(float value)
     return static_cast<SHORT>(lroundf(value * 32767.0f));
 }
 
+// DIAGNOSTICS (2026-11-27, a tester whose game never polled slot 0): the first poll of each slot is logged, whatever the
+// rest of this does with it, so a log shows whether the game reads XInput at all.
+std::atomic<bool> g_slotPolled[XUSER_MAX_COUNT] = {};
+
 DWORD WINAPI Hooked(DWORD userIndex, XINPUT_STATE* state)
 {
     DWORD result = g_original(userIndex, state);
+    if (userIndex < XUSER_MAX_COUNT && !g_slotPolled[userIndex].exchange(true, std::memory_order_relaxed))
+        MOHW_LOG(kLogFile, "the game's first poll of XInput slot %lu (a real pad there: %s)", userIndex,
+                 result == ERROR_SUCCESS ? "yes" : "no");
     if (userIndex != 0 || !state)
         return result;
 
@@ -238,10 +246,53 @@ bool WriteFocusOverride(uintptr_t object, uint32_t field, uint8_t value)
 
 uintptr_t g_focusOverrideSetOn = 0; // Present thread: the ClientSettings whose byte this set, 0 = none
 
+// DIAGNOSTICS (2026-11-27): the game only polls its gamepad while its window has keyboard focus (unless
+// GamepadWithoutFocus), so every change of whether a window of this process is the foreground one is logged, with the
+// process that has it otherwise (Virtual Desktop, SteamVR's window, a browser). Checked every half second.
+void LogFocusChanges()
+{
+    static unsigned long long nextMs = 0;
+    static int last = -1;
+    const unsigned long long now = GetTickCount64();
+    if (now < nextMs)
+        return;
+    nextMs = now + 500;
+    DWORD pid = 0;
+    HWND foreground = GetForegroundWindow();
+    if (foreground)
+        GetWindowThreadProcessId(foreground, &pid);
+    const int focused = pid == GetCurrentProcessId() ? 1 : 0;
+    if (focused == last)
+        return;
+    last = focused;
+    if (focused)
+    {
+        MOHW_LOG(kLogFile, "game window has keyboard focus (the game reads its gamepad)");
+        return;
+    }
+    char name[MAX_PATH] = "(none)";
+    if (pid)
+        if (HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid))
+        {
+            DWORD size = sizeof(name);
+            if (QueryFullProcessImageNameA(process, 0, name, &size))
+            {
+                const char* slash = strrchr(name, '\\');
+                if (slash)
+                    memmove(name, slash + 1, strlen(slash));
+            }
+            CloseHandle(process);
+        }
+    MOHW_LOG(kLogFile, "game window LOST keyboard focus, to %s (pid %lu): the game doesn't read its gamepad %s", name, pid,
+             GetGamepadWithoutFocus() ? "-- except that \"Controllers work without window focus\" is on"
+                                      : "until it's back (or \"Controllers work without window focus\" is on)");
+}
+
 } // namespace
 
 void GamepadFocusOnPresent()
 {
+    LogFocusChanges();
     const bool want = GetGamepadWithoutFocus();
     if (!g_hookAddress || (!want && !g_focusOverrideSetOn))
         return;

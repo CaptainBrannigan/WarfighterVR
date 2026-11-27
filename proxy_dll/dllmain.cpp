@@ -26,6 +26,7 @@
 #include "../hooks/engine_function_hook.h"
 #include "../hooks/aiming_controller_hook.h"
 #include "../hooks/xinput_hook.h"
+#include "../hooks/dinput_filter.h"
 #include "../hooks/weapon_sway_patch.h"
 #include "../hooks/weapon_identity.h"
 #include "../hooks/master_switch.h"
@@ -231,6 +232,8 @@ void EnsureInitialized()
                 return;
             }
             mohw::LoadSettings();
+            if (!mohw::InstallDirectInputFilter()) // hooks/dinput_filter.h, as in MOHW.exe below
+                MOHW_LOG(kLogFile, "InstallDirectInputFilter FAILED -- see mohwvr_dinput.log");
             // MASTER SWITCH: nothing is hooked until a headset is detected -- see hooks/master_switch.h. Not before the
             // game is up (2026-10-16): live, MOHWD.exe crashed at startup in its own window procedure, on the
             // WM_NCHITTEST a new window gets under the cursor, reading a still-null object (+0x60) -- the switch's
@@ -268,6 +271,12 @@ void EnsureInitialized()
         // Loads mohwvr_settings.ini (FOV/IPD scale today) before any hook
         // that reads them installs -- see sdk/settings.h.
         mohw::LoadSettings();
+
+        // Other game controllers hidden from the game's DirectInput (hooks/dinput_filter.h): ahead of the master
+        // switch, since the game may only look for controllers at startup. It only hides anything while SteamVR is
+        // running or the mod is on.
+        if (!mohw::InstallDirectInputFilter())
+            MOHW_LOG(kLogFile, "InstallDirectInputFilter FAILED -- see mohwvr_dinput.log");
 
         // MASTER SWITCH: nothing is hooked until a headset is detected; then InstallGameHooks runs, for the rest of
         // the session -- see hooks/master_switch.h.

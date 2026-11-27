@@ -95,6 +95,7 @@
     <ClCompile Include="..\hooks\engine_function_hook.cpp" />
     <ClCompile Include="..\hooks\aiming_controller_hook.cpp" />
     <ClCompile Include="..\hooks\xinput_hook.cpp" />
+    <ClCompile Include="..\hooks\dinput_filter.cpp" />
     <ClCompile Include="..\hooks\weapon_sway_patch.cpp" />
     <ClCompile Include="..\hooks\weapon_identity.cpp" />
     <ClCompile Include="..\hooks\master_switch.cpp" />
@@ -159,6 +160,7 @@
     <ClInclude Include="..\hooks\engine_function_hook.h" />
     <ClInclude Include="..\hooks\aiming_controller_hook.h" />
     <ClInclude Include="..\hooks\xinput_hook.h" />
+    <ClInclude Include="..\hooks\dinput_filter.h" />
     <ClInclude Include="..\hooks\weapon_sway_patch.h" />
     <ClInclude Include="..\hooks\weapon_identity.h" />
     <ClInclude Include="..\hooks\master_switch.h" />

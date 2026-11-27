@@ -500,6 +500,10 @@ bool GetThumbTapBumpers();
 // ClientSettings.UseGlobalGamePadInput held on (hooks/xinput_hook.cpp GamepadFocusOnPresent). Both executables.
 // GamepadWithoutFocus, default off (2026-11-22, the user: "default to off for now").
 bool GetGamepadWithoutFocus();
+// The game's DirectInput sees no game controllers (wheels, joysticks, pedals, DirectInput gamepads) while SteamVR is
+// running or the mod is on, so the virtual gamepad is the only one it can take (hooks/dinput_filter.h). Read at every
+// enumeration the game makes. HideOtherGameControllers, default on (2026-11-27).
+bool GetHideOtherGameControllers();
 
 // Controller aim offset (sdk/motion_controller_aim.h ApplyControllerAimOffset), degrees in the controller's own frame:
 // + up, + right. Turns the shots and the aim-ray dot, not the gun. ControllerAimUp /

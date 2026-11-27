@@ -327,8 +327,14 @@ All of it is in the settings menu's **Driving** section; "Steering wheel (hold g
 ### Controls
 The game reads a gamepad only while its window has keyboard focus. If the sticks and buttons are dead until you click
 the game's window, turn on Controls > "Controllers work without window focus" (off by default, 2026-11-22, untested in
-game; driving missions too). It doesn't cover holsters, whose key presses still need the window focused, or another
-controller the game has picked as its gamepad.
+game; driving missions too). It doesn't cover holsters, whose key presses still need the window focused.
+
+**Other controllers plugged in** (a steering wheel, a joystick, pedals) could be taken by the game as its gamepad
+instead of the motion controllers, which then did nothing. With Controls > "Hide other game controllers (wheels,
+joysticks)" on (the default), the game can't see them while SteamVR is running, so the motion controllers are the only
+gamepad it finds. The keyboard and mouse are untouched, and a real Xbox pad still works alongside the motion
+controllers. Turn it off to use a wheel in the game; the game may only look for controllers when it starts, so restart
+it after changing this. `mohwvr_dinput.log` lists the controllers the game saw and which were hidden.
 
 The controllers drive a virtual Xbox gamepad, so the game itself maps buttons to actions in every context (on foot,
 vehicles, the Apache, menus). Default layout:
